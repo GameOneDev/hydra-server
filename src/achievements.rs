@@ -128,6 +128,33 @@ pub async fn sync(
     }
 }
 
+/// GET /profile/stats/{userId} — achievement-count fallback.
+///
+/// The official API only computes profile achievement totals for
+/// subscribers; launchers fill the gap from the achievements synced here.
+/// Returns null when the user has no achievement data on this server so
+/// clients don't render a misleading zero.
+pub async fn user_stats(
+    State(state): State<AppState>,
+    _viewer: CurrentUser,
+    Path(user_id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let row: Option<(i64, i64)> = sqlx::query_as(
+        "SELECT COUNT(*), COALESCE(SUM(json_array_length(achievements)), 0)
+         FROM game_achievements WHERE user_id = ?",
+    )
+    .bind(&user_id)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    let sum = match row {
+        Some((games, sum)) if games > 0 => Some(sum),
+        _ => None,
+    };
+
+    Ok(Json(json!({ "unlockedAchievementSum": sum })))
+}
+
 /// DELETE /profile/games/achievements/{remoteGameId} — achievement reset.
 pub async fn reset(
     State(state): State<AppState>,
