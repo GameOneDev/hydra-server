@@ -87,6 +87,61 @@ pub async fn presign(
     })))
 }
 
+/// GET /profile/banners/{userId} — banner fallback lookup.
+///
+/// Launchers call this when a profile fetched from the official API has no
+/// banner: free accounts' banners are stored only on this server, so anyone
+/// on the same server can still see them. Requires a valid launcher login
+/// (any user of this server may look up any other user's banner — banners
+/// are public-facing anyway).
+pub async fn get_banner(
+    State(state): State<AppState>,
+    _viewer: CurrentUser,
+    Path(user_id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let banner_key: Option<String> =
+        sqlx::query_scalar("SELECT banner_key FROM users WHERE id = ?")
+            .bind(&user_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .flatten();
+
+    let url = banner_key.map(|key| {
+        format!(
+            "{}/{}",
+            state.config.public_url,
+            key.trim_start_matches('/')
+        )
+    });
+
+    Ok(Json(json!({ "backgroundImageUrl": url })))
+}
+
+/// DELETE /profile/banner — mirrors banner removal so the fallback lookup
+/// doesn't resurrect a banner the user deleted.
+pub async fn delete_banner(
+    State(state): State<AppState>,
+    user: CurrentUser,
+) -> ApiResult<Json<Value>> {
+    let banner_key: Option<String> =
+        sqlx::query_scalar("SELECT banner_key FROM users WHERE id = ?")
+            .bind(&user.0.id)
+            .fetch_optional(&state.pool)
+            .await?
+            .flatten();
+
+    sqlx::query("UPDATE users SET banner_key = NULL WHERE id = ?")
+        .bind(&user.0.id)
+        .execute(&state.pool)
+        .await?;
+
+    if let Some(key) = banner_key {
+        storage::delete_object(&state, &key).await;
+    }
+
+    Ok(Json(json!({ "ok": true })))
+}
+
 /// GET /images/{*path} — public, so profile banners/avatars saved to the
 /// official profile render for everyone who views it.
 pub async fn serve(

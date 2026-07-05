@@ -134,6 +134,8 @@ fn router(_state: AppState) -> Router<AppState> {
             post(emulation::download_url),
         )
         .route("/presigned-urls/{type}", post(images::presign))
+        .route("/profile/banners/{user_id}", get(images::get_banner))
+        .route("/profile/banner", delete(images::delete_banner))
         .route("/images/{*path}", get(images::serve))
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024));
 

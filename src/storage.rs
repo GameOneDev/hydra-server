@@ -150,6 +150,31 @@ pub async fn upload(
 async fn finalize_upload(state: &AppState, key: &str, written: u64) -> ApiResult<()> {
     let now = Utc::now().to_rfc3339();
 
+    /* Banner uploads become the user's current banner; the previous file is
+       deleted so banners don't accumulate. */
+    if let Some(rest) = key.strip_prefix("images/banners/") {
+        if let Some((user_id, _file)) = rest.split_once('/') {
+            let old_key: Option<String> =
+                sqlx::query_scalar("SELECT banner_key FROM users WHERE id = ?")
+                    .bind(user_id)
+                    .fetch_optional(&state.pool)
+                    .await?
+                    .flatten();
+
+            sqlx::query("UPDATE users SET banner_key = ? WHERE id = ?")
+                .bind(key)
+                .bind(user_id)
+                .execute(&state.pool)
+                .await?;
+
+            if let Some(old_key) = old_key {
+                if old_key != key {
+                    delete_object(state, &old_key).await;
+                }
+            }
+        }
+    }
+
     if let Some(id) = key
         .strip_prefix("artifacts/")
         .and_then(|rest| rest.strip_suffix(".tar"))
