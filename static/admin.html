@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Hydra Server Admin</title>
+<style>
+  :root {
+    --bg: #14141a; --panel: #1c1c24; --panel-2: #23232e;
+    --text: #e6e6ec; --muted: #8f8f9f; --accent: #7c6bff;
+    --danger: #ff5c6c; --ok: #4cd07d; --border: #2e2e3a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 24px 16px 64px; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
+  header h1 { font-size: 18px; margin: 0; }
+  header .spacer { flex: 1; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .card .value { font-size: 22px; font-weight: 600; margin-top: 4px; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; background: var(--panel-2); }
+  tr:last-child td { border-bottom: none; }
+  tr.clickable { cursor: pointer; }
+  tr.clickable:hover td { background: var(--panel-2); }
+  .avatar { width: 26px; height: 26px; border-radius: 50%; background: var(--panel-2); object-fit: cover; vertical-align: middle; margin-right: 8px; }
+  button {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 7px; padding: 6px 12px; cursor: pointer; font: inherit; font-size: 13px;
+  }
+  button:hover { border-color: var(--accent); }
+  button.danger { color: var(--danger); }
+  button.danger:hover { border-color: var(--danger); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 12px; }
+  .pill.ok { background: rgba(76, 208, 125, .12); color: var(--ok); }
+  .pill.bad { background: rgba(255, 92, 108, .12); color: var(--danger); }
+  .muted { color: var(--muted); }
+  #login { max-width: 340px; margin: 18vh auto 0; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 28px; }
+  #login h1 { margin: 0 0 16px; font-size: 18px; }
+  #login input {
+    width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); font: inherit; margin-bottom: 12px;
+  }
+  #login button { width: 100%; padding: 10px; }
+  .error { color: var(--danger); font-size: 13px; min-height: 18px; margin-bottom: 8px; }
+  .section-title { margin: 28px 0 10px; font-size: 15px; }
+  #detail { display: none; }
+  .back { color: var(--accent); cursor: pointer; background: none; border: none; padding: 0; font-size: 14px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div id="login" class="hidden">
+  <h1>Hydra Server Admin</h1>
+  <div class="error" id="login-error"></div>
+  <input id="password" type="password" placeholder="Admin password" autofocus />
+  <button class="primary" id="login-btn">Sign in</button>
+</div>
+
+<div class="wrap hidden" id="app">
+  <header>
+    <h1>Hydra Server Admin</h1>
+    <span class="muted" id="public-url"></span>
+    <div class="spacer"></div>
+    <button id="logout-btn">Log out</button>
+  </header>
+
+  <div id="dashboard">
+    <div class="cards" id="cards"></div>
+    <h2 class="section-title">Users</h2>
+    <table>
+      <thead><tr>
+        <th>User</th><th>Backups</th><th>Emu saves</th><th>Storage used</th>
+        <th>Last seen</th><th>Status</th><th></th>
+      </tr></thead>
+      <tbody id="users"></tbody>
+    </table>
+  </div>
+
+  <div id="detail">
+    <button class="back" id="back-btn">&larr; Back to users</button>
+    <h2 class="section-title" id="detail-title"></h2>
+    <h3 class="section-title">Cloud save backups</h3>
+    <table>
+      <thead><tr>
+        <th>Game</th><th>Label</th><th>Size</th><th>Host</th><th>Frozen</th><th>Created</th><th></th>
+      </tr></thead>
+      <tbody id="artifacts"></tbody>
+    </table>
+    <h3 class="section-title">Emulation saves</h3>
+    <table>
+      <thead><tr>
+        <th>Platform</th><th>Emulator</th><th>File</th><th>Size</th><th>Updated</th><th></th>
+      </tr></thead>
+      <tbody id="saves"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let currentUser = null;
+
+const fmtBytes = (n) => {
+  if (!n) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(units.length - 1, Math.floor(Math.log2(n) / 10));
+  return (n / 2 ** (10 * i)).toFixed(i ? 1 : 0) + " " + units[i];
+};
+const fmtDate = (iso) => iso ? new Date(iso).toLocaleString() : "—";
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  if (res.status === 401) { showLogin(); throw new Error("unauthorized"); }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.message || res.statusText);
+  }
+  return res.json();
+}
+
+function showLogin() {
+  $("login").classList.remove("hidden");
+  $("app").classList.add("hidden");
+}
+
+async function showApp() {
+  $("login").classList.add("hidden");
+  $("app").classList.remove("hidden");
+  await Promise.all([loadOverview(), loadUsers()]);
+}
+
+async function loadOverview() {
+  const data = await api("/admin/api/overview");
+  $("public-url").textContent = data.publicUrl;
+  const quota = data.maxBytesPerUser ? fmtBytes(data.maxBytesPerUser) : "unlimited";
+  $("cards").innerHTML = [
+    ["Users", data.userCount],
+    ["Save backups", data.artifactCount],
+    ["Emulation saves", data.emulationSaveCount],
+    ["Total storage", fmtBytes(data.totalBytes)],
+    ["Per-user quota", quota],
+    ["Backups per game", data.backupsPerGameLimit],
+  ].map(([label, value]) =>
+    `<div class="card"><div class="label">${label}</div><div class="value">${value}</div></div>`
+  ).join("");
+}
+
+async function loadUsers() {
+  const users = await api("/admin/api/users");
+  $("users").innerHTML = users.map((u) => `
+    <tr class="clickable" data-id="${esc(u.id)}" data-name="${esc(u.displayName)}">
+      <td>
+        ${u.profileImageUrl ? `<img class="avatar" src="${esc(u.profileImageUrl)}" alt="" />` : ""}
+        <strong>${esc(u.displayName)}</strong>
+        <span class="muted">${u.username ? "@" + esc(u.username) : ""}</span>
+      </td>
+      <td>${u.artifactCount}</td>
+      <td>${u.emulationSaveCount}</td>
+      <td>${fmtBytes(u.totalBytes)}</td>
+      <td class="muted">${fmtDate(u.lastSeenAt)}</td>
+      <td>${u.isBlocked ? '<span class="pill bad">blocked</span>' : '<span class="pill ok">active</span>'}</td>
+      <td style="white-space:nowrap">
+        <button data-action="block" data-blocked="${u.isBlocked}">${u.isBlocked ? "Unblock" : "Block"}</button>
+        <button class="danger" data-action="delete">Delete data</button>
+      </td>
+    </tr>
+  `).join("") || '<tr><td colspan="7" class="muted">No users yet — they appear after the first launcher request.</td></tr>';
+}
+
+$("users").addEventListener("click", async (event) => {
+  const row = event.target.closest("tr[data-id]");
+  if (!row) return;
+  const id = row.dataset.id;
+  const action = event.target.dataset.action;
+
+  if (action === "block") {
+    event.stopPropagation();
+    await api(`/admin/api/users/${id}/block`, {
+      method: "POST",
+      body: JSON.stringify({ blocked: event.target.dataset.blocked !== "true" }),
+    });
+    return loadUsers();
+  }
+  if (action === "delete") {
+    event.stopPropagation();
+    if (!confirm(`Delete ALL server data (backups, saves, achievements) for ${row.dataset.name}?`)) return;
+    await api(`/admin/api/users/${id}`, { method: "DELETE" });
+    return Promise.all([loadOverview(), loadUsers()]);
+  }
+  openUser(id, row.dataset.name);
+});
+
+async function openUser(id, name) {
+  currentUser = id;
+  const data = await api(`/admin/api/users/${id}`);
+  $("dashboard").style.display = "none";
+  $("detail").style.display = "block";
+  $("detail-title").textContent = name;
+
+  $("artifacts").innerHTML = data.artifacts.map((a) => `
+    <tr>
+      <td>${esc(a.shop)}/${esc(a.objectId)}</td>
+      <td>${esc(a.label || "—")}</td>
+      <td>${fmtBytes(a.sizeBytes)}${a.isUploaded ? "" : ' <span class="pill bad">pending</span>'}</td>
+      <td class="muted">${esc(a.hostname)}</td>
+      <td>${a.isFrozen ? "🧊" : ""}</td>
+      <td class="muted">${fmtDate(a.createdAt)}</td>
+      <td style="white-space:nowrap">
+        <button data-download="${esc(a.id)}">Download</button>
+        <button class="danger" data-del-artifact="${esc(a.id)}">Delete</button>
+      </td>
+    </tr>
+  `).join("") || '<tr><td colspan="7" class="muted">No backups.</td></tr>';
+
+  $("saves").innerHTML = data.emulationSaves.map((s) => `
+    <tr>
+      <td>${esc(s.platform)}</td>
+      <td>${esc(s.emulator)}</td>
+      <td>${esc(s.fileName || s.label || "—")}</td>
+      <td>${fmtBytes(s.sizeBytes)}</td>
+      <td class="muted">${fmtDate(s.updatedAt)}</td>
+      <td><button class="danger" data-del-save="${esc(s.id)}">Delete</button></td>
+    </tr>
+  `).join("") || '<tr><td colspan="6" class="muted">No emulation saves.</td></tr>';
+}
+
+$("detail").addEventListener("click", async (event) => {
+  const download = event.target.dataset.download;
+  const delArtifact = event.target.dataset.delArtifact;
+  const delSave = event.target.dataset.delSave;
+
+  if (download) window.open(`/admin/api/artifacts/${download}/download`, "_blank");
+  if (delArtifact && confirm("Delete this backup?")) {
+    await api(`/admin/api/artifacts/${delArtifact}`, { method: "DELETE" });
+    openUser(currentUser, $("detail-title").textContent);
+    loadOverview();
+  }
+  if (delSave && confirm("Delete this emulation save?")) {
+    await api(`/admin/api/emulation-saves/${delSave}`, { method: "DELETE" });
+    openUser(currentUser, $("detail-title").textContent);
+    loadOverview();
+  }
+});
+
+$("back-btn").addEventListener("click", () => {
+  $("detail").style.display = "none";
+  $("dashboard").style.display = "block";
+  loadUsers();
+});
+
+$("login-btn").addEventListener("click", doLogin);
+$("password").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") doLogin();
+});
+
+async function doLogin() {
+  $("login-error").textContent = "";
+  try {
+    await api("/admin/api/login", {
+      method: "POST",
+      body: JSON.stringify({ password: $("password").value }),
+    });
+    await showApp();
+  } catch (err) {
+    $("login-error").textContent = err.message;
+  }
+}
+
+$("logout-btn").addEventListener("click", async () => {
+  await api("/admin/api/logout", { method: "POST" }).catch(() => {});
+  showLogin();
+});
+
+/* Try an authenticated call; fall back to the login screen. */
+api("/admin/api/overview").then(showApp).catch(showLogin);
+</script>
+</body>
+</html>

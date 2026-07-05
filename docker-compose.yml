@@ -1,0 +1,17 @@
+services:
+  hydra-server:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8788:8788"
+    environment:
+      HYDRA_SERVER_PUBLIC_URL: ${HYDRA_SERVER_PUBLIC_URL:-http://localhost:8788}
+      HYDRA_ADMIN_PASSWORD: ${HYDRA_ADMIN_PASSWORD:?set HYDRA_ADMIN_PASSWORD in .env}
+      HYDRA_MAX_BYTES_PER_USER: ${HYDRA_MAX_BYTES_PER_USER:-0}
+      HYDRA_BACKUPS_PER_GAME_LIMIT: ${HYDRA_BACKUPS_PER_GAME_LIMIT:-100}
+      HYDRA_ALLOWED_USERS: ${HYDRA_ALLOWED_USERS:-}
+    volumes:
+      - hydra-data:/data
+
+volumes:
+  hydra-data:
