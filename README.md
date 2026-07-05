@@ -17,6 +17,7 @@ and download sources browsing all work exactly as before.
 | Emulation memory-card saves (PS1/PS2) | **this server** |
 | Achievement sync across devices | **this server** |
 | Download source list sync across devices | **this server** |
+| Profile banner image hosting | **this server** (URL saved to the official profile) |
 | Admin panel (users, storage, quotas) | **this server** at `/admin` |
 
 ## How authentication works
@@ -84,6 +85,8 @@ Implements the endpoints the launcher routes to a self-hosted cloud server:
 - `GET|POST|DELETE /profile/download-sources`
 - `GET /profile/emulation-saves`, `POST /profile/emulation-saves/upload-url`,
   `POST …/{id}/commit`, `POST …/{id}/download-url`, `PUT|DELETE …/{id}`
+- `POST /presigned-urls/{background-image|profile-image}` — profile image
+  uploads; images are served publicly from `GET /images/…`
 - `PUT|GET /storage/{token}` — S3-style presigned upload/download URLs
   (signed, short-lived, streamed to/from disk)
 - `GET /health`

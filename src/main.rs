@@ -5,6 +5,7 @@ mod auth;
 mod config;
 mod emulation;
 mod error;
+mod images;
 mod sources;
 mod state;
 mod storage;
@@ -132,6 +133,8 @@ fn router(_state: AppState) -> Router<AppState> {
             "/profile/emulation-saves/{id}/download-url",
             post(emulation::download_url),
         )
+        .route("/presigned-urls/{type}", post(images::presign))
+        .route("/images/{*path}", get(images::serve))
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024));
 
     Router::new()
