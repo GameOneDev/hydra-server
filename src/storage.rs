@@ -1,7 +1,7 @@
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::Response;
 use chrono::Utc;
@@ -95,10 +95,25 @@ pub async fn delete_object(state: &AppState, key: &str) {
     }
 }
 
-/// PUT /storage/{token} — streams the request body to disk.
+#[derive(Deserialize)]
+pub struct UploadQuery {
+    /// Byte offset this request's body starts at (chunked uploads).
+    pub offset: Option<u64>,
+    /// Total size of the object being uploaded (chunked uploads).
+    pub total: Option<u64>,
+}
+
+/// PUT /storage/{token}[?offset=&total=] — streams the request body to disk.
+///
+/// Without query params the whole object is expected in a single request.
+/// With `offset`/`total` the launcher uploads sequential chunks kept small
+/// enough to pass proxies that cap request bodies (Cloudflare caps them at
+/// 100 MB on free plans); the object is finalized once `total` bytes have
+/// arrived.
 pub async fn upload(
     State(state): State<AppState>,
     Path(token): Path<String>,
+    Query(query): Query<UploadQuery>,
     body: Body,
 ) -> ApiResult<StatusCode> {
     let claims = decode_token(&state, &token, "put")?;
@@ -108,9 +123,54 @@ pub async fn upload(
         tokio::fs::create_dir_all(parent).await?;
     }
 
+    let (offset, total) = match (query.offset, query.total) {
+        (None, None) => (0, None),
+        (Some(offset), Some(total)) if offset < total => (offset, Some(total)),
+        _ => return Err(ApiError::bad_request("invalid chunk range")),
+    };
+
+    let size_limit = if claims.max > 0 {
+        /* `max` is the size the launcher declared when it created the
+           artifact; a little slack covers metadata drift between stat()
+           and the actual upload. */
+        Some(claims.max + (claims.max / 10) + 1024 * 1024)
+    } else {
+        None
+    };
+
+    if let (Some(limit), Some(total)) = (size_limit, total) {
+        if total > limit {
+            return Err(ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "upload exceeds declared size",
+            ));
+        }
+    }
+
     let temp_path = path.with_extension("uploading");
-    let mut file = tokio::fs::File::create(&temp_path).await?;
-    let mut written: u64 = 0;
+
+    let mut file = if offset == 0 {
+        tokio::fs::File::create(&temp_path).await?
+    } else {
+        let existing = tokio::fs::metadata(&temp_path)
+            .await
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+
+        if existing != offset {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "chunk out of order — restart the upload from the beginning",
+            ));
+        }
+
+        tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&temp_path)
+            .await?
+    };
+
+    let mut written: u64 = offset;
     let mut stream = body.into_data_stream();
 
     while let Some(chunk) = stream.next().await {
@@ -119,10 +179,11 @@ pub async fn upload(
 
         written += chunk.len() as u64;
 
-        /* `max` is the size the launcher declared when it created the
-           artifact; a little slack covers metadata drift between stat()
-           and the actual upload. */
-        if claims.max > 0 && written > claims.max + (claims.max / 10) + 1024 * 1024 {
+        let over_declared_size =
+            size_limit.is_some_and(|limit| written > limit);
+        let over_declared_total = total.is_some_and(|total| written > total);
+
+        if over_declared_size || over_declared_total {
             drop(file);
             let _ = tokio::fs::remove_file(&temp_path).await;
             return Err(ApiError::new(
@@ -138,6 +199,16 @@ pub async fn upload(
 
     file.flush().await?;
     drop(file);
+
+    let complete = match total {
+        Some(total) => written >= total,
+        None => true,
+    };
+
+    if !complete {
+        return Ok(StatusCode::OK);
+    }
+
     tokio::fs::rename(&temp_path, &path).await?;
 
     finalize_upload(&state, &claims.key, written).await?;
