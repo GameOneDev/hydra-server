@@ -26,7 +26,7 @@ pub struct GameArtifact {
     pub is_frozen: bool,
 }
 
-fn artifact_from_row(row: &sqlx::sqlite::SqliteRow) -> GameArtifact {
+pub(crate) fn artifact_from_row(row: &sqlx::sqlite::SqliteRow) -> GameArtifact {
     GameArtifact {
         id: row.get("id"),
         artifact_length_in_bytes: row.get("artifact_length_in_bytes"),
@@ -193,15 +193,27 @@ async fn enforce_quotas(
 
 /// POST /profile/games/artifacts/{id}/download
 /// -> { downloadUrl, objectKey, homeDir, winePrefixPath }
+///
+/// The owner can always download; so can any user the backup was shared with.
 pub async fn download(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let row = sqlx::query(
-        "SELECT * FROM artifacts WHERE id = ? AND user_id = ? AND is_uploaded = 1",
+        "SELECT * FROM artifacts
+         WHERE id = ?
+           AND is_uploaded = 1
+           AND (
+             user_id = ?
+             OR EXISTS (
+               SELECT 1 FROM artifact_shares
+               WHERE artifact_id = artifacts.id AND recipient_user_id = ?
+             )
+           )",
     )
     .bind(&id)
+    .bind(&user.0.id)
     .bind(&user.0.id)
     .fetch_optional(&state.pool)
     .await?
@@ -239,6 +251,13 @@ pub async fn delete(
     if result.rows_affected() == 0 {
         return Err(ApiError::not_found("artifact not found"));
     }
+
+    /* Foreign keys are not enforced on this connection, so drop the share
+       rows explicitly. */
+    sqlx::query("DELETE FROM artifact_shares WHERE artifact_id = ?")
+        .bind(&id)
+        .execute(&state.pool)
+        .await?;
 
     storage::delete_object(&state, &artifact_key(&id)).await;
 

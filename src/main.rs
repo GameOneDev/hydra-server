@@ -6,6 +6,7 @@ mod config;
 mod emulation;
 mod error;
 mod images;
+mod shares;
 mod sources;
 mod state;
 mod storage;
@@ -104,6 +105,22 @@ fn router(_state: AppState) -> Router<AppState> {
         .route(
             "/profile/games/artifacts/{id}/download",
             post(artifacts::download),
+        )
+        .route(
+            "/profile/games/artifacts/shared-with-me",
+            get(shares::shared_with_me),
+        )
+        .route(
+            "/profile/games/artifacts/{id}/share",
+            post(shares::share),
+        )
+        .route(
+            "/profile/games/artifacts/{id}/share/{recipient_id}",
+            delete(shares::unshare),
+        )
+        .route(
+            "/profile/games/artifacts/{id}/shares",
+            get(shares::list_shares),
         )
         .route("/profile/games/artifacts/{id}/freeze", put(artifacts::freeze))
         .route(
