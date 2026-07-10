@@ -44,7 +44,12 @@ impl FromRequestParts<AppState> for CurrentUser {
 
         let user = resolve_user(state, &token).await?;
 
-        if !state.config.user_allowed(&user.id, user.username.as_deref()) {
+        let allowed = state
+            .settings
+            .read()
+            .await
+            .user_allowed(&user.id, user.username.as_deref());
+        if !allowed {
             return Err(ApiError::forbidden("user not allowed on this server"));
         }
 

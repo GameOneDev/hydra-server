@@ -65,12 +65,20 @@ subscription needed.
 | `HYDRA_BACKUPS_PER_GAME_LIMIT` | `100` | Max save backups per game per user |
 | `HYDRA_ALLOWED_USERS` | *(empty = everyone)* | Comma-separated official user ids or usernames allowed to use this server |
 
+The last three can also be edited live from the admin panel; values saved there
+are stored in the database and override the environment until reset.
+
 ### Admin panel
 
 Open `https://your-server/admin`, sign in with `HYDRA_ADMIN_PASSWORD`:
 
-- overview of users, backups and total storage
-- per-user storage usage, backups and emulation saves
+- overview of users, backups, shares, achievements and total storage
+- server info: version, uptime, database size and effective configuration
+- edit settings without a restart: per-user quota, backups-per-game limit and
+  the allowed-users list, applied immediately and persisted across restarts
+- per-user detail: profile info plus save backups, achievements and emulation
+  saves — backups show the game's name and cover art (resolved from the Steam
+  store and cached) instead of the raw shop id
 - download or delete any backup
 - block/unblock users, delete all of a user's data
 

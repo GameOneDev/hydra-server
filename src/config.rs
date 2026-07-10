@@ -76,19 +76,6 @@ impl Config {
     pub fn database_path(&self) -> PathBuf {
         self.data_dir.join("hydra-server.db")
     }
-
-    pub fn user_allowed(&self, id: &str, username: Option<&str>) -> bool {
-        if self.allowed_users.is_empty() {
-            return true;
-        }
-
-        let id = id.to_lowercase();
-        let username = username.map(|u| u.to_lowercase());
-
-        self.allowed_users
-            .iter()
-            .any(|allowed| *allowed == id || Some(allowed) == username.as_ref())
-    }
 }
 
 fn load_or_generate_secret(data_dir: &Path) -> String {

@@ -148,6 +148,11 @@ async fn enforce_quotas(
     user_id: &str,
     payload: &CreateArtifact,
 ) -> ApiResult<()> {
+    let (max_bytes_per_user, backups_per_game_limit) = {
+        let settings = state.settings.read().await;
+        (settings.max_bytes_per_user, settings.backups_per_game_limit)
+    };
+
     let per_game: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM artifacts WHERE user_id = ? AND shop = ? AND object_id = ?",
     )
@@ -157,13 +162,13 @@ async fn enforce_quotas(
     .fetch_one(&state.pool)
     .await?;
 
-    if per_game >= state.config.backups_per_game_limit as i64 {
+    if per_game >= backups_per_game_limit as i64 {
         return Err(ApiError::bad_request(
             "backup limit for this game reached — delete an older backup first",
         ));
     }
 
-    if state.config.max_bytes_per_user > 0 {
+    if max_bytes_per_user > 0 {
         let used: i64 = sqlx::query_scalar(
             "SELECT COALESCE(SUM(artifact_length_in_bytes), 0) FROM artifacts WHERE user_id = ?",
         )
@@ -179,7 +184,7 @@ async fn enforce_quotas(
         .await?;
 
         if used + emulation_used + payload.artifact_length_in_bytes
-            > state.config.max_bytes_per_user as i64
+            > max_bytes_per_user as i64
         {
             return Err(ApiError::new(
                 StatusCode::PAYLOAD_TOO_LARGE,
