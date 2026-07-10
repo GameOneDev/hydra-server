@@ -53,11 +53,16 @@ impl FromRequestParts<AppState> for CurrentUser {
             return Err(ApiError::forbidden("user not allowed on this server"));
         }
 
-        let blocked: Option<(i64,)> =
-            sqlx::query_as("SELECT is_blocked FROM users WHERE id = ?")
-                .bind(&user.id)
-                .fetch_optional(&state.pool)
-                .await?;
+        /* Bump last_seen_at on every authenticated request. resolve_user only
+           touches the row on token-cache misses, which would leave last_seen_at
+           up to TOKEN_CACHE_TTL_SECONDS stale while the client is active. */
+        let blocked: Option<(i64,)> = sqlx::query_as(
+            "UPDATE users SET last_seen_at = ? WHERE id = ? RETURNING is_blocked",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(&user.id)
+        .fetch_optional(&state.pool)
+        .await?;
 
         if matches!(blocked, Some((1,))) {
             return Err(ApiError::forbidden("user is blocked on this server"));
