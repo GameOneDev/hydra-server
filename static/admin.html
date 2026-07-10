@@ -23,13 +23,21 @@
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
   .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
   .card .value { font-size: 22px; font-weight: 600; margin-top: 4px; }
+  .card .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
   table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
   th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
   th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; background: var(--panel-2); }
   tr:last-child td { border-bottom: none; }
   tr.clickable { cursor: pointer; }
   tr.clickable:hover td { background: var(--panel-2); }
+  table.kv th { width: 200px; background: var(--panel); text-transform: none; font-size: 13px; letter-spacing: 0; }
+  table.kv td { word-break: break-all; }
   .avatar { width: 26px; height: 26px; border-radius: 50%; background: var(--panel-2); object-fit: cover; vertical-align: middle; margin-right: 8px; }
+  .avatar.big { width: 56px; height: 56px; margin-right: 0; flex: none; }
+  .game { display: flex; align-items: center; gap: 10px; min-width: 180px; }
+  .game .cover { width: 72px; height: 27px; object-fit: cover; border-radius: 4px; background: var(--panel-2); flex: none; }
+  .game .game-name { font-weight: 600; }
+  .game .game-sub { font-size: 12px; }
   button {
     background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
     border-radius: 7px; padding: 6px 12px; cursor: pointer; font: inherit; font-size: 13px;
@@ -42,6 +50,22 @@
   .pill.ok { background: rgba(76, 208, 125, .12); color: var(--ok); }
   .pill.bad { background: rgba(255, 92, 108, .12); color: var(--danger); }
   .muted { color: var(--muted); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-bottom: 14px; }
+  .settings-grid label { display: block; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .settings-grid input {
+    width: 100%; margin-top: 6px; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); font: inherit;
+  }
+  .settings-actions { display: flex; align-items: center; gap: 10px; }
+  .settings-actions .status { font-size: 13px; }
+  .settings-actions .status.ok { color: var(--ok); }
+  .settings-actions .status.bad { color: var(--danger); }
+  .settings-note { margin-top: 10px; font-size: 12px; }
+  .user-head { display: flex; align-items: center; gap: 16px; margin: 12px 0 4px; }
+  .user-head .user-meta { display: flex; flex-direction: column; gap: 2px; }
+  .user-head .spacer { flex: 1; }
   #login { max-width: 340px; margin: 18vh auto 0; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 28px; }
   #login h1 { margin: 0 0 16px; font-size: 18px; }
   #login input {
@@ -74,11 +98,36 @@
 
   <div id="dashboard">
     <div class="cards" id="cards"></div>
+
+    <h2 class="section-title">Server</h2>
+    <table class="kv"><tbody id="server-info"></tbody></table>
+
+    <h2 class="section-title">Settings</h2>
+    <div class="panel">
+      <div class="settings-grid">
+        <label>Per-user quota (GiB, 0 = unlimited)
+          <input id="set-quota" type="number" min="0" step="0.1" />
+        </label>
+        <label>Backups per game
+          <input id="set-backups" type="number" min="1" step="1" />
+        </label>
+        <label>Allowed users (comma separated, empty = everyone)
+          <input id="set-allowed" type="text" placeholder="ids or usernames" />
+        </label>
+      </div>
+      <div class="settings-actions">
+        <button class="primary" id="save-settings">Save</button>
+        <button id="reset-settings">Reset to env defaults</button>
+        <span class="status" id="settings-status"></span>
+      </div>
+      <div class="muted settings-note" id="settings-defaults"></div>
+    </div>
+
     <h2 class="section-title">Users</h2>
     <table>
       <thead><tr>
-        <th>User</th><th>Backups</th><th>Emu saves</th><th>Storage used</th>
-        <th>Last seen</th><th>Status</th><th></th>
+        <th>User</th><th>Backups</th><th>Emu saves</th><th>Achievements</th>
+        <th>Storage used</th><th>Last seen</th><th>Status</th><th></th>
       </tr></thead>
       <tbody id="users"></tbody>
     </table>
@@ -86,13 +135,20 @@
 
   <div id="detail">
     <button class="back" id="back-btn">&larr; Back to users</button>
-    <h2 class="section-title" id="detail-title"></h2>
+    <div class="user-head panel" id="user-head"></div>
     <h3 class="section-title">Cloud save backups</h3>
     <table>
       <thead><tr>
-        <th>Game</th><th>Label</th><th>Size</th><th>Host</th><th>Frozen</th><th>Created</th><th></th>
+        <th>Game</th><th>Label</th><th>Size</th><th>Host</th><th>Shared</th><th>Frozen</th><th>Created</th><th></th>
       </tr></thead>
       <tbody id="artifacts"></tbody>
+    </table>
+    <h3 class="section-title">Achievements</h3>
+    <table>
+      <thead><tr>
+        <th>Game</th><th>Unlocked</th><th>Last synced</th>
+      </tr></thead>
+      <tbody id="achievements"></tbody>
     </table>
     <h3 class="section-title">Emulation saves</h3>
     <table>
@@ -106,7 +162,9 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+const GIB = 2 ** 30;
 let currentUser = null;
+let quotaBytes = 0;
 
 const fmtBytes = (n) => {
   if (!n) return "0 B";
@@ -115,6 +173,14 @@ const fmtBytes = (n) => {
   return (n / 2 ** (10 * i)).toFixed(i ? 1 : 0) + " " + units[i];
 };
 const fmtDate = (iso) => iso ? new Date(iso).toLocaleString() : "—";
+const fmtDuration = (seconds) => {
+  const d = Math.floor(seconds / 86400), h = Math.floor(seconds % 86400 / 3600),
+        m = Math.floor(seconds % 3600 / 60);
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  return `${m}m`;
+};
+const fmtQuota = (bytes) => bytes ? fmtBytes(bytes) : "unlimited";
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -139,24 +205,83 @@ function showLogin() {
 async function showApp() {
   $("login").classList.add("hidden");
   $("app").classList.remove("hidden");
-  await Promise.all([loadOverview(), loadUsers()]);
+  await loadOverview();
+  await Promise.all([loadUsers(), loadSettings()]);
 }
 
 async function loadOverview() {
   const data = await api("/admin/api/overview");
+  quotaBytes = data.maxBytesPerUser || 0;
   $("public-url").textContent = data.publicUrl;
-  const quota = data.maxBytesPerUser ? fmtBytes(data.maxBytesPerUser) : "unlimited";
+
   $("cards").innerHTML = [
-    ["Users", data.userCount],
-    ["Save backups", data.artifactCount],
-    ["Emulation saves", data.emulationSaveCount],
-    ["Total storage", fmtBytes(data.totalBytes)],
-    ["Per-user quota", quota],
-    ["Backups per game", data.backupsPerGameLimit],
-  ].map(([label, value]) =>
-    `<div class="card"><div class="label">${label}</div><div class="value">${value}</div></div>`
+    ["Users", data.userCount, data.blockedUserCount ? `${data.blockedUserCount} blocked` : ""],
+    ["Save backups", data.artifactCount, data.sharedArtifactCount ? `${data.sharedArtifactCount} shared` : ""],
+    ["Emulation saves", data.emulationSaveCount, ""],
+    ["Achievement games", data.achievementGameCount, "synced game entries"],
+    ["Total storage", fmtBytes(data.totalBytes), `db ${fmtBytes(data.databaseBytes)}`],
+    ["Per-user quota", fmtQuota(data.maxBytesPerUser), `${data.backupsPerGameLimit} backups/game`],
+  ].map(([label, value, sub]) =>
+    `<div class="card"><div class="label">${label}</div><div class="value">${value}</div>${sub ? `<div class="sub">${sub}</div>` : ""}</div>`
   ).join("");
+
+  $("server-info").innerHTML = [
+    ["Version", `hydra-server v${data.version}`],
+    ["Uptime", fmtDuration(data.uptimeSeconds)],
+    ["Public URL", data.publicUrl],
+    ["Official Hydra API", data.officialApiUrl],
+    ["Database size", fmtBytes(data.databaseBytes)],
+    ["Allowed users", data.allowedUsers.length ? data.allowedUsers.join(", ") : "everyone with a valid official login"],
+  ].map(([key, value]) => `<tr><th>${key}</th><td>${esc(String(value))}</td></tr>`).join("");
 }
+
+async function loadSettings() {
+  const s = await api("/admin/api/settings");
+  $("set-quota").value = s.maxBytesPerUser ? +(s.maxBytesPerUser / GIB).toFixed(2) : 0;
+  $("set-backups").value = s.backupsPerGameLimit;
+  $("set-allowed").value = s.allowedUsers.join(", ");
+  $("settings-defaults").textContent =
+    `Env defaults: quota ${fmtQuota(s.defaults.maxBytesPerUser)} · `
+    + `${s.defaults.backupsPerGameLimit} backups/game · `
+    + `allowed users: ${s.defaults.allowedUsers.length ? s.defaults.allowedUsers.join(", ") : "everyone"}. `
+    + (s.overridden ? "Panel overrides are active." : "No overrides saved — env values apply.");
+}
+
+function settingsStatus(text, bad = false) {
+  const el = $("settings-status");
+  el.textContent = text;
+  el.className = `status ${bad ? "bad" : "ok"}`;
+  setTimeout(() => { if (el.textContent === text) el.textContent = ""; }, 4000);
+}
+
+$("save-settings").addEventListener("click", async () => {
+  const payload = { allowedUsers: $("set-allowed").value.split(",").map((s) => s.trim()).filter(Boolean) };
+  const quota = $("set-quota").value.trim();
+  if (quota !== "") payload.maxBytesPerUser = Math.max(0, Math.round(Number(quota) * GIB));
+  const backups = $("set-backups").value.trim();
+  if (backups !== "") payload.backupsPerGameLimit = Number(backups);
+
+  try {
+    await api("/admin/api/settings", { method: "PUT", body: JSON.stringify(payload) });
+    settingsStatus("Saved — applied immediately.");
+    await loadOverview();
+    await Promise.all([loadUsers(), loadSettings()]);
+  } catch (err) {
+    settingsStatus(err.message, true);
+  }
+});
+
+$("reset-settings").addEventListener("click", async () => {
+  if (!confirm("Clear all panel overrides and go back to the environment settings?")) return;
+  try {
+    await api("/admin/api/settings", { method: "DELETE" });
+    settingsStatus("Overrides cleared.");
+    await loadOverview();
+    await Promise.all([loadUsers(), loadSettings()]);
+  } catch (err) {
+    settingsStatus(err.message, true);
+  }
+});
 
 async function loadUsers() {
   const users = await api("/admin/api/users");
@@ -169,7 +294,8 @@ async function loadUsers() {
       </td>
       <td>${u.artifactCount}</td>
       <td>${u.emulationSaveCount}</td>
-      <td>${fmtBytes(u.totalBytes)}</td>
+      <td>${u.achievementGameCount}</td>
+      <td>${fmtBytes(u.totalBytes)}${quotaBytes ? ` <span class="muted">(${Math.round(u.totalBytes / quotaBytes * 100)}%)</span>` : ""}</td>
       <td class="muted">${fmtDate(u.lastSeenAt)}</td>
       <td>${u.isBlocked ? '<span class="pill bad">blocked</span>' : '<span class="pill ok">active</span>'}</td>
       <td style="white-space:nowrap">
@@ -177,7 +303,7 @@ async function loadUsers() {
         <button class="danger" data-action="delete">Delete data</button>
       </td>
     </tr>
-  `).join("") || '<tr><td colspan="7" class="muted">No users yet — they appear after the first launcher request.</td></tr>';
+  `).join("") || '<tr><td colspan="8" class="muted">No users yet — they appear after the first launcher request.</td></tr>';
 }
 
 $("users").addEventListener("click", async (event) => {
@@ -200,22 +326,79 @@ $("users").addEventListener("click", async (event) => {
     await api(`/admin/api/users/${id}`, { method: "DELETE" });
     return Promise.all([loadOverview(), loadUsers()]);
   }
-  openUser(id, row.dataset.name);
+  openUser(id);
 });
 
-async function openUser(id, name) {
+/* Game cell: cover art + name, with the raw shop/object id underneath.
+   Unresolved names get patched in by resolveGames(). */
+function gameCell(shop, objectId, name, coverUrl) {
+  const key = `${shop}:${objectId}`;
+  return `<div class="game" data-game="${esc(key)}">
+    <img class="cover${coverUrl ? "" : " hidden"}"${coverUrl ? ` src="${esc(coverUrl)}"` : ""} alt="" loading="lazy" onerror="this.classList.add('hidden')" />
+    <div>
+      <div class="game-name">${esc(name || objectId)}</div>
+      <div class="muted game-sub">${esc(shop)}/${esc(objectId)}</div>
+    </div>
+  </div>`;
+}
+
+/* Ask the server to resolve games we don't have a name for yet (it caches
+   the result), then patch the rendered cells in place. */
+function resolveGames(entries) {
+  const pending = new Map();
+  for (const entry of entries) {
+    if (!entry.shop || !entry.objectId || entry.gameName) continue;
+    pending.set(`${entry.shop}:${entry.objectId}`, entry);
+  }
+
+  for (const [key, entry] of pending) {
+    api(`/admin/api/games/${encodeURIComponent(entry.shop)}/${encodeURIComponent(entry.objectId)}`)
+      .then((meta) => {
+        if (!meta.name && !meta.coverUrl) return;
+        document.querySelectorAll(".game").forEach((el) => {
+          if (el.dataset.game !== key) return;
+          if (meta.name) el.querySelector(".game-name").textContent = meta.name;
+          const img = el.querySelector("img.cover");
+          if (meta.coverUrl && img && !img.getAttribute("src")) {
+            img.src = meta.coverUrl;
+            img.classList.remove("hidden");
+          }
+        });
+      })
+      .catch(() => {});
+  }
+}
+
+async function openUser(id) {
   currentUser = id;
   const data = await api(`/admin/api/users/${id}`);
   $("dashboard").style.display = "none";
   $("detail").style.display = "block";
-  $("detail-title").textContent = name;
+
+  const u = data.user;
+  $("user-head").innerHTML = `
+    ${u.profileImageUrl ? `<img class="avatar big" src="${esc(u.profileImageUrl)}" alt="" />` : '<div class="avatar big"></div>'}
+    <div class="user-meta">
+      <div>
+        <strong>${esc(u.displayName)}</strong>
+        ${u.username ? `<span class="muted">@${esc(u.username)}</span>` : ""}
+        ${u.isBlocked ? '<span class="pill bad">blocked</span>' : '<span class="pill ok">active</span>'}
+      </div>
+      <div class="muted mono">${esc(u.id)}</div>
+      <div class="muted">First seen ${fmtDate(u.createdAt)} · last seen ${fmtDate(u.lastSeenAt)}</div>
+      <div class="muted">${u.artifactCount} backups · ${u.emulationSaveCount} emu saves · ${u.achievementGameCount} games with achievements · ${fmtBytes(u.totalBytes)} used${quotaBytes ? ` of ${fmtBytes(quotaBytes)}` : ""}</div>
+    </div>
+    <div class="spacer"></div>
+    <button id="detail-block" data-blocked="${u.isBlocked}">${u.isBlocked ? "Unblock" : "Block"}</button>
+  `;
 
   $("artifacts").innerHTML = data.artifacts.map((a) => `
     <tr>
-      <td>${esc(a.shop)}/${esc(a.objectId)}</td>
+      <td>${gameCell(a.shop, a.objectId, a.gameName, a.gameCoverUrl)}</td>
       <td>${esc(a.label || "—")}</td>
       <td>${fmtBytes(a.sizeBytes)}${a.isUploaded ? "" : ' <span class="pill bad">pending</span>'}</td>
       <td class="muted">${esc(a.hostname)}</td>
+      <td>${a.shareCount ? `${a.shareCount}&times;` : ""}</td>
       <td>${a.isFrozen ? "🧊" : ""}</td>
       <td class="muted">${fmtDate(a.createdAt)}</td>
       <td style="white-space:nowrap">
@@ -223,7 +406,17 @@ async function openUser(id, name) {
         <button class="danger" data-del-artifact="${esc(a.id)}">Delete</button>
       </td>
     </tr>
-  `).join("") || '<tr><td colspan="7" class="muted">No backups.</td></tr>';
+  `).join("") || '<tr><td colspan="8" class="muted">No backups.</td></tr>';
+
+  $("achievements").innerHTML = data.achievements.map((a) => `
+    <tr>
+      <td>${a.shop && a.objectId
+        ? gameCell(a.shop, a.objectId, a.gameName, a.gameCoverUrl)
+        : `<span class="muted">game #${esc(a.remoteGameId)}</span>`}</td>
+      <td>${a.achievementCount}</td>
+      <td class="muted">${fmtDate(a.updatedAt)}</td>
+    </tr>
+  `).join("") || '<tr><td colspan="3" class="muted">No achievements synced.</td></tr>';
 
   $("saves").innerHTML = data.emulationSaves.map((s) => `
     <tr>
@@ -235,7 +428,18 @@ async function openUser(id, name) {
       <td><button class="danger" data-del-save="${esc(s.id)}">Delete</button></td>
     </tr>
   `).join("") || '<tr><td colspan="6" class="muted">No emulation saves.</td></tr>';
+
+  resolveGames([...data.artifacts, ...data.achievements]);
 }
+
+$("user-head").addEventListener("click", async (event) => {
+  if (event.target.id !== "detail-block") return;
+  await api(`/admin/api/users/${currentUser}/block`, {
+    method: "POST",
+    body: JSON.stringify({ blocked: event.target.dataset.blocked !== "true" }),
+  });
+  openUser(currentUser);
+});
 
 $("detail").addEventListener("click", async (event) => {
   const download = event.target.dataset.download;
@@ -245,12 +449,12 @@ $("detail").addEventListener("click", async (event) => {
   if (download) window.open(`/admin/api/artifacts/${download}/download`, "_blank");
   if (delArtifact && confirm("Delete this backup?")) {
     await api(`/admin/api/artifacts/${delArtifact}`, { method: "DELETE" });
-    openUser(currentUser, $("detail-title").textContent);
+    openUser(currentUser);
     loadOverview();
   }
   if (delSave && confirm("Delete this emulation save?")) {
     await api(`/admin/api/emulation-saves/${delSave}`, { method: "DELETE" });
-    openUser(currentUser, $("detail-title").textContent);
+    openUser(currentUser);
     loadOverview();
   }
 });

@@ -1,6 +1,6 @@
 use crate::error::{ApiError, ApiResult};
-use crate::state::AppState;
-use crate::storage;
+use crate::state::{AppState, RuntimeSettings};
+use crate::{games, settings, storage};
 use axum::extract::{FromRequestParts, Path, State};
 use axum::http::{header, request::Parts};
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -73,6 +73,11 @@ pub fn router() -> Router<AppState> {
         .route("/admin/api/login", post(login))
         .route("/admin/api/logout", post(logout))
         .route("/admin/api/overview", get(overview))
+        .route(
+            "/admin/api/settings",
+            get(get_settings).put(update_settings).delete(reset_settings),
+        )
+        .route("/admin/api/games/{shop}/{object_id}", get(game_info))
         .route("/admin/api/users", get(list_users))
         .route("/admin/api/users/{id}", get(user_details).delete(delete_user))
         .route("/admin/api/users/{id}/block", post(set_blocked))
@@ -139,6 +144,10 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
     let user_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
         .fetch_one(&state.pool)
         .await?;
+    let blocked_user_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_blocked = 1")
+            .fetch_one(&state.pool)
+            .await?;
     let artifact_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifacts")
         .fetch_one(&state.pool)
         .await?;
@@ -154,16 +163,143 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
     )
     .fetch_one(&state.pool)
     .await?;
+    let achievement_game_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM game_achievements")
+            .fetch_one(&state.pool)
+            .await?;
+    let shared_artifact_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM artifact_shares")
+            .fetch_one(&state.pool)
+            .await?;
+
+    /* WAL/SHM files hold data not yet checkpointed into the main file, so
+       count them into the database size too. */
+    let db_path = state.config.database_path();
+    let mut database_bytes: u64 = 0;
+    for suffix in ["", "-wal", "-shm"] {
+        let path = std::path::PathBuf::from(format!("{}{suffix}", db_path.display()));
+        if let Ok(meta) = tokio::fs::metadata(&path).await {
+            database_bytes += meta.len();
+        }
+    }
+
+    let current = state.settings.read().await.clone();
+    let uptime_seconds = (Utc::now() - state.started_at).num_seconds();
 
     Ok(Json(json!({
         "userCount": user_count,
+        "blockedUserCount": blocked_user_count,
         "artifactCount": artifact_count,
         "emulationSaveCount": save_count,
+        "achievementGameCount": achievement_game_count,
+        "sharedArtifactCount": shared_artifact_count,
         "totalBytes": artifact_bytes + save_bytes,
-        "maxBytesPerUser": state.config.max_bytes_per_user,
-        "backupsPerGameLimit": state.config.backups_per_game_limit,
+        "databaseBytes": database_bytes,
+        "maxBytesPerUser": current.max_bytes_per_user,
+        "backupsPerGameLimit": current.backups_per_game_limit,
+        "allowedUsers": current.allowed_users,
         "officialApiUrl": state.config.official_api_url,
         "publicUrl": state.config.public_url,
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptimeSeconds": uptime_seconds,
+    })))
+}
+
+fn settings_json(current: &RuntimeSettings, defaults: &RuntimeSettings, overridden: bool) -> Value {
+    json!({
+        "maxBytesPerUser": current.max_bytes_per_user,
+        "backupsPerGameLimit": current.backups_per_game_limit,
+        "allowedUsers": current.allowed_users,
+        "overridden": overridden,
+        "defaults": {
+            "maxBytesPerUser": defaults.max_bytes_per_user,
+            "backupsPerGameLimit": defaults.backups_per_game_limit,
+            "allowedUsers": defaults.allowed_users,
+        },
+    })
+}
+
+async fn settings_payload(state: &AppState) -> ApiResult<Json<Value>> {
+    let current = state.settings.read().await.clone();
+    let defaults = RuntimeSettings::from_config(&state.config);
+    let override_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM server_settings")
+        .fetch_one(&state.pool)
+        .await?;
+
+    Ok(Json(settings_json(&current, &defaults, override_count > 0)))
+}
+
+async fn get_settings(
+    State(state): State<AppState>,
+    _admin: AdminSession,
+) -> ApiResult<Json<Value>> {
+    settings_payload(&state).await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateSettingsRequest {
+    max_bytes_per_user: Option<u64>,
+    backups_per_game_limit: Option<u32>,
+    allowed_users: Option<Vec<String>>,
+}
+
+/// PUT /admin/api/settings — persists the provided fields as overrides of
+/// the environment defaults and applies them immediately.
+async fn update_settings(
+    State(state): State<AppState>,
+    _admin: AdminSession,
+    Json(payload): Json<UpdateSettingsRequest>,
+) -> ApiResult<Json<Value>> {
+    if let Some(max_bytes) = payload.max_bytes_per_user {
+        settings::set(&state.pool, settings::MAX_BYTES_PER_USER, &max_bytes.to_string()).await?;
+    }
+
+    if let Some(limit) = payload.backups_per_game_limit {
+        if limit == 0 {
+            return Err(ApiError::bad_request("backups per game must be at least 1"));
+        }
+        settings::set(&state.pool, settings::BACKUPS_PER_GAME_LIMIT, &limit.to_string()).await?;
+    }
+
+    if let Some(users) = payload.allowed_users {
+        let normalized = settings::parse_allowed_users(&users.join(","));
+        settings::set(&state.pool, settings::ALLOWED_USERS, &normalized.join(",")).await?;
+    }
+
+    let reloaded = settings::load(&state.pool, &state.config).await;
+    *state.settings.write().await = reloaded;
+
+    settings_payload(&state).await
+}
+
+/// DELETE /admin/api/settings — clears every override, back to env values.
+async fn reset_settings(
+    State(state): State<AppState>,
+    _admin: AdminSession,
+) -> ApiResult<Json<Value>> {
+    settings::clear(&state.pool).await?;
+
+    let reloaded = settings::load(&state.pool, &state.config).await;
+    *state.settings.write().await = reloaded;
+
+    settings_payload(&state).await
+}
+
+/// GET /admin/api/games/{shop}/{object_id} — cached game name/cover so the
+/// panel can show real games instead of raw shop ids.
+async fn game_info(
+    State(state): State<AppState>,
+    _admin: AdminSession,
+    Path((shop, object_id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    let metadata = games::resolve(&state, &shop, &object_id).await;
+
+    Ok(Json(json!({
+        "shop": shop,
+        "objectId": object_id,
+        "name": metadata.name,
+        "coverUrl": metadata.cover_url,
     })))
 }
 
@@ -208,8 +344,39 @@ async fn user_details(
     _admin: AdminSession,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
+    let user = sqlx::query(
+        "SELECT u.*,
+            (SELECT COUNT(*) FROM artifacts a WHERE a.user_id = u.id) AS artifact_count,
+            (SELECT COALESCE(SUM(artifact_length_in_bytes), 0) FROM artifacts a WHERE a.user_id = u.id)
+              + (SELECT COALESCE(SUM(artifact_length_in_bytes), 0) FROM emulation_saves e WHERE e.user_id = u.id)
+              AS total_bytes,
+            (SELECT COUNT(*) FROM emulation_saves e WHERE e.user_id = u.id) AS save_count,
+            (SELECT COUNT(*) FROM game_achievements g WHERE g.user_id = u.id) AS achievement_games
+         FROM users u WHERE u.id = ?",
+    )
+    .bind(&id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| ApiError::not_found("user not found"))?;
+
     let artifacts = sqlx::query(
-        "SELECT * FROM artifacts WHERE user_id = ? ORDER BY created_at DESC",
+        "SELECT a.*, g.name AS game_name, g.cover_url AS game_cover_url,
+            (SELECT COUNT(*) FROM artifact_shares s WHERE s.artifact_id = a.id) AS share_count
+         FROM artifacts a
+         LEFT JOIN game_metadata g ON g.shop = a.shop AND g.object_id = a.object_id
+         WHERE a.user_id = ? ORDER BY a.created_at DESC",
+    )
+    .bind(&id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let achievements = sqlx::query(
+        "SELECT ga.remote_game_id, ga.shop, ga.object_id, ga.updated_at,
+            json_array_length(ga.achievements) AS achievement_count,
+            g.name AS game_name, g.cover_url AS game_cover_url
+         FROM game_achievements ga
+         LEFT JOIN game_metadata g ON g.shop = ga.shop AND g.object_id = ga.object_id
+         WHERE ga.user_id = ? ORDER BY ga.updated_at DESC",
     )
     .bind(&id)
     .fetch_all(&state.pool)
@@ -223,10 +390,25 @@ async fn user_details(
     .await?;
 
     Ok(Json(json!({
+        "user": {
+            "id": user.get::<String, _>("id"),
+            "username": user.get::<Option<String>, _>("username"),
+            "displayName": user.get::<String, _>("display_name"),
+            "profileImageUrl": user.get::<Option<String>, _>("profile_image_url"),
+            "isBlocked": user.get::<i64, _>("is_blocked") != 0,
+            "createdAt": user.get::<String, _>("created_at"),
+            "lastSeenAt": user.get::<String, _>("last_seen_at"),
+            "artifactCount": user.get::<i64, _>("artifact_count"),
+            "emulationSaveCount": user.get::<i64, _>("save_count"),
+            "achievementGameCount": user.get::<i64, _>("achievement_games"),
+            "totalBytes": user.get::<i64, _>("total_bytes"),
+        },
         "artifacts": artifacts.iter().map(|row| json!({
             "id": row.get::<String, _>("id"),
             "shop": row.get::<String, _>("shop"),
             "objectId": row.get::<String, _>("object_id"),
+            "gameName": row.get::<Option<String>, _>("game_name"),
+            "gameCoverUrl": row.get::<Option<String>, _>("game_cover_url"),
             "label": row.get::<Option<String>, _>("label"),
             "sizeBytes": row.get::<i64, _>("artifact_length_in_bytes"),
             "hostname": row.get::<String, _>("hostname"),
@@ -234,7 +416,17 @@ async fn user_details(
             "isFrozen": row.get::<i64, _>("is_frozen") != 0,
             "isUploaded": row.get::<i64, _>("is_uploaded") != 0,
             "downloadCount": row.get::<i64, _>("download_count"),
+            "shareCount": row.get::<i64, _>("share_count"),
             "createdAt": row.get::<String, _>("created_at"),
+        })).collect::<Vec<_>>(),
+        "achievements": achievements.iter().map(|row| json!({
+            "remoteGameId": row.get::<String, _>("remote_game_id"),
+            "shop": row.get::<Option<String>, _>("shop"),
+            "objectId": row.get::<Option<String>, _>("object_id"),
+            "gameName": row.get::<Option<String>, _>("game_name"),
+            "gameCoverUrl": row.get::<Option<String>, _>("game_cover_url"),
+            "achievementCount": row.get::<i64, _>("achievement_count"),
+            "updatedAt": row.get::<String, _>("updated_at"),
         })).collect::<Vec<_>>(),
         "emulationSaves": saves.iter().map(|row| json!({
             "id": row.get::<String, _>("id"),

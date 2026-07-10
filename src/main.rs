@@ -5,7 +5,9 @@ mod auth;
 mod config;
 mod emulation;
 mod error;
+mod games;
 mod images;
+mod settings;
 mod shares;
 mod sources;
 mod state;
@@ -64,6 +66,8 @@ async fn main() {
     let bind = config.bind.clone();
     let public_url = config.public_url.clone();
 
+    let runtime_settings = settings::load(&pool, &config).await;
+
     let app_state = AppState {
         pool,
         config: Arc::new(config),
@@ -72,6 +76,8 @@ async fn main() {
             .build()
             .expect("failed to build http client"),
         token_cache: Arc::new(RwLock::new(HashMap::new())),
+        settings: Arc::new(RwLock::new(runtime_settings)),
+        started_at: chrono::Utc::now(),
     };
 
     let app = router(app_state.clone()).with_state(app_state);
