@@ -1,7 +1,7 @@
 use crate::auth::CurrentUser;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use chrono::{Duration, NaiveDate, Utc};
@@ -83,6 +83,9 @@ pub struct HeatmapQuery {
 pub struct GamePlaytime {
     pub shop: String,
     pub object_id: String,
+    /// Cached display name; null until something resolves the game's
+    /// metadata. Viewers fall back to their local library title.
+    pub name: Option<String>,
     pub seconds: i64,
 }
 
@@ -94,26 +97,22 @@ pub struct DayPlaytime {
     pub games: Vec<GamePlaytime>,
 }
 
-/// GET /profile/playtime?days=35 — per-day totals with a per-game breakdown,
-/// oldest day first. Days with no playtime are omitted.
-pub async fn heatmap(
-    State(state): State<AppState>,
-    user: CurrentUser,
-    Query(query): Query<HeatmapQuery>,
-) -> ApiResult<Json<Vec<DayPlaytime>>> {
-    let days = query
-        .days
-        .unwrap_or(DEFAULT_RANGE_DAYS)
-        .clamp(1, MAX_RANGE_DAYS);
-
+async fn fetch_heatmap(
+    state: &AppState,
+    user_id: &str,
+    days: Option<i64>,
+) -> ApiResult<Vec<DayPlaytime>> {
+    let days = days.unwrap_or(DEFAULT_RANGE_DAYS).clamp(1, MAX_RANGE_DAYS);
     let since = (Utc::now().date_naive() - Duration::days(days - 1)).to_string();
 
     let rows = sqlx::query(
-        "SELECT day, shop, object_id, seconds FROM playtime_daily
-         WHERE user_id = ? AND day >= ?
-         ORDER BY day ASC, seconds DESC",
+        "SELECT p.day, p.shop, p.object_id, p.seconds, g.name AS game_name
+         FROM playtime_daily p
+         LEFT JOIN game_metadata g ON g.shop = p.shop AND g.object_id = p.object_id
+         WHERE p.user_id = ? AND p.day >= ?
+         ORDER BY p.day ASC, p.seconds DESC",
     )
-    .bind(&user.0.id)
+    .bind(user_id)
     .bind(&since)
     .fetch_all(&state.pool)
     .await?;
@@ -127,18 +126,40 @@ pub async fn heatmap(
             .push(GamePlaytime {
                 shop: row.get("shop"),
                 object_id: row.get("object_id"),
+                name: row.get("game_name"),
                 seconds: row.get("seconds"),
             });
     }
 
-    Ok(Json(
-        by_day
-            .into_iter()
-            .map(|(day, games)| DayPlaytime {
-                day,
-                total_seconds: games.iter().map(|game| game.seconds).sum(),
-                games,
-            })
-            .collect(),
-    ))
+    Ok(by_day
+        .into_iter()
+        .map(|(day, games)| DayPlaytime {
+            day,
+            total_seconds: games.iter().map(|game| game.seconds).sum(),
+            games,
+        })
+        .collect())
+}
+
+/// GET /profile/playtime?days=35 — the caller's own per-day totals with a
+/// per-game breakdown, oldest day first. Days with no playtime are omitted.
+pub async fn heatmap(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Query(query): Query<HeatmapQuery>,
+) -> ApiResult<Json<Vec<DayPlaytime>>> {
+    Ok(Json(fetch_heatmap(&state, &user.0.id, query.days).await?))
+}
+
+/// GET /profile/playtime/{userId}?days=35 — another user's heatmap, for
+/// profile pages. Like banners and profile stats, any authenticated user of
+/// this server may view it: playtime already appears on Hydra profiles, the
+/// daily buckets just add resolution.
+pub async fn user_heatmap(
+    State(state): State<AppState>,
+    _viewer: CurrentUser,
+    Path(user_id): Path<String>,
+    Query(query): Query<HeatmapQuery>,
+) -> ApiResult<Json<Vec<DayPlaytime>>> {
+    Ok(Json(fetch_heatmap(&state, &user_id, query.days).await?))
 }

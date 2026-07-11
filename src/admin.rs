@@ -1,7 +1,7 @@
 use crate::error::{ApiError, ApiResult};
 use crate::state::{AppState, RuntimeSettings};
 use crate::{games, settings, storage};
-use axum::extract::{FromRequestParts, Path, State};
+use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::{header, request::Parts};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post};
@@ -78,6 +78,7 @@ pub fn router() -> Router<AppState> {
             get(get_settings).put(update_settings).delete(reset_settings),
         )
         .route("/admin/api/games/{shop}/{object_id}", get(game_info))
+        .route("/admin/api/playtime", get(playtime_heatmap))
         .route("/admin/api/users", get(list_users))
         .route("/admin/api/users/{id}", get(user_details).delete(delete_user))
         .route("/admin/api/users/{id}/block", post(set_blocked))
@@ -303,6 +304,17 @@ async fn game_info(
     })))
 }
 
+/// Public URL of a banner stored on this server (banner_key), if any.
+fn banner_url(state: &AppState, banner_key: Option<String>) -> Option<String> {
+    banner_key.map(|key| {
+        format!(
+            "{}/{}",
+            state.config.public_url,
+            key.trim_start_matches('/')
+        )
+    })
+}
+
 async fn list_users(State(state): State<AppState>, _admin: AdminSession) -> ApiResult<Json<Value>> {
     let rows = sqlx::query(
         "SELECT u.*,
@@ -325,6 +337,7 @@ async fn list_users(State(state): State<AppState>, _admin: AdminSession) -> ApiR
                 "username": row.get::<Option<String>, _>("username"),
                 "displayName": row.get::<String, _>("display_name"),
                 "profileImageUrl": row.get::<Option<String>, _>("profile_image_url"),
+                "bannerUrl": banner_url(&state, row.get("banner_key")),
                 "isBlocked": row.get::<i64, _>("is_blocked") != 0,
                 "lastSeenAt": row.get::<String, _>("last_seen_at"),
                 "createdAt": row.get::<String, _>("created_at"),
@@ -395,6 +408,7 @@ async fn user_details(
             "username": user.get::<Option<String>, _>("username"),
             "displayName": user.get::<String, _>("display_name"),
             "profileImageUrl": user.get::<Option<String>, _>("profile_image_url"),
+            "bannerUrl": banner_url(&state, user.get("banner_key")),
             "isBlocked": user.get::<i64, _>("is_blocked") != 0,
             "createdAt": user.get::<String, _>("created_at"),
             "lastSeenAt": user.get::<String, _>("last_seen_at"),
@@ -439,6 +453,96 @@ async fn user_details(
             "updatedAt": row.get::<String, _>("updated_at"),
         })).collect::<Vec<_>>(),
     })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaytimeQuery {
+    #[serde(default)]
+    days: Option<i64>,
+    #[serde(default)]
+    user_id: Option<String>,
+}
+
+/// Days with playtime keep only their biggest games in the payload; the
+/// tooltip never shows more than the top one anyway.
+const HEATMAP_GAMES_PER_DAY: usize = 5;
+
+/// GET /admin/api/playtime?days=364[&userId=…] — daily playtime buckets,
+/// aggregated across every user unless a userId is given. Game names come
+/// from the metadata cache and stay null until something resolves them.
+async fn playtime_heatmap(
+    State(state): State<AppState>,
+    _admin: AdminSession,
+    Query(query): Query<PlaytimeQuery>,
+) -> ApiResult<Json<Value>> {
+    let days = query.days.unwrap_or(364).clamp(1, 366);
+    let since = (Utc::now().date_naive() - chrono::Duration::days(days - 1)).to_string();
+
+    let mut sql = String::from(
+        "SELECT p.day, p.shop, p.object_id, SUM(p.seconds) AS seconds,
+            COUNT(DISTINCT p.user_id) AS player_count, g.name AS game_name
+         FROM playtime_daily p
+         LEFT JOIN game_metadata g ON g.shop = p.shop AND g.object_id = p.object_id
+         WHERE p.day >= ?",
+    );
+    if query.user_id.is_some() {
+        sql.push_str(" AND p.user_id = ?");
+    }
+    sql.push_str(" GROUP BY p.day, p.shop, p.object_id ORDER BY p.day ASC, seconds DESC");
+
+    let mut db_query = sqlx::query(&sql).bind(&since);
+    if let Some(user_id) = &query.user_id {
+        db_query = db_query.bind(user_id);
+    }
+    let rows = db_query.fetch_all(&state.pool).await?;
+
+    /* Distinct players per day can't be derived from the per-game grouping
+       above (one player may appear under several games). */
+    let mut players_by_day: std::collections::BTreeMap<String, i64> = Default::default();
+    if query.user_id.is_none() {
+        let player_rows = sqlx::query(
+            "SELECT day, COUNT(DISTINCT user_id) AS player_count
+             FROM playtime_daily WHERE day >= ? GROUP BY day",
+        )
+        .bind(&since)
+        .fetch_all(&state.pool)
+        .await?;
+
+        for row in player_rows {
+            players_by_day.insert(row.get("day"), row.get("player_count"));
+        }
+    }
+
+    /* Totals count every game; the games list keeps only the biggest ones
+       (rows arrive seconds DESC within each day). */
+    let mut by_day: std::collections::BTreeMap<String, (i64, Vec<Value>)> = Default::default();
+    for row in rows {
+        let day: String = row.get("day");
+        let seconds: i64 = row.get("seconds");
+        let (total, games) = by_day.entry(day).or_default();
+        *total += seconds;
+        if games.len() < HEATMAP_GAMES_PER_DAY {
+            games.push(json!({
+                "shop": row.get::<String, _>("shop"),
+                "objectId": row.get::<String, _>("object_id"),
+                "name": row.get::<Option<String>, _>("game_name"),
+                "seconds": seconds,
+            }));
+        }
+    }
+
+    Ok(Json(json!(by_day
+        .into_iter()
+        .map(|(day, (total, games))| {
+            json!({
+                "day": day.clone(),
+                "totalSeconds": total,
+                "playerCount": players_by_day.get(&day).copied().unwrap_or(1),
+                "games": games,
+            })
+        })
+        .collect::<Vec<_>>())))
 }
 
 #[derive(Deserialize)]

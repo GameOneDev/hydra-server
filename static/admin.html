@@ -29,7 +29,8 @@
   th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; background: var(--panel-2); }
   tr:last-child td { border-bottom: none; }
   tr.clickable { cursor: pointer; }
-  tr.clickable:hover td { background: var(--panel-2); }
+  tr.clickable:hover td { background-color: var(--panel-2); }
+  td.banner-cell { background-size: cover; background-position: center; }
   table.kv th { width: 200px; background: var(--panel); text-transform: none; font-size: 13px; letter-spacing: 0; }
   table.kv td { word-break: break-all; }
   .avatar { width: 26px; height: 26px; border-radius: 50%; background: var(--panel-2); object-fit: cover; vertical-align: middle; margin-right: 8px; }
@@ -63,7 +64,7 @@
   .settings-actions .status.ok { color: var(--ok); }
   .settings-actions .status.bad { color: var(--danger); }
   .settings-note { margin-top: 10px; font-size: 12px; }
-  .user-head { display: flex; align-items: center; gap: 16px; margin: 12px 0 4px; }
+  .user-head { display: flex; align-items: center; gap: 16px; margin: 12px 0 4px; background-size: cover; background-position: center; }
   .user-head .user-meta { display: flex; flex-direction: column; gap: 2px; }
   .user-head .spacer { flex: 1; }
   #login { max-width: 340px; margin: 18vh auto 0; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 28px; }
@@ -75,6 +76,27 @@
   #login button { width: 100%; padding: 10px; }
   .error { color: var(--danger); font-size: 13px; min-height: 18px; margin-bottom: 8px; }
   .section-title { margin: 28px 0 10px; font-size: 15px; }
+  .heatmap { display: flex; flex-direction: column; gap: 10px; overflow-x: auto; }
+  .heatmap-chart { display: flex; gap: 4px; }
+  .heatmap-weekdays { display: flex; flex-direction: column; gap: 3px; padding-top: 15px; }
+  .heatmap-weekday { flex: 1; display: flex; align-items: center; min-width: 30px; color: var(--muted); font-size: 10px; }
+  .heatmap-weeks { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .heatmap-months { display: flex; gap: 3px; height: 12px; }
+  .heatmap-month { flex: 1; min-width: 6px; overflow: visible; white-space: nowrap; color: var(--muted); font-size: 10px; line-height: 12px; }
+  .heatmap-grid { display: flex; gap: 3px; }
+  .heatmap-week { flex: 1; min-width: 6px; display: flex; flex-direction: column; gap: 3px; }
+  .heatmap-cell { width: 100%; aspect-ratio: 1; border-radius: 2px; }
+  .heatmap-cell.l0 { background: rgba(255, 255, 255, 0.05); }
+  .heatmap-cell.l1 { background: #2e2a5e; }
+  .heatmap-cell.l2 { background: #443c92; }
+  .heatmap-cell.l3 { background: #5d51c8; }
+  .heatmap-cell.l4 { background: var(--accent); }
+  .heatmap-cell.future { background: transparent; }
+  .heatmap-cell:not(.future):hover { outline: 1px solid rgba(255, 255, 255, 0.45); outline-offset: -1px; }
+  .heatmap-legend { display: flex; align-items: center; justify-content: flex-end; gap: 3px; color: var(--muted); font-size: 10px; }
+  .heatmap-legend .heatmap-cell { flex: none; width: 10px; height: 10px; }
+  .heatmap-legend span:first-child { margin-right: 4px; }
+  .heatmap-legend span:last-child { margin-left: 4px; }
   #detail { display: none; }
   .back { color: var(--accent); cursor: pointer; background: none; border: none; padding: 0; font-size: 14px; }
   .hidden { display: none !important; }
@@ -98,6 +120,12 @@
 
   <div id="dashboard">
     <div class="cards" id="cards"></div>
+
+    <h2 class="section-title">Playtime</h2>
+    <div class="panel">
+      <div class="muted" id="playtime-summary" style="font-size: 12px; margin-bottom: 10px;"></div>
+      <div class="heatmap" id="playtime-heatmap"></div>
+    </div>
 
     <h2 class="section-title">Server</h2>
     <table class="kv"><tbody id="server-info"></tbody></table>
@@ -136,6 +164,10 @@
   <div id="detail">
     <button class="back" id="back-btn">&larr; Back to users</button>
     <div class="user-head panel" id="user-head"></div>
+    <h3 class="section-title">Playtime</h3>
+    <div class="panel">
+      <div class="heatmap" id="user-playtime"></div>
+    </div>
     <h3 class="section-title">Cloud save backups</h3>
     <table>
       <thead><tr>
@@ -183,6 +215,10 @@ const fmtDuration = (seconds) => {
 const fmtQuota = (bytes) => bytes ? fmtBytes(bytes) : "unlimited";
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+/* Safe inside CSS url("…"): percent-encode everything url() could choke on. */
+const cssUrl = (u) => encodeURI(String(u)).replace(/["'()]/g, (c) => encodeURIComponent(c));
+const bannerBg = (url, angle) =>
+  `background-image: linear-gradient(${angle}, rgba(20,20,26,.94), rgba(20,20,26,.72)), url("${cssUrl(url)}")`;
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -206,7 +242,95 @@ async function showApp() {
   $("login").classList.add("hidden");
   $("app").classList.remove("hidden");
   await loadOverview();
-  await Promise.all([loadUsers(), loadSettings()]);
+  await Promise.all([loadUsers(), loadSettings(), loadPlaytime()]);
+}
+
+const HEATMAP_WEEKS = 52, HEATMAP_LEVELS = 4;
+const heatmapDayKey = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+/* GitHub-style calendar heatmap; the launcher profile renders the same
+   chart from the same daily buckets. Tooltips are native title attributes. */
+function renderHeatmap(root, entries, aggregate) {
+  root.innerHTML = "";
+  const byDay = new Map(entries.map((e) => [e.day, e]));
+  const max = Math.max(0, ...entries.map((e) => e.totalSeconds));
+  const level = (s) => (s <= 0 || max <= 0)
+    ? 0 : Math.min(HEATMAP_LEVELS, Math.max(1, Math.ceil((s / max) * HEATMAP_LEVELS)));
+
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const start = new Date(today);
+  start.setDate(start.getDate() - (HEATMAP_WEEKS * 7 - 1));
+  start.setDate(start.getDate() - start.getDay());
+
+  const weeks = [];
+  const cursor = new Date(start);
+  while (cursor <= today) {
+    const week = [];
+    for (let i = 0; i < 7; i++) { week.push(new Date(cursor)); cursor.setDate(cursor.getDate() + 1); }
+    weeks.push(week);
+  }
+
+  const monthFmt = new Intl.DateTimeFormat(undefined, { month: "short" });
+  const weekdayFmt = new Intl.DateTimeFormat(undefined, { weekday: "short" });
+  const dateFmt = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
+  const el = (cls, parent) => {
+    const node = document.createElement("div");
+    node.className = cls;
+    parent.appendChild(node);
+    return node;
+  };
+
+  const chart = el("heatmap-chart", root);
+
+  const weekdays = el("heatmap-weekdays", chart);
+  weeks[0].forEach((d, row) => {
+    const label = el("heatmap-weekday", weekdays);
+    if (row % 2 === 1) label.textContent = weekdayFmt.format(d);
+  });
+
+  const weeksEl = el("heatmap-weeks", chart);
+  const months = el("heatmap-months", weeksEl);
+  weeks.forEach((week, i) => {
+    const label = el("heatmap-month", months);
+    const m = week[0].getMonth();
+    if (i === 0 || weeks[i - 1][0].getMonth() !== m) label.textContent = monthFmt.format(week[0]);
+  });
+
+  const grid = el("heatmap-grid", weeksEl);
+  weeks.forEach((week) => {
+    const col = el("heatmap-week", grid);
+    week.forEach((d) => {
+      if (d > today) { el("heatmap-cell future", col); return; }
+      const entry = byDay.get(heatmapDayKey(d));
+      const cell = el(`heatmap-cell l${level(entry?.totalSeconds ?? 0)}`, col);
+      const date = dateFmt.format(d);
+      if (!entry || entry.totalSeconds <= 0) {
+        cell.title = `No playtime on ${date}`;
+        return;
+      }
+      const top = entry.games?.[0];
+      const topName = top ? (top.name || `${top.shop}/${top.objectId}`) : null;
+      cell.title = `${fmtDuration(entry.totalSeconds)} on ${date}`
+        + (topName ? ` · ${topName}` : "")
+        + (aggregate && entry.playerCount
+          ? ` · ${entry.playerCount} player${entry.playerCount === 1 ? "" : "s"}` : "");
+    });
+  });
+
+  const legend = el("heatmap-legend", root);
+  legend.appendChild(document.createElement("span")).textContent = "Less";
+  for (let l = 0; l <= HEATMAP_LEVELS; l++) el(`heatmap-cell l${l}`, legend);
+  legend.appendChild(document.createElement("span")).textContent = "More";
+}
+
+async function loadPlaytime() {
+  const entries = await api("/admin/api/playtime?days=364").catch(() => []);
+  const total = entries.reduce((acc, e) => acc + e.totalSeconds, 0);
+  $("playtime-summary").textContent = total
+    ? `${fmtDuration(total)} played across all users in the last year`
+    : "No playtime reported yet — launchers report it while a game is running.";
+  renderHeatmap($("playtime-heatmap"), entries, true);
 }
 
 async function loadOverview() {
@@ -287,7 +411,7 @@ async function loadUsers() {
   const users = await api("/admin/api/users");
   $("users").innerHTML = users.map((u) => `
     <tr class="clickable" data-id="${esc(u.id)}" data-name="${esc(u.displayName)}">
-      <td>
+      <td${u.bannerUrl ? ` class="banner-cell" style='${bannerBg(u.bannerUrl, "90deg")}'` : ""}>
         ${u.profileImageUrl ? `<img class="avatar" src="${esc(u.profileImageUrl)}" alt="" />` : ""}
         <strong>${esc(u.displayName)}</strong>
         <span class="muted">${u.username ? "@" + esc(u.username) : ""}</span>
@@ -376,6 +500,9 @@ async function openUser(id) {
   $("detail").style.display = "block";
 
   const u = data.user;
+  $("user-head").style.backgroundImage = u.bannerUrl
+    ? `linear-gradient(105deg, rgba(20,20,26,.93), rgba(20,20,26,.6)), url("${cssUrl(u.bannerUrl)}")`
+    : "";
   $("user-head").innerHTML = `
     ${u.profileImageUrl ? `<img class="avatar big" src="${esc(u.profileImageUrl)}" alt="" />` : '<div class="avatar big"></div>'}
     <div class="user-meta">
@@ -428,6 +555,10 @@ async function openUser(id) {
       <td><button class="danger" data-del-save="${esc(s.id)}">Delete</button></td>
     </tr>
   `).join("") || '<tr><td colspan="6" class="muted">No emulation saves.</td></tr>';
+
+  api(`/admin/api/playtime?days=364&userId=${encodeURIComponent(id)}`)
+    .then((entries) => renderHeatmap($("user-playtime"), entries, false))
+    .catch(() => { $("user-playtime").innerHTML = ""; });
 
   resolveGames([...data.artifacts, ...data.achievements]);
 }
