@@ -161,6 +161,10 @@ fn router(_state: AppState) -> Router<AppState> {
             "/profile/playtime",
             get(playtime::heatmap).post(playtime::report),
         )
+        .route(
+            "/profile/playtime/{user_id}",
+            get(playtime::user_heatmap),
+        )
         .route("/presigned-urls/{type}", post(images::presign))
         .route("/profile/stats/{user_id}", get(achievements::user_stats))
         .route("/profile/banners/{user_id}", get(images::get_banner))
