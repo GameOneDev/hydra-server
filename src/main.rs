@@ -7,6 +7,7 @@ mod emulation;
 mod error;
 mod games;
 mod images;
+mod playtime;
 mod settings;
 mod shares;
 mod sources;
@@ -155,6 +156,10 @@ fn router(_state: AppState) -> Router<AppState> {
         .route(
             "/profile/emulation-saves/{id}/download-url",
             post(emulation::download_url),
+        )
+        .route(
+            "/profile/playtime",
+            get(playtime::heatmap).post(playtime::report),
         )
         .route("/presigned-urls/{type}", post(images::presign))
         .route("/profile/stats/{user_id}", get(achievements::user_stats))
