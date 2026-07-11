@@ -29,7 +29,8 @@
   th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; background: var(--panel-2); }
   tr:last-child td { border-bottom: none; }
   tr.clickable { cursor: pointer; }
-  tr.clickable:hover td { background: var(--panel-2); }
+  tr.clickable:hover td { background-color: var(--panel-2); }
+  td.banner-cell { background-size: cover; background-position: center; }
   table.kv th { width: 200px; background: var(--panel); text-transform: none; font-size: 13px; letter-spacing: 0; }
   table.kv td { word-break: break-all; }
   .avatar { width: 26px; height: 26px; border-radius: 50%; background: var(--panel-2); object-fit: cover; vertical-align: middle; margin-right: 8px; }
@@ -63,7 +64,7 @@
   .settings-actions .status.ok { color: var(--ok); }
   .settings-actions .status.bad { color: var(--danger); }
   .settings-note { margin-top: 10px; font-size: 12px; }
-  .user-head { display: flex; align-items: center; gap: 16px; margin: 12px 0 4px; }
+  .user-head { display: flex; align-items: center; gap: 16px; margin: 12px 0 4px; background-size: cover; background-position: center; }
   .user-head .user-meta { display: flex; flex-direction: column; gap: 2px; }
   .user-head .spacer { flex: 1; }
   #login { max-width: 340px; margin: 18vh auto 0; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 28px; }
@@ -214,6 +215,10 @@ const fmtDuration = (seconds) => {
 const fmtQuota = (bytes) => bytes ? fmtBytes(bytes) : "unlimited";
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+/* Safe inside CSS url("…"): percent-encode everything url() could choke on. */
+const cssUrl = (u) => encodeURI(String(u)).replace(/["'()]/g, (c) => encodeURIComponent(c));
+const bannerBg = (url, angle) =>
+  `background-image: linear-gradient(${angle}, rgba(20,20,26,.94), rgba(20,20,26,.72)), url("${cssUrl(url)}")`;
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -406,7 +411,7 @@ async function loadUsers() {
   const users = await api("/admin/api/users");
   $("users").innerHTML = users.map((u) => `
     <tr class="clickable" data-id="${esc(u.id)}" data-name="${esc(u.displayName)}">
-      <td>
+      <td${u.bannerUrl ? ` class="banner-cell" style='${bannerBg(u.bannerUrl, "90deg")}'` : ""}>
         ${u.profileImageUrl ? `<img class="avatar" src="${esc(u.profileImageUrl)}" alt="" />` : ""}
         <strong>${esc(u.displayName)}</strong>
         <span class="muted">${u.username ? "@" + esc(u.username) : ""}</span>
@@ -495,6 +500,9 @@ async function openUser(id) {
   $("detail").style.display = "block";
 
   const u = data.user;
+  $("user-head").style.backgroundImage = u.bannerUrl
+    ? `linear-gradient(105deg, rgba(20,20,26,.93), rgba(20,20,26,.6)), url("${cssUrl(u.bannerUrl)}")`
+    : "";
   $("user-head").innerHTML = `
     ${u.profileImageUrl ? `<img class="avatar big" src="${esc(u.profileImageUrl)}" alt="" />` : '<div class="avatar big"></div>'}
     <div class="user-meta">

@@ -304,6 +304,17 @@ async fn game_info(
     })))
 }
 
+/// Public URL of a banner stored on this server (banner_key), if any.
+fn banner_url(state: &AppState, banner_key: Option<String>) -> Option<String> {
+    banner_key.map(|key| {
+        format!(
+            "{}/{}",
+            state.config.public_url,
+            key.trim_start_matches('/')
+        )
+    })
+}
+
 async fn list_users(State(state): State<AppState>, _admin: AdminSession) -> ApiResult<Json<Value>> {
     let rows = sqlx::query(
         "SELECT u.*,
@@ -326,6 +337,7 @@ async fn list_users(State(state): State<AppState>, _admin: AdminSession) -> ApiR
                 "username": row.get::<Option<String>, _>("username"),
                 "displayName": row.get::<String, _>("display_name"),
                 "profileImageUrl": row.get::<Option<String>, _>("profile_image_url"),
+                "bannerUrl": banner_url(&state, row.get("banner_key")),
                 "isBlocked": row.get::<i64, _>("is_blocked") != 0,
                 "lastSeenAt": row.get::<String, _>("last_seen_at"),
                 "createdAt": row.get::<String, _>("created_at"),
@@ -396,6 +408,7 @@ async fn user_details(
             "username": user.get::<Option<String>, _>("username"),
             "displayName": user.get::<String, _>("display_name"),
             "profileImageUrl": user.get::<Option<String>, _>("profile_image_url"),
+            "bannerUrl": banner_url(&state, user.get("banner_key")),
             "isBlocked": user.get::<i64, _>("is_blocked") != 0,
             "createdAt": user.get::<String, _>("created_at"),
             "lastSeenAt": user.get::<String, _>("last_seen_at"),
