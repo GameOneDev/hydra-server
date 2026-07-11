@@ -7,6 +7,7 @@ mod emulation;
 mod error;
 mod games;
 mod images;
+mod members;
 mod playtime;
 mod settings;
 mod shares;
@@ -165,6 +166,7 @@ fn router(_state: AppState) -> Router<AppState> {
             "/profile/playtime/{user_id}",
             get(playtime::user_heatmap),
         )
+        .route("/profile/members/{user_id}", get(members::lookup))
         .route("/presigned-urls/{type}", post(images::presign))
         .route("/profile/stats/{user_id}", get(achievements::user_stats))
         .route("/profile/banners/{user_id}", get(images::get_banner))
