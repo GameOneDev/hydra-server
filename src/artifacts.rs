@@ -11,7 +11,10 @@ use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
 
-/// Response shape matches the launcher's `GameArtifact` type.
+/// Response shape matches the launcher's `GameArtifact` type. `shop` and
+/// `object_id` are extra fields the launcher's Cloud Save Manager uses to
+/// group a no-filter listing by game; `game_name`/`game_cover_url` come from
+/// the `game_metadata` cache when the listing query joins it.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GameArtifact {
@@ -24,6 +27,10 @@ pub struct GameArtifact {
     pub download_count: i64,
     pub label: Option<String>,
     pub is_frozen: bool,
+    pub shop: String,
+    pub object_id: String,
+    pub game_name: Option<String>,
+    pub game_cover_url: Option<String>,
 }
 
 pub(crate) fn artifact_from_row(row: &sqlx::sqlite::SqliteRow) -> GameArtifact {
@@ -37,6 +44,10 @@ pub(crate) fn artifact_from_row(row: &sqlx::sqlite::SqliteRow) -> GameArtifact {
         download_count: row.get("download_count"),
         label: row.get("label"),
         is_frozen: row.get::<i64, _>("is_frozen") != 0,
+        shop: row.get("shop"),
+        object_id: row.get("object_id"),
+        game_name: row.try_get("game_name").unwrap_or(None),
+        game_cover_url: row.try_get("game_cover_url").unwrap_or(None),
     }
 }
 
@@ -58,12 +69,14 @@ pub async fn list(
     Query(query): Query<ListQuery>,
 ) -> ApiResult<Json<Vec<GameArtifact>>> {
     let rows = sqlx::query(
-        "SELECT * FROM artifacts
-         WHERE user_id = ?
-           AND is_uploaded = 1
-           AND (? IS NULL OR shop = ?)
-           AND (? IS NULL OR object_id = ?)
-         ORDER BY created_at DESC",
+        "SELECT a.*, g.name AS game_name, g.cover_url AS game_cover_url
+         FROM artifacts a
+         LEFT JOIN game_metadata g ON g.shop = a.shop AND g.object_id = a.object_id
+         WHERE a.user_id = ?
+           AND a.is_uploaded = 1
+           AND (? IS NULL OR a.shop = ?)
+           AND (? IS NULL OR a.object_id = ?)
+         ORDER BY a.created_at DESC",
     )
     .bind(&user.0.id)
     .bind(&query.shop)
