@@ -26,10 +26,9 @@ pub struct ArtifactShare {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedGameArtifact {
+    /* The flattened artifact already carries shop/objectId. */
     #[serde(flatten)]
     pub artifact: GameArtifact,
-    pub shop: String,
-    pub object_id: String,
     pub shared_at: String,
     pub shared_by: SharedBy,
 }
@@ -192,8 +191,6 @@ pub async fn shared_with_me(
         .iter()
         .map(|row| SharedGameArtifact {
             artifact: crate::artifacts::artifact_from_row(row),
-            shop: row.get("shop"),
-            object_id: row.get("object_id"),
             shared_at: row.get("shared_at"),
             shared_by: SharedBy {
                 id: row.get("owner_id"),
