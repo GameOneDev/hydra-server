@@ -18,6 +18,7 @@ and download sources browsing all work exactly as before.
 | Achievement sync across devices | **this server** |
 | Download source list sync across devices | **this server** |
 | Profile banner image hosting | **this server** (URL saved to the official profile) |
+| Custom game images (covers, icons, logos, banners) | **this server** |
 | Admin panel (users, storage, quotas) | **this server** at `/admin` |
 
 ## How authentication works
@@ -61,7 +62,7 @@ subscription needed.
 | `HYDRA_OFFICIAL_API_URL` | `https://hydra-api-us-east-1.losbroxas.org` | Official API used to validate launcher tokens. If token validation fails with your launcher build, set this to the same API URL the launcher was built with (`MAIN_VITE_API_URL`) |
 | `HYDRA_ADMIN_PASSWORD` | *(empty)* | Password for `/admin`. Panel is disabled while empty |
 | `HYDRA_SERVER_SECRET` | auto-generated | Secret signing storage URLs and admin sessions; persisted to `<data dir>/.secret` when auto-generated |
-| `HYDRA_MAX_BYTES_PER_USER` | `0` (unlimited) | Per-user storage quota in bytes |
+| `HYDRA_MAX_BYTES_PER_USER` | `0` (unlimited) | Per-user storage quota in bytes — counts save backups, emulation saves and uploaded custom images |
 | `HYDRA_BACKUPS_PER_GAME_LIMIT` | `100` | Max save backups per game per user |
 | `HYDRA_ALLOWED_USERS` | *(empty = everyone)* | Comma-separated official user ids or usernames allowed to use this server |
 
@@ -90,6 +91,17 @@ Implements the endpoints the launcher routes to a self-hosted cloud server:
   `DELETE|PATCH /profile/games/artifacts/{id}`, `PUT …/{id}/freeze|unfreeze`
 - `PUT /profile/games/achievements` (union merge by achievement name, earliest
   unlock wins), `DELETE /profile/games/achievements/{remoteGameId}`
+- `GET /profile/achievements/{userId}` — recently unlocked achievements for a
+  profile, so members show recent activity the official API only compares for
+  subscribers. Names and unlock times only; the launcher joins the public
+  catalogue for icons and titles. Deliberately not under
+  `/profile/games/achievements`, which the launcher mirrors to both servers
+- `POST /profile/games/{shop}/{objectId}/artwork/{grids|heroes|logos|icons}/upload-url`,
+  `PUT|DELETE /profile/games/{shop}/{objectId}/artwork/{kind}` — custom game
+  images, uploaded here or picked from SteamGridDB
+- `GET /profile/games/artwork`, `GET /profile/games/artwork/{userId}` — the
+  launcher reads these back to repaint its library and to show other members'
+  custom images on their profiles
 - `GET|POST|DELETE /profile/download-sources`
 - `GET /profile/emulation-saves`, `POST /profile/emulation-saves/upload-url`,
   `POST …/{id}/commit`, `POST …/{id}/download-url`, `PUT|DELETE …/{id}`

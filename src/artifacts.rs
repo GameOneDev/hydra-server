@@ -182,23 +182,9 @@ async fn enforce_quotas(
     }
 
     if max_bytes_per_user > 0 {
-        let used: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(artifact_length_in_bytes), 0) FROM artifacts WHERE user_id = ?",
-        )
-        .bind(user_id)
-        .fetch_one(&state.pool)
-        .await?;
+        let used = storage::used_bytes(state, user_id).await?;
 
-        let emulation_used: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(artifact_length_in_bytes), 0) FROM emulation_saves WHERE user_id = ?",
-        )
-        .bind(user_id)
-        .fetch_one(&state.pool)
-        .await?;
-
-        if used + emulation_used + payload.artifact_length_in_bytes
-            > max_bytes_per_user as i64
-        {
+        if used + payload.artifact_length_in_bytes > max_bytes_per_user as i64 {
             return Err(ApiError::new(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "storage quota exceeded — free up space or ask the server admin",

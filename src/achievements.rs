@@ -1,5 +1,6 @@
 use crate::auth::CurrentUser;
 use crate::error::{ApiError, ApiResult};
+use crate::games;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -28,26 +29,38 @@ fn achievement_name(achievement: &Value) -> Option<&str> {
     achievement.get("name").and_then(Value::as_str)
 }
 
-fn unlocked_at(achievement: &Value) -> i64 {
+/// The launcher's `UnlockedAchievement` calls this field `unlockTime`.
+/// `unlockedAt` is accepted too so anything already stored under the older
+/// name keeps working.
+fn unlock_time(achievement: &Value) -> Option<i64> {
     achievement
-        .get("unlockedAt")
+        .get("unlockTime")
+        .or_else(|| achievement.get("unlockedAt"))
         .and_then(Value::as_i64)
-        .unwrap_or(i64::MAX)
+}
+
+/// Ordering key for "earliest unlock wins": entries with no time sort last,
+/// so a real time always beats a missing one.
+fn unlocked_at(achievement: &Value) -> i64 {
+    unlock_time(achievement).unwrap_or(i64::MAX)
 }
 
 /// Union-merge by achievement name, keeping the earliest unlock time.
+///
+/// Names are compared case-insensitively, as the launcher does: the same
+/// achievement can be recorded with different casing depending on where it
+/// was read from, and matching exactly would store it twice.
 fn merge_achievements(existing: Vec<Value>, incoming: Vec<Value>) -> Vec<Value> {
     let mut merged: Vec<Value> = Vec::with_capacity(existing.len() + incoming.len());
 
     for achievement in existing.into_iter().chain(incoming) {
-        let Some(name) = achievement_name(&achievement).map(str::to_string) else {
+        let Some(name) = achievement_name(&achievement).map(str::to_uppercase) else {
             continue;
         };
 
-        match merged
-            .iter_mut()
-            .find(|entry| achievement_name(entry) == Some(name.as_str()))
-        {
+        match merged.iter_mut().find(|entry| {
+            achievement_name(entry).map(str::to_uppercase) == Some(name.clone())
+        }) {
             Some(entry) => {
                 if unlocked_at(&achievement) < unlocked_at(entry) {
                     *entry = achievement;
@@ -155,6 +168,116 @@ pub async fn user_stats(
     Ok(Json(json!({ "unlockedAchievementSum": sum })))
 }
 
+/// How many games' worth of recent unlocks a profile view gets back.
+const RECENT_GAMES_LIMIT: usize = 6;
+
+/// How many achievements are kept per game.
+///
+/// The launcher renders only a couple, but it also counts what it receives
+/// to show "(N new)" beside the game — so trimming close to what's displayed
+/// makes that number read as the cap rather than the real total. This is a
+/// safety bound on the response size, not a display limit: it sits well
+/// above any real game's achievement count so it never truncates in
+/// practice.
+const RECENT_ACHIEVEMENTS_PER_GAME: usize = 500;
+
+/// One game's most recent unlocks, paired with the unlock time used to rank
+/// it against other games. `None` when nothing in the game is unlocked.
+fn recent_game(shop: String, object_id: String, achievements: &[Value]) -> Option<(i64, Value)> {
+    /* Only unlocked entries carry a time; the rest can't be ranked by
+       recency and would just be noise on a profile. */
+    let mut unlocked: Vec<(i64, &Value)> = achievements
+        .iter()
+        .filter_map(|achievement| Some((unlock_time(achievement)?, achievement)))
+        .collect();
+
+    unlocked.sort_by_key(|(time, _)| std::cmp::Reverse(*time));
+
+    let most_recent = unlocked.first().map(|(time, _)| *time)?;
+    let unlocked_count = unlocked.len();
+
+    let trimmed: Vec<Value> = unlocked
+        .into_iter()
+        .take(RECENT_ACHIEVEMENTS_PER_GAME)
+        .map(|(time, achievement)| {
+            json!({
+                "name": achievement.get("name"),
+                /* Named as the launcher names it, so the client reads the
+                   same field it uses for its own achievements. */
+                "unlockTime": time,
+            })
+        })
+        .collect();
+
+    Some((
+        most_recent,
+        json!({
+            "shop": shop,
+            "objectId": object_id,
+            /* Total unlocked, not the trimmed list, so the launcher shows a
+               true count next to the game. */
+            "unlockedCount": unlocked_count,
+            "achievements": trimmed,
+        }),
+    ))
+}
+
+/// GET /profile/achievements/{userId} — recently unlocked achievements.
+///
+/// The official API only compares achievements for subscribers, so profiles
+/// of members without one show nothing there. This serves the achievements
+/// synced to this server instead. Only names and unlock times live here —
+/// icons and titles come from the public catalogue, which the launcher joins
+/// on. Any authenticated user may read these; they're profile content.
+///
+/// Deliberately NOT under `/profile/games/achievements`: the launcher mirrors
+/// its achievement sync to both this server and the official API, and a path
+/// under that prefix would capture the official half too.
+pub async fn recent(
+    State(state): State<AppState>,
+    _viewer: CurrentUser,
+    Path(user_id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let rows = sqlx::query(
+        "SELECT shop, object_id, achievements FROM game_achievements
+         WHERE user_id = ? AND shop IS NOT NULL AND object_id IS NOT NULL",
+    )
+    .bind(&user_id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut games: Vec<(i64, Value)> = rows
+        .iter()
+        .filter_map(|row| {
+            let achievements: Vec<Value> =
+                serde_json::from_str(&row.get::<String, _>("achievements")).ok()?;
+
+            recent_game(row.get("shop"), row.get("object_id"), &achievements)
+        })
+        .collect();
+
+    games.sort_by_key(|(most_recent, _)| std::cmp::Reverse(*most_recent));
+    games.truncate(RECENT_GAMES_LIMIT);
+
+    /* The viewer may not have the game in their own library, and the owner's
+       library isn't always readable, so the name and cover ride along from
+       the metadata cache. Without them the launcher has unlocks it can't
+       label and has to drop. Bounded by RECENT_GAMES_LIMIT, and cached after
+       the first lookup. */
+    let mut resolved = Vec::with_capacity(games.len());
+    for (_, mut game) in games {
+        let shop = game["shop"].as_str().unwrap_or_default().to_string();
+        let object_id = game["objectId"].as_str().unwrap_or_default().to_string();
+        let metadata = games::resolve(&state, &shop, &object_id).await;
+
+        game["title"] = json!(metadata.name);
+        game["coverUrl"] = json!(metadata.cover_url);
+        resolved.push(game);
+    }
+
+    Ok(Json(json!({ "games": resolved })))
+}
+
 /// DELETE /profile/games/achievements/{remoteGameId} — achievement reset.
 pub async fn reset(
     State(state): State<AppState>,
@@ -177,12 +300,12 @@ mod tests {
     #[test]
     fn merge_keeps_earliest_unlock_and_unions_names() {
         let existing = vec![
-            json!({ "name": "FIRST_BLOOD", "unlockedAt": 100 }),
-            json!({ "name": "SPEEDRUN", "unlockedAt": 300 }),
+            json!({ "name": "FIRST_BLOOD", "unlockTime": 100 }),
+            json!({ "name": "SPEEDRUN", "unlockTime": 300 }),
         ];
         let incoming = vec![
-            json!({ "name": "FIRST_BLOOD", "unlockedAt": 50 }),
-            json!({ "name": "COLLECTOR", "unlockedAt": 200 }),
+            json!({ "name": "FIRST_BLOOD", "unlockTime": 50 }),
+            json!({ "name": "COLLECTOR", "unlockTime": 200 }),
         ];
 
         let merged = merge_achievements(existing, incoming);
@@ -192,5 +315,100 @@ mod tests {
         assert!(merged
             .iter()
             .any(|a| achievement_name(a) == Some("COLLECTOR")));
+    }
+
+    #[test]
+    fn recent_game_ranks_by_newest_unlock_and_drops_locked() {
+        let achievements = vec![
+            json!({ "name": "OLD", "unlockTime": 100 }),
+            json!({ "name": "LOCKED" }),
+            json!({ "name": "NEW", "unlockTime": 900 }),
+        ];
+
+        let (most_recent, game) =
+            recent_game("steam".into(), "440".into(), &achievements).expect("game");
+
+        assert_eq!(most_recent, 900);
+        assert_eq!(game["objectId"], "440");
+
+        let names: Vec<&str> = game["achievements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["name"].as_str().unwrap())
+            .collect();
+
+        assert_eq!(names, vec!["NEW", "OLD"]);
+    }
+
+    /// The launcher stores `unlockTime`. Reading the wrong field made every
+    /// achievement look locked, so profiles came back empty while the
+    /// database was full.
+    #[test]
+    fn recent_game_reads_the_launcher_unlock_field() {
+        let launcher_payload = vec![json!({ "name": "FIRST_BLOOD", "unlockTime": 1700 })];
+
+        let (most_recent, game) =
+            recent_game("steam".into(), "440".into(), &launcher_payload).expect("game");
+
+        assert_eq!(most_recent, 1700);
+        assert_eq!(game["achievements"][0]["unlockTime"], 1700);
+    }
+
+    /// Rows written before the field name was corrected still resolve.
+    #[test]
+    fn recent_game_accepts_the_legacy_unlock_field() {
+        let legacy = vec![json!({ "name": "FIRST_BLOOD", "unlockedAt": 1700 })];
+
+        let (most_recent, _) =
+            recent_game("steam".into(), "440".into(), &legacy).expect("game");
+
+        assert_eq!(most_recent, 1700);
+    }
+
+    /// The same achievement read from different sources can differ in
+    /// casing; matching exactly would store it twice.
+    #[test]
+    fn merge_treats_differently_cased_names_as_one_achievement() {
+        let merged = merge_achievements(
+            vec![json!({ "name": "ach_win_one_game", "unlockTime": 300 })],
+            vec![json!({ "name": "ACH_WIN_ONE_GAME", "unlockTime": 100 })],
+        );
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(unlocked_at(&merged[0]), 100);
+    }
+
+    #[test]
+    fn merge_prefers_a_real_unlock_time_over_a_missing_one() {
+        let merged = merge_achievements(
+            vec![json!({ "name": "FIRST_BLOOD" })],
+            vec![json!({ "name": "FIRST_BLOOD", "unlockTime": 50 })],
+        );
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(unlocked_at(&merged[0]), 50);
+    }
+
+    /// The launcher counts what it receives to show "(N new)", so a real
+    /// game's unlocks must arrive whole rather than trimmed to the cap.
+    #[test]
+    fn recent_game_keeps_every_unlock_of_a_realistic_game() {
+        let achievements: Vec<Value> = (0..104)
+            .map(|i| json!({ "name": format!("ACH_{i}"), "unlockTime": 1000 + i }))
+            .collect();
+
+        let (_, game) =
+            recent_game("steam".into(), "648800".into(), &achievements).expect("game");
+
+        assert_eq!(game["achievements"].as_array().unwrap().len(), 104);
+        assert_eq!(game["unlockedCount"], 104);
+    }
+
+    #[test]
+    fn recent_game_skips_games_with_nothing_unlocked() {
+        let achievements = vec![json!({ "name": "LOCKED" })];
+
+        assert!(recent_game("steam".into(), "440".into(), &achievements).is_none());
     }
 }

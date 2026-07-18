@@ -172,6 +172,16 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
         sqlx::query_scalar("SELECT COUNT(*) FROM artifact_shares")
             .fetch_one(&state.pool)
             .await?;
+    /* Only uploads occupy disk; SteamGridDB picks are recorded with a zero
+       size and so drop out of both counts. */
+    let artwork_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM game_artwork WHERE size_in_bytes > 0")
+            .fetch_one(&state.pool)
+            .await?;
+    let artwork_bytes: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(size_in_bytes), 0) FROM game_artwork")
+            .fetch_one(&state.pool)
+            .await?;
 
     /* WAL/SHM files hold data not yet checkpointed into the main file, so
        count them into the database size too. */
@@ -194,7 +204,8 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
         "emulationSaveCount": save_count,
         "achievementGameCount": achievement_game_count,
         "sharedArtifactCount": shared_artifact_count,
-        "totalBytes": artifact_bytes + save_bytes,
+        "customImageCount": artwork_count,
+        "totalBytes": artifact_bytes + save_bytes + artwork_bytes,
         "databaseBytes": database_bytes,
         "maxBytesPerUser": current.max_bytes_per_user,
         "backupsPerGameLimit": current.backups_per_game_limit,
@@ -321,8 +332,11 @@ async fn list_users(State(state): State<AppState>, _admin: AdminSession) -> ApiR
             (SELECT COUNT(*) FROM artifacts a WHERE a.user_id = u.id) AS artifact_count,
             (SELECT COALESCE(SUM(artifact_length_in_bytes), 0) FROM artifacts a WHERE a.user_id = u.id)
               + (SELECT COALESCE(SUM(artifact_length_in_bytes), 0) FROM emulation_saves e WHERE e.user_id = u.id)
+              + (SELECT COALESCE(SUM(size_in_bytes), 0) FROM game_artwork w WHERE w.user_id = u.id)
               AS total_bytes,
             (SELECT COUNT(*) FROM emulation_saves e WHERE e.user_id = u.id) AS save_count,
+            (SELECT COUNT(*) FROM game_artwork w WHERE w.user_id = u.id AND w.size_in_bytes > 0)
+              AS custom_image_count,
             (SELECT COUNT(*) FROM game_achievements g WHERE g.user_id = u.id) AS achievement_games
          FROM users u ORDER BY u.last_seen_at DESC",
     )
@@ -343,6 +357,7 @@ async fn list_users(State(state): State<AppState>, _admin: AdminSession) -> ApiR
                 "createdAt": row.get::<String, _>("created_at"),
                 "artifactCount": row.get::<i64, _>("artifact_count"),
                 "emulationSaveCount": row.get::<i64, _>("save_count"),
+                "customImageCount": row.get::<i64, _>("custom_image_count"),
                 "achievementGameCount": row.get::<i64, _>("achievement_games"),
                 "totalBytes": row.get::<i64, _>("total_bytes"),
             })
@@ -362,8 +377,11 @@ async fn user_details(
             (SELECT COUNT(*) FROM artifacts a WHERE a.user_id = u.id) AS artifact_count,
             (SELECT COALESCE(SUM(artifact_length_in_bytes), 0) FROM artifacts a WHERE a.user_id = u.id)
               + (SELECT COALESCE(SUM(artifact_length_in_bytes), 0) FROM emulation_saves e WHERE e.user_id = u.id)
+              + (SELECT COALESCE(SUM(size_in_bytes), 0) FROM game_artwork w WHERE w.user_id = u.id)
               AS total_bytes,
             (SELECT COUNT(*) FROM emulation_saves e WHERE e.user_id = u.id) AS save_count,
+            (SELECT COUNT(*) FROM game_artwork w WHERE w.user_id = u.id AND w.size_in_bytes > 0)
+              AS custom_image_count,
             (SELECT COUNT(*) FROM game_achievements g WHERE g.user_id = u.id) AS achievement_games
          FROM users u WHERE u.id = ?",
     )
@@ -414,6 +432,7 @@ async fn user_details(
             "lastSeenAt": user.get::<String, _>("last_seen_at"),
             "artifactCount": user.get::<i64, _>("artifact_count"),
             "emulationSaveCount": user.get::<i64, _>("save_count"),
+            "customImageCount": user.get::<i64, _>("custom_image_count"),
             "achievementGameCount": user.get::<i64, _>("achievement_games"),
             "totalBytes": user.get::<i64, _>("total_bytes"),
         },
@@ -585,11 +604,16 @@ async fn delete_user(
             .fetch_all(&state.pool)
             .await?;
 
+    let artwork_keys = crate::artwork::storage_keys_for_user(&state, &id).await;
+
     sqlx::query("DELETE FROM users WHERE id = ?")
         .bind(&id)
         .execute(&state.pool)
         .await?;
 
+    for key in artwork_keys {
+        storage::delete_object(&state, &key).await;
+    }
     for artifact_id in artifact_ids {
         storage::delete_object(&state, &format!("artifacts/{artifact_id}.tar")).await;
     }
