@@ -154,7 +154,7 @@
     <h2 class="section-title">Users</h2>
     <table>
       <thead><tr>
-        <th>User</th><th>Backups</th><th>Emu saves</th><th>Achievements</th>
+        <th>User</th><th>Backups</th><th>Emu saves</th><th>Achievements</th><th>Images</th>
         <th>Storage used</th><th>Last seen</th><th>Status</th><th></th>
       </tr></thead>
       <tbody id="users"></tbody>
@@ -343,6 +343,7 @@ async function loadOverview() {
     ["Save backups", data.artifactCount, data.sharedArtifactCount ? `${data.sharedArtifactCount} shared` : ""],
     ["Emulation saves", data.emulationSaveCount, ""],
     ["Achievement games", data.achievementGameCount, "synced game entries"],
+    ["Custom images", data.customImageCount, "uploaded covers, icons, logos"],
     ["Total storage", fmtBytes(data.totalBytes), `db ${fmtBytes(data.databaseBytes)}`],
     ["Per-user quota", fmtQuota(data.maxBytesPerUser), `${data.backupsPerGameLimit} backups/game`],
   ].map(([label, value, sub]) =>
@@ -419,6 +420,7 @@ async function loadUsers() {
       <td>${u.artifactCount}</td>
       <td>${u.emulationSaveCount}</td>
       <td>${u.achievementGameCount}</td>
+      <td>${u.customImageCount}</td>
       <td>${fmtBytes(u.totalBytes)}${quotaBytes ? ` <span class="muted">(${Math.round(u.totalBytes / quotaBytes * 100)}%)</span>` : ""}</td>
       <td class="muted">${fmtDate(u.lastSeenAt)}</td>
       <td>${u.isBlocked ? '<span class="pill bad">blocked</span>' : '<span class="pill ok">active</span>'}</td>
@@ -427,7 +429,7 @@ async function loadUsers() {
         <button class="danger" data-action="delete">Delete data</button>
       </td>
     </tr>
-  `).join("") || '<tr><td colspan="8" class="muted">No users yet — they appear after the first launcher request.</td></tr>';
+  `).join("") || '<tr><td colspan="9" class="muted">No users yet — they appear after the first launcher request.</td></tr>';
 }
 
 $("users").addEventListener("click", async (event) => {
@@ -513,7 +515,7 @@ async function openUser(id) {
       </div>
       <div class="muted mono">${esc(u.id)}</div>
       <div class="muted">First seen ${fmtDate(u.createdAt)} · last seen ${fmtDate(u.lastSeenAt)}</div>
-      <div class="muted">${u.artifactCount} backups · ${u.emulationSaveCount} emu saves · ${u.achievementGameCount} games with achievements · ${fmtBytes(u.totalBytes)} used${quotaBytes ? ` of ${fmtBytes(quotaBytes)}` : ""}</div>
+      <div class="muted">${u.artifactCount} backups · ${u.emulationSaveCount} emu saves · ${u.achievementGameCount} games with achievements · ${u.customImageCount} custom images · ${fmtBytes(u.totalBytes)} used${quotaBytes ? ` of ${fmtBytes(quotaBytes)}` : ""}</div>
     </div>
     <div class="spacer"></div>
     <button id="detail-block" data-blocked="${u.isBlocked}">${u.isBlocked ? "Unblock" : "Block"}</button>

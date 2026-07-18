@@ -27,6 +27,25 @@ pub struct StorageClaims {
     pub exp: i64,
 }
 
+/// Total bytes a user is storing here: save backups, emulation saves and
+/// uploaded custom images. Everything the per-user quota is measured against
+/// lives in one place so the quota check and the admin panel can't drift.
+pub async fn used_bytes(state: &AppState, user_id: &str) -> ApiResult<i64> {
+    let used: i64 = sqlx::query_scalar(
+        "SELECT (SELECT COALESCE(SUM(artifact_length_in_bytes), 0)
+                   FROM artifacts WHERE user_id = ?1)
+              + (SELECT COALESCE(SUM(artifact_length_in_bytes), 0)
+                   FROM emulation_saves WHERE user_id = ?1)
+              + (SELECT COALESCE(SUM(size_in_bytes), 0)
+                   FROM game_artwork WHERE user_id = ?1)",
+    )
+    .bind(user_id)
+    .fetch_one(&state.pool)
+    .await?;
+
+    Ok(used)
+}
+
 pub fn sign_upload_url(state: &AppState, key: &str, max_bytes: u64) -> String {
     sign_url(state, "put", key, max_bytes, UPLOAD_TOKEN_TTL_SECONDS)
 }
