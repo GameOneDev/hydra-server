@@ -585,11 +585,16 @@ async fn delete_user(
             .fetch_all(&state.pool)
             .await?;
 
+    let artwork_keys = crate::artwork::storage_keys_for_user(&state, &id).await;
+
     sqlx::query("DELETE FROM users WHERE id = ?")
         .bind(&id)
         .execute(&state.pool)
         .await?;
 
+    for key in artwork_keys {
+        storage::delete_object(&state, &key).await;
+    }
     for artifact_id in artifact_ids {
         storage::delete_object(&state, &format!("artifacts/{artifact_id}.tar")).await;
     }

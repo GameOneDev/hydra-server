@@ -18,6 +18,7 @@ and download sources browsing all work exactly as before.
 | Achievement sync across devices | **this server** |
 | Download source list sync across devices | **this server** |
 | Profile banner image hosting | **this server** (URL saved to the official profile) |
+| Custom game images (covers, icons, logos, banners) | **this server** |
 | Admin panel (users, storage, quotas) | **this server** at `/admin` |
 
 ## How authentication works
@@ -90,6 +91,12 @@ Implements the endpoints the launcher routes to a self-hosted cloud server:
   `DELETE|PATCH /profile/games/artifacts/{id}`, `PUT …/{id}/freeze|unfreeze`
 - `PUT /profile/games/achievements` (union merge by achievement name, earliest
   unlock wins), `DELETE /profile/games/achievements/{remoteGameId}`
+- `POST /profile/games/{shop}/{objectId}/artwork/{grids|heroes|logos|icons}/upload-url`,
+  `PUT|DELETE /profile/games/{shop}/{objectId}/artwork/{kind}` — custom game
+  images, uploaded here or picked from SteamGridDB
+- `GET /profile/games/artwork`, `GET /profile/games/artwork/{userId}` — the
+  launcher reads these back to repaint its library and to show other members'
+  custom images on their profiles
 - `GET|POST|DELETE /profile/download-sources`
 - `GET /profile/emulation-saves`, `POST /profile/emulation-saves/upload-url`,
   `POST …/{id}/commit`, `POST …/{id}/download-url`, `PUT|DELETE …/{id}`

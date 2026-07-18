@@ -1,6 +1,7 @@
 mod achievements;
 mod admin;
 mod artifacts;
+mod artwork;
 mod auth;
 mod config;
 mod emulation;
@@ -134,6 +135,20 @@ fn router(_state: AppState) -> Router<AppState> {
         .route(
             "/profile/games/artifacts/{id}/unfreeze",
             put(artifacts::unfreeze),
+        )
+        /* Custom game artwork (Hydra Cloud's "Custom Image Sync"). The
+           listing routes sit above the parameterised ones; static segments
+           win in the router, so "artwork"/"artifacts" never get read as a
+           shop name. */
+        .route("/profile/games/artwork", get(artwork::list))
+        .route("/profile/games/artwork/{user_id}", get(artwork::list_for_user))
+        .route(
+            "/profile/games/{shop}/{object_id}/artwork/{kind}/upload-url",
+            post(artwork::upload_url),
+        )
+        .route(
+            "/profile/games/{shop}/{object_id}/artwork/{kind}",
+            put(artwork::save).delete(artwork::delete),
         )
         .route("/profile/games/achievements", put(achievements::sync))
         .route(
