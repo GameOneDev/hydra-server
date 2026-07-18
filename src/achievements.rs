@@ -168,11 +168,18 @@ pub async fn user_stats(
     Ok(Json(json!({ "unlockedAchievementSum": sum })))
 }
 
-/// How many games' worth of recent unlocks a profile view gets back, and how
-/// many achievements are kept per game. The launcher shows far fewer than
-/// this; the slack lets it drop entries whose metadata it can't resolve.
+/// How many games' worth of recent unlocks a profile view gets back.
 const RECENT_GAMES_LIMIT: usize = 6;
-const RECENT_ACHIEVEMENTS_PER_GAME: usize = 10;
+
+/// How many achievements are kept per game.
+///
+/// The launcher renders only a couple, but it also counts what it receives
+/// to show "(N new)" beside the game — so trimming close to what's displayed
+/// makes that number read as the cap rather than the real total. This is a
+/// safety bound on the response size, not a display limit: it sits well
+/// above any real game's achievement count so it never truncates in
+/// practice.
+const RECENT_ACHIEVEMENTS_PER_GAME: usize = 500;
 
 /// One game's most recent unlocks, paired with the unlock time used to rank
 /// it against other games. `None` when nothing in the game is unlocked.
@@ -381,6 +388,21 @@ mod tests {
 
         assert_eq!(merged.len(), 1);
         assert_eq!(unlocked_at(&merged[0]), 50);
+    }
+
+    /// The launcher counts what it receives to show "(N new)", so a real
+    /// game's unlocks must arrive whole rather than trimmed to the cap.
+    #[test]
+    fn recent_game_keeps_every_unlock_of_a_realistic_game() {
+        let achievements: Vec<Value> = (0..104)
+            .map(|i| json!({ "name": format!("ACH_{i}"), "unlockTime": 1000 + i }))
+            .collect();
+
+        let (_, game) =
+            recent_game("steam".into(), "648800".into(), &achievements).expect("game");
+
+        assert_eq!(game["achievements"].as_array().unwrap().len(), 104);
+        assert_eq!(game["unlockedCount"], 104);
     }
 
     #[test]
