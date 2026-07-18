@@ -155,6 +155,97 @@ pub async fn user_stats(
     Ok(Json(json!({ "unlockedAchievementSum": sum })))
 }
 
+/// How many games' worth of recent unlocks a profile view gets back, and how
+/// many achievements are kept per game. The launcher shows far fewer than
+/// this; the slack lets it drop entries whose metadata it can't resolve.
+const RECENT_GAMES_LIMIT: usize = 6;
+const RECENT_ACHIEVEMENTS_PER_GAME: usize = 10;
+
+/// One game's most recent unlocks, paired with the unlock time used to rank
+/// it against other games. `None` when nothing in the game is unlocked.
+fn recent_game(shop: String, object_id: String, achievements: &[Value]) -> Option<(i64, Value)> {
+    /* Only unlocked entries carry a time; the rest can't be ranked by
+       recency and would just be noise on a profile. */
+    let mut unlocked: Vec<&Value> = achievements
+        .iter()
+        .filter(|achievement| {
+            achievement
+                .get("unlockedAt")
+                .and_then(Value::as_i64)
+                .is_some()
+        })
+        .collect();
+
+    unlocked.sort_by_key(|achievement| std::cmp::Reverse(unlocked_at(achievement)));
+
+    let most_recent = unlocked.first().map(|a| unlocked_at(a))?;
+
+    let trimmed: Vec<Value> = unlocked
+        .into_iter()
+        .take(RECENT_ACHIEVEMENTS_PER_GAME)
+        .map(|achievement| {
+            json!({
+                "name": achievement.get("name"),
+                "unlockedAt": achievement.get("unlockedAt"),
+            })
+        })
+        .collect();
+
+    Some((
+        most_recent,
+        json!({
+            "shop": shop,
+            "objectId": object_id,
+            "achievements": trimmed,
+        }),
+    ))
+}
+
+/// GET /profile/achievements/{userId} — recently unlocked achievements.
+///
+/// The official API only compares achievements for subscribers, so profiles
+/// of members without one show nothing there. This serves the achievements
+/// synced to this server instead. Only names and unlock times live here —
+/// icons and titles come from the public catalogue, which the launcher joins
+/// on. Any authenticated user may read these; they're profile content.
+///
+/// Deliberately NOT under `/profile/games/achievements`: the launcher mirrors
+/// its achievement sync to both this server and the official API, and a path
+/// under that prefix would capture the official half too.
+pub async fn recent(
+    State(state): State<AppState>,
+    _viewer: CurrentUser,
+    Path(user_id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let rows = sqlx::query(
+        "SELECT shop, object_id, achievements FROM game_achievements
+         WHERE user_id = ? AND shop IS NOT NULL AND object_id IS NOT NULL",
+    )
+    .bind(&user_id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut games: Vec<(i64, Value)> = rows
+        .iter()
+        .filter_map(|row| {
+            let achievements: Vec<Value> =
+                serde_json::from_str(&row.get::<String, _>("achievements")).ok()?;
+
+            recent_game(row.get("shop"), row.get("object_id"), &achievements)
+        })
+        .collect();
+
+    games.sort_by_key(|(most_recent, _)| std::cmp::Reverse(*most_recent));
+
+    let games: Vec<Value> = games
+        .into_iter()
+        .take(RECENT_GAMES_LIMIT)
+        .map(|(_, game)| game)
+        .collect();
+
+    Ok(Json(json!({ "games": games })))
+}
+
 /// DELETE /profile/games/achievements/{remoteGameId} — achievement reset.
 pub async fn reset(
     State(state): State<AppState>,
@@ -192,5 +283,36 @@ mod tests {
         assert!(merged
             .iter()
             .any(|a| achievement_name(a) == Some("COLLECTOR")));
+    }
+
+    #[test]
+    fn recent_game_ranks_by_newest_unlock_and_drops_locked() {
+        let achievements = vec![
+            json!({ "name": "OLD", "unlockedAt": 100 }),
+            json!({ "name": "LOCKED" }),
+            json!({ "name": "NEW", "unlockedAt": 900 }),
+        ];
+
+        let (most_recent, game) =
+            recent_game("steam".into(), "440".into(), &achievements).expect("game");
+
+        assert_eq!(most_recent, 900);
+        assert_eq!(game["objectId"], "440");
+
+        let names: Vec<&str> = game["achievements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["name"].as_str().unwrap())
+            .collect();
+
+        assert_eq!(names, vec!["NEW", "OLD"]);
+    }
+
+    #[test]
+    fn recent_game_skips_games_with_nothing_unlocked() {
+        let achievements = vec![json!({ "name": "LOCKED" })];
+
+        assert!(recent_game("steam".into(), "440".into(), &achievements).is_none());
     }
 }

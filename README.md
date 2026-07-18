@@ -91,6 +91,11 @@ Implements the endpoints the launcher routes to a self-hosted cloud server:
   `DELETE|PATCH /profile/games/artifacts/{id}`, `PUT …/{id}/freeze|unfreeze`
 - `PUT /profile/games/achievements` (union merge by achievement name, earliest
   unlock wins), `DELETE /profile/games/achievements/{remoteGameId}`
+- `GET /profile/achievements/{userId}` — recently unlocked achievements for a
+  profile, so members show recent activity the official API only compares for
+  subscribers. Names and unlock times only; the launcher joins the public
+  catalogue for icons and titles. Deliberately not under
+  `/profile/games/achievements`, which the launcher mirrors to both servers
 - `POST /profile/games/{shop}/{objectId}/artwork/{grids|heroes|logos|icons}/upload-url`,
   `PUT|DELETE /profile/games/{shop}/{objectId}/artwork/{kind}` — custom game
   images, uploaded here or picked from SteamGridDB

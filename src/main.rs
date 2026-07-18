@@ -184,6 +184,7 @@ fn router(_state: AppState) -> Router<AppState> {
         .route("/profile/members/{user_id}", get(members::lookup))
         .route("/presigned-urls/{type}", post(images::presign))
         .route("/profile/stats/{user_id}", get(achievements::user_stats))
+        .route("/profile/achievements/{user_id}", get(achievements::recent))
         .route("/profile/banners/{user_id}", get(images::get_banner))
         .route("/profile/banner", delete(images::delete_banner))
         .route("/images/{*path}", get(images::serve))
