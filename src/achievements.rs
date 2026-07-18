@@ -46,18 +46,21 @@ fn unlocked_at(achievement: &Value) -> i64 {
 }
 
 /// Union-merge by achievement name, keeping the earliest unlock time.
+///
+/// Names are compared case-insensitively, as the launcher does: the same
+/// achievement can be recorded with different casing depending on where it
+/// was read from, and matching exactly would store it twice.
 fn merge_achievements(existing: Vec<Value>, incoming: Vec<Value>) -> Vec<Value> {
     let mut merged: Vec<Value> = Vec::with_capacity(existing.len() + incoming.len());
 
     for achievement in existing.into_iter().chain(incoming) {
-        let Some(name) = achievement_name(&achievement).map(str::to_string) else {
+        let Some(name) = achievement_name(&achievement).map(str::to_uppercase) else {
             continue;
         };
 
-        match merged
-            .iter_mut()
-            .find(|entry| achievement_name(entry) == Some(name.as_str()))
-        {
+        match merged.iter_mut().find(|entry| {
+            achievement_name(entry).map(str::to_uppercase) == Some(name.clone())
+        }) {
             Some(entry) => {
                 if unlocked_at(&achievement) < unlocked_at(entry) {
                     *entry = achievement;
@@ -354,6 +357,19 @@ mod tests {
             recent_game("steam".into(), "440".into(), &legacy).expect("game");
 
         assert_eq!(most_recent, 1700);
+    }
+
+    /// The same achievement read from different sources can differ in
+    /// casing; matching exactly would store it twice.
+    #[test]
+    fn merge_treats_differently_cased_names_as_one_achievement() {
+        let merged = merge_achievements(
+            vec![json!({ "name": "ach_win_one_game", "unlockTime": 300 })],
+            vec![json!({ "name": "ACH_WIN_ONE_GAME", "unlockTime": 100 })],
+        );
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(unlocked_at(&merged[0]), 100);
     }
 
     #[test]
