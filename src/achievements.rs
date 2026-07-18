@@ -1,5 +1,6 @@
 use crate::auth::CurrentUser;
 use crate::error::{ApiError, ApiResult};
+use crate::games;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -183,6 +184,7 @@ fn recent_game(shop: String, object_id: String, achievements: &[Value]) -> Optio
     unlocked.sort_by_key(|(time, _)| std::cmp::Reverse(*time));
 
     let most_recent = unlocked.first().map(|(time, _)| *time)?;
+    let unlocked_count = unlocked.len();
 
     let trimmed: Vec<Value> = unlocked
         .into_iter()
@@ -202,6 +204,9 @@ fn recent_game(shop: String, object_id: String, achievements: &[Value]) -> Optio
         json!({
             "shop": shop,
             "objectId": object_id,
+            /* Total unlocked, not the trimmed list, so the launcher shows a
+               true count next to the game. */
+            "unlockedCount": unlocked_count,
             "achievements": trimmed,
         }),
     ))
@@ -242,14 +247,25 @@ pub async fn recent(
         .collect();
 
     games.sort_by_key(|(most_recent, _)| std::cmp::Reverse(*most_recent));
+    games.truncate(RECENT_GAMES_LIMIT);
 
-    let games: Vec<Value> = games
-        .into_iter()
-        .take(RECENT_GAMES_LIMIT)
-        .map(|(_, game)| game)
-        .collect();
+    /* The viewer may not have the game in their own library, and the owner's
+       library isn't always readable, so the name and cover ride along from
+       the metadata cache. Without them the launcher has unlocks it can't
+       label and has to drop. Bounded by RECENT_GAMES_LIMIT, and cached after
+       the first lookup. */
+    let mut resolved = Vec::with_capacity(games.len());
+    for (_, mut game) in games {
+        let shop = game["shop"].as_str().unwrap_or_default().to_string();
+        let object_id = game["objectId"].as_str().unwrap_or_default().to_string();
+        let metadata = games::resolve(&state, &shop, &object_id).await;
 
-    Ok(Json(json!({ "games": games })))
+        game["title"] = json!(metadata.name);
+        game["coverUrl"] = json!(metadata.cover_url);
+        resolved.push(game);
+    }
+
+    Ok(Json(json!({ "games": resolved })))
 }
 
 /// DELETE /profile/games/achievements/{remoteGameId} — achievement reset.
