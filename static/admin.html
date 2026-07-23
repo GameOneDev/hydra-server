@@ -100,6 +100,14 @@
   #detail { display: none; }
   .back { color: var(--accent); cursor: pointer; background: none; border: none; padding: 0; font-size: 14px; }
   .hidden { display: none !important; }
+  .update-banner {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    background: rgba(124, 107, 255, .12); border: 1px solid var(--accent);
+    border-radius: 10px; padding: 12px 16px; margin-bottom: 16px;
+  }
+  a.update-link { color: var(--accent); font-weight: 600; text-decoration: none; }
+  a.update-link:hover { text-decoration: underline; }
+  .check-btn { margin-left: 8px; padding: 3px 10px; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -119,6 +127,7 @@
   </header>
 
   <div id="dashboard">
+    <div id="update-banner" class="update-banner hidden"></div>
     <div class="cards" id="cards"></div>
 
     <h2 class="section-title">Playtime</h2>
@@ -350,14 +359,71 @@ async function loadOverview() {
     `<div class="card"><div class="label">${label}</div><div class="value">${value}</div>${sub ? `<div class="sub">${sub}</div>` : ""}</div>`
   ).join("");
 
-  $("server-info").innerHTML = [
-    ["Version", `hydra-server v${data.version}`],
+  const rows = [
+    ["Version", `hydra-server v${data.version} (built for Hydra app v${data.version})`],
     ["Uptime", fmtDuration(data.uptimeSeconds)],
     ["Public URL", data.publicUrl],
     ["Official Hydra API", data.officialApiUrl],
     ["Database size", fmtBytes(data.databaseBytes)],
     ["Allowed users", data.allowedUsers.length ? data.allowedUsers.join(", ") : "everyone with a valid official login"],
-  ].map(([key, value]) => `<tr><th>${key}</th><td>${esc(String(value))}</td></tr>`).join("");
+  ].map(([key, value]) => `<tr><th>${key}</th><td>${esc(String(value))}</td></tr>`);
+  /* Updates row carries its own markup (badge, link, button), so it's built
+     separately rather than through the escaped map above. */
+  rows.splice(2, 0, updateRow(data.update));
+  $("server-info").innerHTML = rows.join("");
+
+  const checkBtn = $("check-updates");
+  if (checkBtn) checkBtn.addEventListener("click", checkForUpdates);
+  renderUpdateBanner(data.update);
+}
+
+function updateStatusText(u) {
+  if (!u) return "—";
+  if (u.updateAvailable && u.latestVersion) return `Update available — hydra-server v${u.latestVersion}`;
+  if (!u.enabled) return "Automatic checks disabled";
+  if (u.latestVersion) return `Up to date — latest release is v${u.latestVersion}`;
+  if (u.lastError) return `Last check failed — ${u.lastError}`;
+  return "No published releases found yet";
+}
+
+function updateRow(u) {
+  const badge = u && u.updateAvailable
+    ? `<span class="pill bad">outdated</span> `
+    : (u && u.enabled && u.latestVersion ? `<span class="pill ok">current</span> ` : "");
+  const link = u && u.updateAvailable && u.releaseUrl
+    ? ` <a class="update-link" href="${esc(u.releaseUrl)}" target="_blank" rel="noopener">release notes ↗</a>`
+    : "";
+  const checked = u && u.lastCheckedAt
+    ? ` <span class="muted">· checked ${esc(fmtDate(u.lastCheckedAt))}</span>`
+    : "";
+  return `<tr><th>Updates</th><td>${badge}${esc(updateStatusText(u))}${link}${checked}`
+    + ` <button id="check-updates" class="check-btn">Check now</button></td></tr>`;
+}
+
+function renderUpdateBanner(u) {
+  const banner = $("update-banner");
+  if (u && u.updateAvailable && u.latestVersion) {
+    banner.className = "update-banner";
+    banner.innerHTML =
+      `<div><strong>Update available:</strong> hydra-server v${esc(u.latestVersion)} is out `
+      + `— you're running v${esc(u.currentVersion)}.</div>`
+      + (u.releaseUrl ? `<a class="update-link" href="${esc(u.releaseUrl)}" target="_blank" rel="noopener">View release ↗</a>` : "");
+  } else {
+    banner.className = "update-banner hidden";
+    banner.innerHTML = "";
+  }
+}
+
+async function checkForUpdates() {
+  const btn = $("check-updates");
+  if (btn) { btn.disabled = true; btn.textContent = "Checking…"; }
+  try {
+    await api("/admin/api/updates/check", { method: "POST" });
+  } catch (err) {
+    if (btn) { btn.disabled = false; btn.textContent = "Check now"; }
+    return alert(err.message);
+  }
+  await loadOverview();
 }
 
 async function loadSettings() {

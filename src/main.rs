@@ -15,6 +15,7 @@ mod shares;
 mod sources;
 mod state;
 mod storage;
+mod updates;
 
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post, put};
@@ -68,6 +69,8 @@ async fn main() {
 
     let bind = config.bind.clone();
     let public_url = config.public_url.clone();
+    let update_check_enabled = config.update_check_enabled;
+    let update_repo = config.update_repo.clone();
 
     let runtime_settings = settings::load(&pool, &config).await;
 
@@ -80,8 +83,14 @@ async fn main() {
             .expect("failed to build http client"),
         token_cache: Arc::new(RwLock::new(HashMap::new())),
         settings: Arc::new(RwLock::new(runtime_settings)),
+        updates: Arc::new(RwLock::new(updates::UpdateStatus::initial(
+            update_check_enabled,
+            update_repo,
+        ))),
         started_at: chrono::Utc::now(),
     };
+
+    updates::spawn(app_state.clone());
 
     let app = router(app_state.clone()).with_state(app_state);
 

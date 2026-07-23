@@ -77,6 +77,7 @@ pub fn router() -> Router<AppState> {
             "/admin/api/settings",
             get(get_settings).put(update_settings).delete(reset_settings),
         )
+        .route("/admin/api/updates/check", post(check_updates))
         .route("/admin/api/games/{shop}/{object_id}", get(game_info))
         .route("/admin/api/playtime", get(playtime_heatmap))
         .route("/admin/api/users", get(list_users))
@@ -196,6 +197,7 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
 
     let current = state.settings.read().await.clone();
     let uptime_seconds = (Utc::now() - state.started_at).num_seconds();
+    let update = state.updates.read().await.clone();
 
     Ok(Json(json!({
         "userCount": user_count,
@@ -214,7 +216,19 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
         "publicUrl": state.config.public_url,
         "version": env!("CARGO_PKG_VERSION"),
         "uptimeSeconds": uptime_seconds,
+        "update": update,
     })))
+}
+
+/// POST /admin/api/updates/check — runs an update check right now and returns
+/// the refreshed status, so the panel's "Check now" button gives feedback
+/// without waiting for the background interval.
+async fn check_updates(
+    State(state): State<AppState>,
+    _admin: AdminSession,
+) -> ApiResult<Json<Value>> {
+    let status = crate::updates::check(&state).await;
+    Ok(Json(json!(status)))
 }
 
 fn settings_json(current: &RuntimeSettings, defaults: &RuntimeSettings, overridden: bool) -> Value {

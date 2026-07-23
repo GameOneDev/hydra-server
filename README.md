@@ -65,9 +65,13 @@ subscription needed.
 | `HYDRA_MAX_BYTES_PER_USER` | `0` (unlimited) | Per-user storage quota in bytes — counts save backups, emulation saves and uploaded custom images |
 | `HYDRA_BACKUPS_PER_GAME_LIMIT` | `100` | Max save backups per game per user |
 | `HYDRA_ALLOWED_USERS` | *(empty = everyone)* | Comma-separated official user ids or usernames allowed to use this server |
+| `HYDRA_UPDATE_CHECK` | `true` | Periodically check GitHub for a newer server release and flag it in the admin panel. Set to `0`/`false` for air-gapped installs |
+| `HYDRA_UPDATE_CHECK_INTERVAL_HOURS` | `6` | Hours between update checks (minimum 1) |
+| `HYDRA_UPDATE_REPO` | `gameonedev/hydra-server` | `owner/repo` whose GitHub releases are compared against the running version |
 
-The last three can also be edited live from the admin panel; values saved there
-are stored in the database and override the environment until reset.
+`HYDRA_MAX_BYTES_PER_USER`, `HYDRA_BACKUPS_PER_GAME_LIMIT` and
+`HYDRA_ALLOWED_USERS` can also be edited live from the admin panel; values
+saved there are stored in the database and override the environment until reset.
 
 ### Admin panel
 
@@ -75,6 +79,8 @@ Open `https://your-server/admin`, sign in with `HYDRA_ADMIN_PASSWORD`:
 
 - overview of users, backups, shares, achievements and total storage
 - server info: version, uptime, database size and effective configuration
+- update status: whether a newer server release is out (checked against GitHub),
+  with a link to the release notes and a "Check now" button
 - edit settings without a restart: per-user quota, backups-per-game limit and
   the allowed-users list, applied immediately and persisted across restarts
 - per-user detail: profile info plus save backups, achievements and emulation
@@ -110,6 +116,22 @@ Implements the endpoints the launcher routes to a self-hosted cloud server:
 - `PUT|GET /storage/{token}` — S3-style presigned upload/download URLs
   (signed, short-lived, streamed to/from disk)
 - `GET /health`
+
+## Versioning & updates
+
+The server's version tracks the Hydra launcher it targets: **`hydra-server
+X.Y.Z` is built for Hydra app `X.Y.Z`**, so the version number alone tells you
+which client release a given server is meant to run alongside.
+
+The server checks its GitHub releases on a schedule (see `HYDRA_UPDATE_CHECK*`
+above) and flags in the admin panel when a newer release is out. It never
+replaces itself — applying the update is left to your deployment:
+
+- **Docker:** `docker compose pull && docker compose up -d` (or rebuild with
+  `docker compose up -d --build` when building from source).
+- **Binary:** `git pull && cargo build --release`, then restart the service.
+
+Your data dir carries over across updates untouched; migrations run on start.
 
 ## Notes
 

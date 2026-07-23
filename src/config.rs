@@ -25,10 +25,28 @@ pub struct Config {
     /// Comma-separated official user ids or usernames allowed to use this
     /// server. Empty = everyone with a valid official login.
     pub allowed_users: Vec<String>,
+    /// Whether the background update checker runs.
+    pub update_check_enabled: bool,
+    /// Hours between update checks (a minimum of 1 is enforced on use).
+    pub update_check_interval_hours: u64,
+    /// `owner/repo` the update checker watches for new server releases.
+    pub update_repo: String,
 }
 
 fn env(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// Reads a boolean env var. Empty/unset falls back to `default`; otherwise
+/// `0`/`false`/`no`/`off` (any case) are false and anything else is true.
+fn env_bool(key: &str, default: bool) -> bool {
+    match std::env::var(key) {
+        Ok(value) if !value.trim().is_empty() => !matches!(
+            value.trim().to_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        _ => default,
+    }
 }
 
 impl Config {
@@ -65,6 +83,15 @@ impl Config {
                 .map(|s| s.trim().to_lowercase())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            update_check_enabled: env_bool("HYDRA_UPDATE_CHECK", true),
+            update_check_interval_hours: env("HYDRA_UPDATE_CHECK_INTERVAL_HOURS", "6")
+                .parse::<u64>()
+                .unwrap_or(6)
+                .max(1),
+            update_repo: env("HYDRA_UPDATE_REPO", "gameonedev/hydra-server")
+                .trim()
+                .trim_matches('/')
+                .to_string(),
             data_dir,
         }
     }

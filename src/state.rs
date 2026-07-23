@@ -65,6 +65,8 @@ pub struct AppState {
     pub token_cache: Arc<RwLock<HashMap<String, CachedUser>>>,
     /// Admin-editable settings; see [`RuntimeSettings`].
     pub settings: Arc<RwLock<RuntimeSettings>>,
+    /// Latest-release status from the update checker; see [`crate::updates`].
+    pub updates: Arc<RwLock<crate::updates::UpdateStatus>>,
     /// Process start, for the admin panel's uptime display.
     pub started_at: DateTime<Utc>,
 }
