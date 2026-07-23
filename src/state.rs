@@ -30,6 +30,8 @@ pub struct RuntimeSettings {
     /// Official user ids or usernames allowed on this server, lowercased.
     /// Empty = everyone with a valid official login.
     pub allowed_users: Vec<String>,
+    /// Install detected updates automatically (see [`crate::updates`]).
+    pub auto_update: bool,
 }
 
 impl RuntimeSettings {
@@ -38,6 +40,7 @@ impl RuntimeSettings {
             max_bytes_per_user: config.max_bytes_per_user,
             backups_per_game_limit: config.backups_per_game_limit,
             allowed_users: config.allowed_users.clone(),
+            auto_update: config.auto_update_enabled,
         }
     }
 

@@ -68,10 +68,12 @@ subscription needed.
 | `HYDRA_UPDATE_CHECK` | `true` | Periodically check GitHub for a newer server release and flag it in the admin panel. Set to `0`/`false` for air-gapped installs |
 | `HYDRA_UPDATE_CHECK_INTERVAL_HOURS` | `6` | Hours between update checks (minimum 1) |
 | `HYDRA_UPDATE_REPO` | `gameonedev/hydra-server` | `owner/repo` whose GitHub releases are compared against the running version |
+| `HYDRA_AUTO_UPDATE` | `false` | Default for auto-install: when on, a detected update is downloaded and installed automatically. Off by default — you just get notified. Editable live from the admin panel |
 
-`HYDRA_MAX_BYTES_PER_USER`, `HYDRA_BACKUPS_PER_GAME_LIMIT` and
-`HYDRA_ALLOWED_USERS` can also be edited live from the admin panel; values
-saved there are stored in the database and override the environment until reset.
+`HYDRA_MAX_BYTES_PER_USER`, `HYDRA_BACKUPS_PER_GAME_LIMIT`,
+`HYDRA_ALLOWED_USERS` and the auto-install toggle can also be edited live from
+the admin panel; values saved there are stored in the database and override the
+environment until reset.
 
 ### Admin panel
 
@@ -80,9 +82,11 @@ Open `https://your-server/admin`, sign in with `HYDRA_ADMIN_PASSWORD`:
 - overview of users, backups, shares, achievements and total storage
 - server info: version, uptime, database size and effective configuration
 - update status: whether a newer server release is out (checked against GitHub),
-  with a link to the release notes and a "Check now" button
-- edit settings without a restart: per-user quota, backups-per-game limit and
-  the allowed-users list, applied immediately and persisted across restarts
+  with a link to the release notes, a "Check now" button and — on native
+  installs — an "Update now" button that installs it and restarts
+- edit settings without a restart: per-user quota, backups-per-game limit, the
+  allowed-users list and the auto-install toggle, applied immediately and
+  persisted across restarts
 - per-user detail: profile info plus save backups, achievements and emulation
   saves — backups show the game's name and cover art (resolved from the Steam
   store and cached) instead of the raw shop id
@@ -123,15 +127,37 @@ The server's version tracks the Hydra launcher it targets: **`hydra-server
 X.Y.Z` is built for Hydra app `X.Y.Z`**, so the version number alone tells you
 which client release a given server is meant to run alongside.
 
-The server checks its GitHub releases on a schedule (see `HYDRA_UPDATE_CHECK*`
-above) and flags in the admin panel when a newer release is out. It never
-replaces itself — applying the update is left to your deployment:
+Checking for updates and installing them are separate, independently
+controlled steps:
+
+- **Checking** (`HYDRA_UPDATE_CHECK`, on by default) polls this repo's GitHub
+  releases on a schedule and flags a newer version in the admin panel — an
+  "Update available" banner plus a "Check now" button for an on-demand look.
+  Leave it on to always know when you're behind, or disable it for air-gapped
+  installs.
+- **Installing** is off by default: you decide when to update. Flip on
+  **auto-install** (`HYDRA_AUTO_UPDATE`, or the admin panel toggle) to have
+  detected updates download and apply themselves, or leave it off and click
+  **Update now** in the panel when you're ready.
+
+When an install runs (auto or button), the server downloads the release binary
+for its platform, swaps it in and restarts into the new version. Your data dir
+carries over untouched; migrations run on start.
+
+**Containers can't self-install** — the swapped binary wouldn't survive the
+next restart, which reverts to the image. There the panel says so and you
+update the image instead:
 
 - **Docker:** `docker compose pull && docker compose up -d` (or rebuild with
   `docker compose up -d --build` when building from source).
-- **Binary:** `git pull && cargo build --release`, then restart the service.
+- **Binary:** the panel's "Update now" handles it; to update by hand instead,
+  `git pull && cargo build --release`, then restart the service.
 
-Your data dir carries over across updates untouched; migrations run on start.
+> Self-install needs release assets named with the OS and architecture, e.g.
+> `hydra-server-linux-x86_64` / `hydra-server-linux-aarch64` — a raw executable,
+> not an archive. Releases without a matching asset still show the notification;
+> the "Update now" button just reports that there's nothing to install for your
+> platform.
 
 ## Notes
 

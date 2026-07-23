@@ -108,6 +108,11 @@
   a.update-link { color: var(--accent); font-weight: 600; text-decoration: none; }
   a.update-link:hover { text-decoration: underline; }
   .check-btn { margin-left: 8px; padding: 3px 10px; font-size: 12px; }
+  .update-btn { margin-left: 8px; padding: 3px 10px; font-size: 12px; }
+  .update-error { color: var(--danger); }
+  .settings-toggle { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; cursor: pointer; }
+  .settings-toggle input { width: 16px; height: 16px; accent-color: var(--accent); }
+  .settings-toggle span { color: var(--text); }
 </style>
 </head>
 <body>
@@ -152,6 +157,10 @@
           <input id="set-allowed" type="text" placeholder="ids or usernames" />
         </label>
       </div>
+      <label class="settings-toggle">
+        <input id="set-auto-update" type="checkbox" />
+        <span>Automatically install updates when a new release is found</span>
+      </label>
       <div class="settings-actions">
         <button class="primary" id="save-settings">Save</button>
         <button id="reset-settings">Reset to env defaults</button>
@@ -374,11 +383,17 @@ async function loadOverview() {
 
   const checkBtn = $("check-updates");
   if (checkBtn) checkBtn.addEventListener("click", checkForUpdates);
+  const rowInstallBtn = $("install-update");
+  if (rowInstallBtn) rowInstallBtn.addEventListener("click", installUpdate);
   renderUpdateBanner(data.update);
 }
 
+const installing = (u) => u && (u.installState === "installing" || u.installState === "restarting");
+
 function updateStatusText(u) {
   if (!u) return "—";
+  if (u.installState === "restarting") return "Update installed — restarting…";
+  if (u.installState === "installing") return "Installing update…";
   if (u.updateAvailable && u.latestVersion) return `Update available — hydra-server v${u.latestVersion}`;
   if (!u.enabled) return "Automatic checks disabled";
   if (u.latestVersion) return `Up to date — latest release is v${u.latestVersion}`;
@@ -393,25 +408,46 @@ function updateRow(u) {
   const link = u && u.updateAvailable && u.releaseUrl
     ? ` <a class="update-link" href="${esc(u.releaseUrl)}" target="_blank" rel="noopener">release notes ↗</a>`
     : "";
+  const auto = u ? ` <span class="muted">· auto-install ${u.autoUpdate ? "on" : "off"}</span>` : "";
   const checked = u && u.lastCheckedAt
     ? ` <span class="muted">· checked ${esc(fmtDate(u.lastCheckedAt))}</span>`
     : "";
-  return `<tr><th>Updates</th><td>${badge}${esc(updateStatusText(u))}${link}${checked}`
-    + ` <button id="check-updates" class="check-btn">Check now</button></td></tr>`;
+  const containerHint = u && u.updateAvailable && u.containerized
+    ? ` <span class="muted">· in a container — pull the new image to update</span>`
+    : "";
+  const failed = u && u.installState === "failed" && u.installError && !u.containerized
+    ? ` <span class="update-error">${esc(u.installError)}</span>`
+    : "";
+  const updateBtn = u && u.updateAvailable && !u.containerized && !installing(u)
+    ? ` <button id="install-update" class="update-btn primary">Update now</button>`
+    : "";
+  const checkBtn = installing(u) ? "" : ` <button id="check-updates" class="check-btn">Check now</button>`;
+  return `<tr><th>Updates</th><td>${badge}${esc(updateStatusText(u))}${link}${auto}${checked}`
+    + `${containerHint}${failed}${updateBtn}${checkBtn}</td></tr>`;
 }
 
 function renderUpdateBanner(u) {
   const banner = $("update-banner");
-  if (u && u.updateAvailable && u.latestVersion) {
-    banner.className = "update-banner";
-    banner.innerHTML =
-      `<div><strong>Update available:</strong> hydra-server v${esc(u.latestVersion)} is out `
-      + `— you're running v${esc(u.currentVersion)}.</div>`
-      + (u.releaseUrl ? `<a class="update-link" href="${esc(u.releaseUrl)}" target="_blank" rel="noopener">View release ↗</a>` : "");
-  } else {
+  if (!(u && u.updateAvailable && u.latestVersion)) {
     banner.className = "update-banner hidden";
     banner.innerHTML = "";
+    return;
   }
+
+  banner.className = "update-banner";
+  const action = u.containerized
+    ? `<span class="muted">Running in a container — update by pulling the new image (<span class="mono">docker compose pull &amp;&amp; docker compose up -d</span>).</span>`
+    : (installing(u)
+      ? `<span class="muted">${u.installState === "restarting" ? "Restarting into the new version…" : "Installing…"}</span>`
+      : `<button id="install-update-banner" class="update-btn primary">Update now</button>`);
+  banner.innerHTML =
+    `<div><strong>Update available:</strong> hydra-server v${esc(u.latestVersion)} is out `
+    + `— you're running v${esc(u.currentVersion)}.</div>`
+    + (u.releaseUrl ? `<a class="update-link" href="${esc(u.releaseUrl)}" target="_blank" rel="noopener">View release ↗</a>` : "")
+    + action;
+
+  const bannerBtn = $("install-update-banner");
+  if (bannerBtn) bannerBtn.addEventListener("click", installUpdate);
 }
 
 async function checkForUpdates() {
@@ -426,15 +462,56 @@ async function checkForUpdates() {
   await loadOverview();
 }
 
+async function installUpdate() {
+  if (!confirm("Download and install the latest release now? The server will restart.")) return;
+  document.querySelectorAll("#install-update, #install-update-banner").forEach((b) => {
+    b.disabled = true; b.textContent = "Installing…";
+  });
+  let status;
+  try {
+    status = await api("/admin/api/updates/install", { method: "POST" });
+  } catch (err) {
+    await loadOverview();
+    return alert(err.message);
+  }
+  if (status.installState === "restarting") {
+    waitForRestart();
+  } else {
+    await loadOverview();
+    if (status.installError) alert(status.installError);
+  }
+}
+
+/* A self-install re-execs the server; poll /health until it answers again. */
+function waitForRestart() {
+  const banner = $("update-banner");
+  banner.className = "update-banner";
+  banner.innerHTML = `<div><strong>Installing update…</strong> the server is restarting — this page reloads when it's back.</div>`;
+  let tries = 0;
+  const poll = setInterval(async () => {
+    tries++;
+    try {
+      const res = await fetch("/health", { cache: "no-store" });
+      if (res.ok) { clearInterval(poll); return location.reload(); }
+    } catch (_) { /* still down, keep polling */ }
+    if (tries > 60) {
+      clearInterval(poll);
+      banner.innerHTML = `<div>Server didn't come back automatically — reload the page to check.</div>`;
+    }
+  }, 2000);
+}
+
 async function loadSettings() {
   const s = await api("/admin/api/settings");
   $("set-quota").value = s.maxBytesPerUser ? +(s.maxBytesPerUser / GIB).toFixed(2) : 0;
   $("set-backups").value = s.backupsPerGameLimit;
   $("set-allowed").value = s.allowedUsers.join(", ");
+  $("set-auto-update").checked = !!s.autoUpdate;
   $("settings-defaults").textContent =
     `Env defaults: quota ${fmtQuota(s.defaults.maxBytesPerUser)} · `
     + `${s.defaults.backupsPerGameLimit} backups/game · `
-    + `allowed users: ${s.defaults.allowedUsers.length ? s.defaults.allowedUsers.join(", ") : "everyone"}. `
+    + `allowed users: ${s.defaults.allowedUsers.length ? s.defaults.allowedUsers.join(", ") : "everyone"} · `
+    + `auto-install updates: ${s.defaults.autoUpdate ? "on" : "off"}. `
     + (s.overridden ? "Panel overrides are active." : "No overrides saved — env values apply.");
 }
 
@@ -446,7 +523,10 @@ function settingsStatus(text, bad = false) {
 }
 
 $("save-settings").addEventListener("click", async () => {
-  const payload = { allowedUsers: $("set-allowed").value.split(",").map((s) => s.trim()).filter(Boolean) };
+  const payload = {
+    allowedUsers: $("set-allowed").value.split(",").map((s) => s.trim()).filter(Boolean),
+    autoUpdate: $("set-auto-update").checked,
+  };
   const quota = $("set-quota").value.trim();
   if (quota !== "") payload.maxBytesPerUser = Math.max(0, Math.round(Number(quota) * GIB));
   const backups = $("set-backups").value.trim();

@@ -12,6 +12,9 @@ services:
       HYDRA_ALLOWED_USERS: ${HYDRA_ALLOWED_USERS:-}
       HYDRA_UPDATE_CHECK: ${HYDRA_UPDATE_CHECK:-true}
       HYDRA_UPDATE_CHECK_INTERVAL_HOURS: ${HYDRA_UPDATE_CHECK_INTERVAL_HOURS:-6}
+      # Self-install can't persist in a container; update the image instead.
+      # Left here only so the panel's default reflects your intent.
+      HYDRA_AUTO_UPDATE: ${HYDRA_AUTO_UPDATE:-false}
     volumes:
       - hydra-data:/data
 

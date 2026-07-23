@@ -31,6 +31,9 @@ pub struct Config {
     pub update_check_interval_hours: u64,
     /// `owner/repo` the update checker watches for new server releases.
     pub update_repo: String,
+    /// Default for the `auto_update` setting: install detected updates
+    /// automatically. Off by default; editable live from the admin panel.
+    pub auto_update_enabled: bool,
 }
 
 fn env(key: &str, default: &str) -> String {
@@ -92,6 +95,7 @@ impl Config {
                 .trim()
                 .trim_matches('/')
                 .to_string(),
+            auto_update_enabled: env_bool("HYDRA_AUTO_UPDATE", false),
             data_dir,
         }
     }

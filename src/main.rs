@@ -73,6 +73,8 @@ async fn main() {
     let update_repo = config.update_repo.clone();
 
     let runtime_settings = settings::load(&pool, &config).await;
+    let auto_update = runtime_settings.auto_update;
+    let containerized = updates::detect_container();
 
     let app_state = AppState {
         pool,
@@ -85,6 +87,8 @@ async fn main() {
         settings: Arc::new(RwLock::new(runtime_settings)),
         updates: Arc::new(RwLock::new(updates::UpdateStatus::initial(
             update_check_enabled,
+            auto_update,
+            containerized,
             update_repo,
         ))),
         started_at: chrono::Utc::now(),

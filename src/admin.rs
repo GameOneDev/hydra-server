@@ -78,6 +78,7 @@ pub fn router() -> Router<AppState> {
             get(get_settings).put(update_settings).delete(reset_settings),
         )
         .route("/admin/api/updates/check", post(check_updates))
+        .route("/admin/api/updates/install", post(install_update))
         .route("/admin/api/games/{shop}/{object_id}", get(game_info))
         .route("/admin/api/playtime", get(playtime_heatmap))
         .route("/admin/api/users", get(list_users))
@@ -231,16 +232,29 @@ async fn check_updates(
     Ok(Json(json!(status)))
 }
 
+/// POST /admin/api/updates/install — downloads and installs the latest release
+/// now (the "Update now" button). On success the server replaces its binary
+/// and restarts a moment later; the returned status reflects that.
+async fn install_update(
+    State(state): State<AppState>,
+    _admin: AdminSession,
+) -> ApiResult<Json<Value>> {
+    let status = crate::updates::install(&state).await;
+    Ok(Json(json!(status)))
+}
+
 fn settings_json(current: &RuntimeSettings, defaults: &RuntimeSettings, overridden: bool) -> Value {
     json!({
         "maxBytesPerUser": current.max_bytes_per_user,
         "backupsPerGameLimit": current.backups_per_game_limit,
         "allowedUsers": current.allowed_users,
+        "autoUpdate": current.auto_update,
         "overridden": overridden,
         "defaults": {
             "maxBytesPerUser": defaults.max_bytes_per_user,
             "backupsPerGameLimit": defaults.backups_per_game_limit,
             "allowedUsers": defaults.allowed_users,
+            "autoUpdate": defaults.auto_update,
         },
     })
 }
@@ -268,6 +282,7 @@ struct UpdateSettingsRequest {
     max_bytes_per_user: Option<u64>,
     backups_per_game_limit: Option<u32>,
     allowed_users: Option<Vec<String>>,
+    auto_update: Option<bool>,
 }
 
 /// PUT /admin/api/settings — persists the provided fields as overrides of
@@ -293,8 +308,11 @@ async fn update_settings(
         settings::set(&state.pool, settings::ALLOWED_USERS, &normalized.join(",")).await?;
     }
 
-    let reloaded = settings::load(&state.pool, &state.config).await;
-    *state.settings.write().await = reloaded;
+    if let Some(auto_update) = payload.auto_update {
+        settings::set(&state.pool, settings::AUTO_UPDATE, &auto_update.to_string()).await?;
+    }
+
+    apply_reloaded_settings(&state).await;
 
     settings_payload(&state).await
 }
@@ -306,10 +324,18 @@ async fn reset_settings(
 ) -> ApiResult<Json<Value>> {
     settings::clear(&state.pool).await?;
 
-    let reloaded = settings::load(&state.pool, &state.config).await;
-    *state.settings.write().await = reloaded;
+    apply_reloaded_settings(&state).await;
 
     settings_payload(&state).await
+}
+
+/// Reloads runtime settings from the database and mirrors the `auto_update`
+/// value onto the shared update status so the panel reflects it at once.
+async fn apply_reloaded_settings(state: &AppState) {
+    let reloaded = settings::load(&state.pool, &state.config).await;
+    let auto_update = reloaded.auto_update;
+    *state.settings.write().await = reloaded;
+    state.updates.write().await.auto_update = auto_update;
 }
 
 /// GET /admin/api/games/{shop}/{object_id} — cached game name/cover so the
