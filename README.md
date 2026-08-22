@@ -17,7 +17,7 @@ and download sources browsing all work exactly as before.
 | Cloud Save V2 — per-file snapshot sync (launcher 4.1.0+) | **this server** |
 | Emulation memory-card saves (PS1/PS2) | **this server** |
 | Achievement sync across devices | **this server** |
-| Achievement souvenirs — screenshots on the profile (launcher 4.1.2+) | **this server** |
+| Achievement souvenirs — screenshots on the profile | **this server** |
 | Download source list sync across devices | **this server** |
 | Profile banner image hosting | **this server** (URL saved to the official profile) |
 | Custom game images (covers, icons, logos, banners) | **this server** |
@@ -388,7 +388,7 @@ non-Steam games and for older clients.
 
 ### Achievement souvenirs
 
-Launcher 4.1.2 takes a screenshot when an achievement pops and files it on the
+The launcher takes a screenshot when an achievement pops and files it on the
 player's profile. Several achievements that unlock together share one picture,
 so the picture is the record and the achievement names hang off it.
 

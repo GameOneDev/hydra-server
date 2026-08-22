@@ -23,8 +23,8 @@ pub struct SyncAchievements {
     pub shop: Option<String>,
     #[serde(default)]
     pub achievements: Vec<Value>,
-    /// Achievement souvenirs captured alongside these unlocks (launcher
-    /// 4.1.2+). The screenshot is already uploaded by the time it arrives
+    /// Achievement souvenirs captured alongside these unlocks. The
+    /// screenshot is already uploaded by the time it arrives
     /// here; this call is what files it against the achievements it belongs
     /// to. See [`crate::souvenirs`].
     #[serde(default)]

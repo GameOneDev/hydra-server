@@ -1,4 +1,4 @@
--- Achievement souvenirs (launcher 4.1.2+).
+-- Achievement souvenirs (upstream hydralauncher/hydra#2700).
 --
 -- The launcher takes a screenshot the moment an achievement pops and files it
 -- on the player's profile. One screenshot can cover several achievements that

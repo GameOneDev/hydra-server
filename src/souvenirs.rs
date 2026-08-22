@@ -1,4 +1,5 @@
-//! Achievement souvenirs (launcher 4.1.2+).
+//! Achievement souvenirs (upstream hydralauncher/hydra#2700, this fork's
+//! 4.1.2 launcher build onwards).
 //!
 //! When an achievement pops, the launcher grabs a screenshot of the game and
 //! files it on the player's profile. Several achievements that unlock together
@@ -135,7 +136,7 @@ fn parse_names(raw: &str) -> Vec<String> {
 /// The launcher's request body for `POST /presigned-urls/achievement-image`.
 ///
 /// `clientId` and `remoteGameId` arrive from the grouped capture flow. The
-/// pre-4.1.2 per-achievement upload sent neither; a reservation is still
+/// older per-achievement upload sent neither; a reservation is still
 /// created for those so the bytes stay accounted for, they just can't be
 /// deduplicated across retries.
 pub struct AuthorizeRequest<'a> {
