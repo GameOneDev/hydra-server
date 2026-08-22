@@ -23,14 +23,15 @@ pub fn router() -> Router<AppState> {
 }
 
 /// Stored bytes for the user aliased `u`, mirroring [`storage::used_bytes`] —
-/// the same four sources the quota is measured against, V2 blobs counted once
-/// per distinct hash exactly as they are stored. The panel and the quota must
+/// the same sources the quota is measured against, V2 blobs counted once per
+/// distinct hash exactly as they are stored. The panel and the quota must
 /// never disagree about how full an account is.
 pub(crate) const USED_BYTES_EXPR: &str = "
     (SELECT COALESCE(SUM(artifact_length_in_bytes), 0) FROM artifacts a WHERE a.user_id = u.id)
   + (SELECT COALESCE(SUM(artifact_length_in_bytes), 0) FROM emulation_saves e WHERE e.user_id = u.id)
   + (SELECT COALESCE(SUM(size_in_bytes), 0) FROM game_artwork w WHERE w.user_id = u.id)
-  + (SELECT COALESCE(SUM(size_in_bytes), 0) FROM cloud_save_blobs b WHERE b.user_id = u.id)";
+  + (SELECT COALESCE(SUM(size_in_bytes), 0) FROM cloud_save_blobs b WHERE b.user_id = u.id)
+  + (SELECT COALESCE(SUM(size_in_bytes), 0) FROM souvenirs v WHERE v.user_id = u.id)";
 
 /// The counts shown for every user, in the list and on the detail screen.
 const USER_COUNTS: &str = "
@@ -50,7 +51,11 @@ const USER_COUNTS: &str = "
     (SELECT COALESCE(SUM(artifact_length_in_bytes), 0) FROM emulation_saves e WHERE e.user_id = u.id)
       AS emulation_bytes,
     (SELECT COALESCE(SUM(size_in_bytes), 0) FROM game_artwork w WHERE w.user_id = u.id)
-      AS artwork_bytes";
+      AS artwork_bytes,
+    (SELECT COUNT(*) FROM souvenirs v
+      WHERE v.user_id = u.id AND v.status = 'ready' AND v.is_uploaded = 1) AS souvenir_count,
+    (SELECT COALESCE(SUM(size_in_bytes), 0) FROM souvenirs v WHERE v.user_id = u.id)
+      AS souvenir_bytes";
 
 fn user_json(state: &AppState, row: &sqlx::sqlite::SqliteRow, quota: u64) -> Value {
     let used: i64 = row.get("used_bytes");
@@ -73,6 +78,7 @@ fn user_json(state: &AppState, row: &sqlx::sqlite::SqliteRow, quota: u64) -> Val
             "emulationSaves": row.get::<i64, _>("emulation_save_count"),
             "achievementGames": row.get::<i64, _>("achievement_game_count"),
             "artwork": row.get::<i64, _>("artwork_count"),
+            "souvenirs": row.get::<i64, _>("souvenir_count"),
         },
         "playtimeSeconds": row.get::<i64, _>("playtime_seconds"),
         "storage": super::overview::storage_breakdown(
@@ -80,6 +86,7 @@ fn user_json(state: &AppState, row: &sqlx::sqlite::SqliteRow, quota: u64) -> Val
             row.get::<i64, _>("backup_bytes"),
             row.get::<i64, _>("emulation_bytes"),
             row.get::<i64, _>("artwork_bytes"),
+            row.get::<i64, _>("souvenir_bytes"),
         ),
     })
 }
@@ -257,7 +264,8 @@ async fn detail(
 }
 
 /// GET /admin/api/users/{id}/library — the small per-user collections that
-/// aren't worth paginating: achievements, custom images, shares, sources.
+/// aren't worth paginating: achievements, custom images, souvenirs, shares,
+/// sources.
 async fn library(
     State(state): State<AppState>,
     _admin: AdminSession,
@@ -283,6 +291,22 @@ async fn library(
          FROM game_artwork w
          LEFT JOIN game_metadata g ON g.shop = w.shop AND g.object_id = w.object_id
          WHERE w.user_id = ? ORDER BY w.updated_at DESC",
+    )
+    .bind(&id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let souvenirs = sqlx::query(
+        "SELECT v.id, v.shop, v.object_id, v.image_key, v.size_in_bytes, v.visibility,
+                v.captured_at, v.primary_achievement_name,
+                json_array_length(v.achievement_names) AS achievement_count,
+                (SELECT COUNT(*) FROM souvenir_likes l WHERE l.souvenir_id = v.id) AS likes,
+                (SELECT COUNT(*) FROM souvenir_reports r WHERE r.souvenir_id = v.id) AS reports,
+                g.name AS game_name, g.cover_url AS game_cover_url
+         FROM souvenirs v
+         LEFT JOIN game_metadata g ON g.shop = v.shop AND g.object_id = v.object_id
+         WHERE v.user_id = ? AND v.status = 'ready' AND v.is_uploaded = 1
+         ORDER BY v.captured_at DESC",
     )
     .bind(&id)
     .fetch_all(&state.pool)
@@ -324,6 +348,24 @@ async fn library(
             "url": row.get::<String, _>("url"),
             "sizeBytes": row.get::<i64, _>("size_in_bytes"),
             "updatedAt": row.get::<String, _>("updated_at"),
+        })).collect::<Vec<_>>(),
+        "souvenirs": souvenirs.iter().map(|row| json!({
+            "id": row.get::<String, _>("id"),
+            "game": super::game_ref(row),
+            /* Same public URL the profile renders, so an operator handling a
+               report can look at the picture instead of guessing from a name. */
+            "url": format!(
+                "{}/{}",
+                state.config.public_url,
+                row.get::<String, _>("image_key").trim_start_matches('/')
+            ),
+            "primaryAchievementName": row.get::<Option<String>, _>("primary_achievement_name"),
+            "achievementCount": row.get::<i64, _>("achievement_count"),
+            "sizeBytes": row.get::<i64, _>("size_in_bytes"),
+            "visibility": row.get::<String, _>("visibility"),
+            "capturedAt": row.get::<i64, _>("captured_at"),
+            "likes": row.get::<i64, _>("likes"),
+            "reports": row.get::<i64, _>("reports"),
         })).collect::<Vec<_>>(),
         "shares": shares.iter().map(|row| json!({
             "id": row.get::<String, _>("id"),
@@ -432,6 +474,10 @@ async fn purge(
             "artwork" => {
                 purge_artwork(&state, &id).await?;
                 purged.push("artwork");
+            }
+            "souvenirs" => {
+                crate::souvenirs::purge_for_user(&state, &id).await?;
+                purged.push("souvenirs");
             }
             "achievements" => {
                 sqlx::query("DELETE FROM game_achievements WHERE user_id = ?")
@@ -648,6 +694,14 @@ async fn delete_user(
         .await?
         .flatten();
     let artwork_keys = crate::artwork::storage_keys_for_user(&state, &id).await;
+    let souvenir_keys = crate::souvenirs::storage_keys_for_user(&state, &id).await;
+
+    /* Likes this user left on other people's souvenirs aren't reachable from
+       their own rows, so the cascade below doesn't take them. */
+    sqlx::query("DELETE FROM souvenir_likes WHERE user_id = ?")
+        .bind(&id)
+        .execute(&state.pool)
+        .await?;
 
     sqlx::query("DELETE FROM users WHERE id = ?")
         .bind(&id)
@@ -655,6 +709,9 @@ async fn delete_user(
         .await?;
 
     for key in artwork_keys {
+        storage::delete_object(&state, &key).await;
+    }
+    for key in souvenir_keys {
         storage::delete_object(&state, &key).await;
     }
     if let Some(key) = banner_key {

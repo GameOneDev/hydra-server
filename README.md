@@ -17,6 +17,7 @@ and download sources browsing all work exactly as before.
 | Cloud Save V2 — per-file snapshot sync (launcher 4.1.0+) | **this server** |
 | Emulation memory-card saves (PS1/PS2) | **this server** |
 | Achievement sync across devices | **this server** |
+| Achievement souvenirs — screenshots on the profile (launcher 4.1.2+) | **this server** |
 | Download source list sync across devices | **this server** |
 | Profile banner image hosting | **this server** (URL saved to the official profile) |
 | Custom game images (covers, icons, logos, banners) | **this server** |
@@ -338,6 +339,15 @@ Implements the endpoints the launcher routes to a self-hosted cloud server:
   `POST …/{id}/commit`, `POST …/{id}/download-url`, `PUT|DELETE …/{id}`
 - `POST /presigned-urls/{background-image|profile-image}` — profile image
   uploads; images are served publicly from `GET /images/…`
+- `POST /presigned-urls/achievement-image` — reserves an achievement souvenir
+  and returns the presigned PUT for its screenshot
+- `GET /users/{userId}/souvenirs`, `POST …/{souvenirId}/like`,
+  `POST …/{souvenirId}/report` — the profile's souvenir tab
+- `PATCH /profile/souvenirs/{id}/visibility`, `DELETE /profile/souvenirs/{id}`,
+  `PATCH /profile/souvenirs-visibility` — hiding one souvenir, deleting one, and
+  the account-level setting the launcher mirrors here
+- `GET /users/{userId}/games/achievements?shop=&objectId=` — the souvenir
+  thumbnail for each unlock, for the achievement list
 - `PUT|GET /storage/{token}` — S3-style presigned upload/download URLs
   (signed, short-lived, streamed to/from disk)
 - `GET /health`
@@ -376,12 +386,67 @@ Notable behaviour:
 The legacy artifact endpoints stay in place — the launcher still uses them for
 non-Steam games and for older clients.
 
+### Achievement souvenirs
+
+Launcher 4.1.2 takes a screenshot when an achievement pops and files it on the
+player's profile. Several achievements that unlock together share one picture,
+so the picture is the record and the achievement names hang off it.
+
+The upload is a handshake, because the row exists before the bytes do:
+
+1. `POST /presigned-urls/achievement-image` reserves the capture's `clientId`
+   and answers with the storage key and a presigned PUT.
+2. The launcher PUTs the screenshot to `/storage/{token}`.
+3. `PUT /profile/games/achievements` arrives with the souvenir next to the
+   achievements it belongs to, which files it and makes it visible.
+
+The launcher retries the whole sequence with the same `clientId` until the
+server acknowledges it, so every step is idempotent: re-authorizing returns the
+same key (`status: "claimed"` once the bytes are here), and re-syncing returns
+the same souvenir id. Failures answer with the codes the launcher's retry policy
+knows — `achievements/souvenir-conflict` plus a `reason`, or
+`achievements/souvenir-upload-incomplete` — so a souvenir that only needs
+another attempt gets one instead of being dropped.
+
+Notable behaviour:
+
+- **One souvenir per achievement, per game.** A second capture for an
+  achievement that already has one is refused with `achievement_already_assigned`
+  and the launcher syncs the achievements without it. Names are compared
+  upper-cased and scoped to the game, since plenty of games ship an `ACH_WIN`.
+- **Nothing is visible until it is complete.** A reservation whose upload never
+  arrived shows on no profile, counts against the quota while its bytes sit on
+  disk, and is swept by *Maintenance → Sweep abandoned uploads*.
+- **Two levels of privacy.** Each souvenir is `PUBLIC` or `PRIVATE`, and the
+  whole tab is gated by the account-level setting from the official profile.
+  That setting lives on the official API, so the launcher mirrors it here; until
+  it does, the default is `PRIVATE` and other members see `hiddenReason`. On
+  this server "friends only" means "members of this server" — the official
+  friend graph isn't visible from here, and everyone who can reach this server
+  is someone you let in.
+- **Likes and reports.** Any member can like another's souvenir (one POST
+  toggles) or report it. A report is recorded and raised as a warning in the
+  event log with who, why and which picture — the History screen and the
+  Overview alert are how an operator sees it, and the record outlives the
+  souvenir being deleted. Reports are capped at 30 per person per hour.
+- **Two things this server can't know.** Achievement display names, icons and
+  points come from the public catalogue, so souvenirs are served with raw
+  achievement names and the launcher joins the catalogue for the rest — the same
+  split the recent-achievements endpoint already uses. And because rarity is
+  computed from those catalogue points, `sortBy=rare` falls back to ordering by
+  capture time.
+
+Souvenir images are served from `GET /images/souvenirs/…` under an unguessable
+name, like banners and custom artwork: hiding a souvenir removes it from the
+profile and from the achievement list, but does not make its URL stop working
+for someone who already has it.
+
 ### Capabilities
 
 `GET /capabilities` (unauthenticated) reports what this build supports:
 
 ```json
-{ "name": "hydra-server", "version": "4.1.1", "features": ["cloud-saves-v2", "..."] }
+{ "name": "hydra-server", "version": "4.1.2", "features": ["cloud-saves-v2", "souvenirs", "..."] }
 ```
 
 The launcher checks this before enabling a feature whose endpoints might not

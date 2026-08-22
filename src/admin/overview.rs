@@ -123,6 +123,26 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
     )
     .await?;
 
+    let souvenirs: i64 = scalar(
+        &state,
+        "SELECT COUNT(*) FROM souvenirs WHERE status = 'ready' AND is_uploaded = 1",
+    )
+    .await?;
+    let souvenir_bytes: i64 = scalar(
+        &state,
+        "SELECT COALESCE(SUM(size_in_bytes), 0) FROM souvenirs",
+    )
+    .await?;
+    /* Reservations whose upload never arrived. Sweepable from Maintenance,
+       and worth surfacing next to the other stuck-upload counts. */
+    let stuck_souvenirs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM souvenirs WHERE status = 'pending' AND created_at < ?",
+    )
+    .bind(&stale_before)
+    .fetch_one(&state.pool)
+    .await?;
+    let souvenir_reports: i64 = scalar(&state, "SELECT COUNT(*) FROM souvenir_reports").await?;
+
     let achievement_games: i64 = scalar(&state, "SELECT COUNT(*) FROM game_achievements").await?;
     let achievements_unlocked: i64 = scalar(
         &state,
@@ -150,6 +170,7 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
              UNION SELECT shop, object_id FROM playtime_daily
              UNION SELECT shop, object_id FROM game_artwork
              UNION SELECT shop, object_id FROM game_achievements WHERE shop IS NOT NULL
+             UNION SELECT shop, object_id FROM souvenirs WHERE shop IS NOT NULL
          )",
     )
     .await?;
@@ -215,6 +236,22 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
             "title": format!("{stuck_backups} legacy backup(s) stuck mid-upload"),
             "detail": "Created more than a day ago and still not uploaded — the launcher likely died mid-transfer.",
             "action": { "label": "Review backups", "route": "#/saves?type=legacy&state=pending" },
+        }));
+    }
+    if stuck_souvenirs > 0 {
+        alerts.push(json!({
+            "level": "warning",
+            "title": format!("{stuck_souvenirs} souvenir upload(s) never finished"),
+            "detail": format!("Reserved more than {STALE_UPLOAD_HOURS}h ago and never claimed by an achievement sync. They show on nobody's profile; the sweep reclaims their space."),
+            "action": { "label": "Run the sweep", "route": "#/maintenance" },
+        }));
+    }
+    if souvenir_reports > 0 {
+        alerts.push(json!({
+            "level": "warning",
+            "title": format!("{souvenir_reports} souvenir(s) reported by players"),
+            "detail": "Someone flagged a screenshot on a profile. The report says who, why and which picture.",
+            "action": { "label": "Read the reports", "route": "#/events?kind=souvenir.reported" },
         }));
     }
     if missing_blobs > 0 {
@@ -284,8 +321,20 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
         "emulationSaves": { "total": emulation_saves, "bytes": emulation_bytes },
         "artwork": { "uploaded": artwork, "linked": artwork_linked, "bytes": artwork_bytes },
         "achievements": { "games": achievement_games, "unlocked": achievements_unlocked },
+        "souvenirs": {
+            "total": souvenirs,
+            "stuck": stuck_souvenirs,
+            "reports": souvenir_reports,
+            "bytes": souvenir_bytes,
+        },
         "library": { "games": games, "playtimeSeconds": playtime_seconds, "downloadSources": download_sources },
-        "storage": storage_breakdown(cloud_bytes, backup_bytes, emulation_bytes, artwork_bytes),
+        "storage": storage_breakdown(
+            cloud_bytes,
+            backup_bytes,
+            emulation_bytes,
+            artwork_bytes,
+            souvenir_bytes,
+        ),
         "alerts": alerts,
     })))
 }
@@ -298,12 +347,14 @@ pub(crate) fn storage_breakdown(
     backups: i64,
     emulation: i64,
     artwork: i64,
+    souvenirs: i64,
 ) -> Vec<Value> {
     vec![
         json!({ "key": "cloudSaves", "label": "Cloud saves (v2)", "bytes": cloud }),
         json!({ "key": "backups", "label": "Save backups", "bytes": backups }),
         json!({ "key": "emulationSaves", "label": "Emulation saves", "bytes": emulation }),
         json!({ "key": "artwork", "label": "Custom images", "bytes": artwork }),
+        json!({ "key": "souvenirs", "label": "Souvenirs", "bytes": souvenirs }),
     ]
 }
 

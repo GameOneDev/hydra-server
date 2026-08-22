@@ -67,6 +67,7 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
         ("backups", "Save backups", "artifacts"),
         ("emulationSaves", "Emulation saves", "emulation-saves"),
         ("artwork", "Custom images", "images/artwork"),
+        ("souvenirs", "Achievement souvenirs", "images/souvenirs"),
         ("banners", "Profile banners", "images/banners"),
         ("avatars", "Profile avatars", "images/avatars"),
     ] {
@@ -91,7 +92,10 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
            FROM emulation_saves WHERE is_uploaded = 1
          UNION ALL
          SELECT 'artwork', COUNT(*), COALESCE(SUM(size_in_bytes), 0)
-           FROM game_artwork WHERE storage_key IS NOT NULL",
+           FROM game_artwork WHERE storage_key IS NOT NULL
+         UNION ALL
+         SELECT 'souvenirs', COUNT(*), COALESCE(SUM(size_in_bytes), 0)
+           FROM souvenirs WHERE is_uploaded = 1",
     )
     .fetch_all(&state.pool)
     .await?;
@@ -251,6 +255,26 @@ async fn integrity(State(state): State<AppState>, _admin: AdminSession) -> ApiRe
         }
     }
 
+    let souvenir_keys: Vec<String> =
+        sqlx::query_scalar("SELECT image_key FROM souvenirs WHERE is_uploaded = 1")
+            .fetch_all(&state.pool)
+            .await?;
+    for key in souvenir_keys {
+        known.insert(key.clone());
+        if tokio::fs::metadata(root.join(&key)).await.is_err() {
+            missing.push(finding("souvenir", key, json!({})));
+        }
+    }
+
+    /* A reservation whose upload never arrived has no file to reconcile and
+       isn't an orphan either — Maintenance sweeps those. Its key still counts
+       as known so a partially-written file isn't reported as stray bytes. */
+    let pending_souvenir_keys: Vec<String> =
+        sqlx::query_scalar("SELECT image_key FROM souvenirs WHERE is_uploaded = 0")
+            .fetch_all(&state.pool)
+            .await?;
+    known.extend(pending_souvenir_keys);
+
     /* Profile images and banners are reachable by URL, not by a per-file row;
        treat everything under images/ as accounted for rather than orphaned. */
     let banner_keys: Vec<Option<String>> =
@@ -286,10 +310,12 @@ async fn integrity(State(state): State<AppState>, _admin: AdminSession) -> ApiRe
 
             /* Banners and avatars are reachable by URL with no per-file row
                to reconcile against (see above) — but custom artwork under
-               images/artwork/ does have one, so it stays in the scan. A
-               .uploading file is a transfer in flight, not an orphan. */
-            let unreconciled =
-                key.starts_with("images/") && !key.starts_with("images/artwork/");
+               images/artwork/ and souvenirs under images/souvenirs/ do have
+               one, so they stay in the scan. A .uploading file is a transfer
+               in flight, not an orphan. */
+            let unreconciled = key.starts_with("images/")
+                && !key.starts_with("images/artwork/")
+                && !key.starts_with("images/souvenirs/");
             if unreconciled || key.ends_with(".uploading") {
                 continue;
             }

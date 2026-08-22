@@ -29,6 +29,7 @@ pub fn router() -> Router<AppState> {
             "/portal/api/cloud-saves/{id}/files/{hash}/download",
             get(download_snapshot_file),
         )
+        .route("/portal/api/souvenirs/{id}", delete(delete_souvenir))
         .route("/portal/api/backups/{id}", delete(delete_backup))
         .route("/portal/api/backups/{id}/download", get(download_backup))
         .route(
@@ -64,7 +65,11 @@ async fn overview(State(state): State<AppState>, portal: PortalSession) -> ApiRe
             (SELECT COALESCE(SUM(artifact_length_in_bytes), 0) FROM emulation_saves e
               WHERE e.user_id = ?1) AS emulation_bytes,
             (SELECT COALESCE(SUM(size_in_bytes), 0) FROM game_artwork w WHERE w.user_id = ?1)
-              AS artwork_bytes",
+              AS artwork_bytes,
+            (SELECT COUNT(*) FROM souvenirs v
+              WHERE v.user_id = ?1 AND v.status = 'ready' AND v.is_uploaded = 1) AS souvenirs,
+            (SELECT COALESCE(SUM(size_in_bytes), 0) FROM souvenirs v WHERE v.user_id = ?1)
+              AS souvenir_bytes",
     )
     .bind(&portal.user_id)
     .fetch_one(&state.pool)
@@ -107,6 +112,7 @@ async fn overview(State(state): State<AppState>, portal: PortalSession) -> ApiRe
             "emulationSaves": row.get::<i64, _>("emulation_saves"),
             "achievementGames": row.get::<i64, _>("achievement_games"),
             "artwork": row.get::<i64, _>("artwork"),
+            "souvenirs": row.get::<i64, _>("souvenirs"),
         },
         "playtimeSeconds": row.get::<i64, _>("playtime_seconds"),
         "storage": [
@@ -114,6 +120,7 @@ async fn overview(State(state): State<AppState>, portal: PortalSession) -> ApiRe
             { "key": "backups", "label": "Save backups", "bytes": row.get::<i64, _>("backup_bytes") },
             { "key": "emulationSaves", "label": "Emulation saves", "bytes": row.get::<i64, _>("emulation_bytes") },
             { "key": "artwork", "label": "Custom images", "bytes": row.get::<i64, _>("artwork_bytes") },
+            { "key": "souvenirs", "label": "Souvenirs", "bytes": row.get::<i64, _>("souvenir_bytes") },
         ],
         "devices": devices.iter().map(|row| json!({
             "hostname": row.get::<Option<String>, _>("hostname"),
@@ -192,7 +199,8 @@ async fn saves(
         .collect::<Vec<_>>())))
 }
 
-/// Achievements, artwork, shared backups and synced download sources.
+/// Achievements, artwork, souvenirs, shared backups and synced download
+/// sources.
 async fn library(State(state): State<AppState>, portal: PortalSession) -> ApiResult<Json<Value>> {
     let achievements = sqlx::query(
         "SELECT ga.shop, ga.object_id, ga.updated_at,
@@ -214,6 +222,21 @@ async fn library(State(state): State<AppState>, portal: PortalSession) -> ApiRes
          FROM game_artwork w
          LEFT JOIN game_metadata g ON g.shop = w.shop AND g.object_id = w.object_id
          WHERE w.user_id = ? ORDER BY w.updated_at DESC",
+    )
+    .bind(&portal.user_id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let souvenirs = sqlx::query(
+        "SELECT v.id, v.shop, v.object_id, v.image_key, v.size_in_bytes, v.visibility,
+                v.captured_at, v.primary_achievement_name,
+                json_array_length(v.achievement_names) AS achievement_count,
+                (SELECT COUNT(*) FROM souvenir_likes l WHERE l.souvenir_id = v.id) AS likes,
+                g.name AS game_name, g.cover_url AS game_cover_url
+         FROM souvenirs v
+         LEFT JOIN game_metadata g ON g.shop = v.shop AND g.object_id = v.object_id
+         WHERE v.user_id = ? AND v.status = 'ready' AND v.is_uploaded = 1
+         ORDER BY v.captured_at DESC",
     )
     .bind(&portal.user_id)
     .fetch_all(&state.pool)
@@ -282,6 +305,21 @@ async fn library(State(state): State<AppState>, portal: PortalSession) -> ApiRes
             "url": row.get::<String, _>("url"),
             "sizeBytes": row.get::<i64, _>("size_in_bytes"),
             "updatedAt": row.get::<String, _>("updated_at"),
+        })).collect::<Vec<_>>(),
+        "souvenirs": souvenirs.iter().map(|row| json!({
+            "id": row.get::<String, _>("id"),
+            "game": crate::admin::game_ref(row),
+            "url": format!(
+                "{}/{}",
+                state.config.public_url,
+                row.get::<String, _>("image_key").trim_start_matches('/')
+            ),
+            "primaryAchievementName": row.get::<Option<String>, _>("primary_achievement_name"),
+            "achievementCount": row.get::<i64, _>("achievement_count"),
+            "sizeBytes": row.get::<i64, _>("size_in_bytes"),
+            "visibility": row.get::<String, _>("visibility"),
+            "capturedAt": row.get::<i64, _>("captured_at"),
+            "likes": row.get::<i64, _>("likes"),
         })).collect::<Vec<_>>(),
         "sharedOut": shared_out.iter().map(share_json).collect::<Vec<_>>(),
         "sharedWithMe": shared_with_me.iter().map(share_json).collect::<Vec<_>>(),
@@ -474,6 +512,21 @@ async fn delete_backup(
     .await;
 
     Ok(Json(json!({ "ok": true, "freedBytes": size })))
+}
+
+/// DELETE /portal/api/souvenirs/{id} — a player removing their own screenshot.
+///
+/// The launcher can do this from the profile too; someone who captured a
+/// souvenir they would rather nobody saw shouldn't have to start a game to get
+/// rid of it.
+async fn delete_souvenir(
+    State(state): State<AppState>,
+    portal: PortalSession,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let freed = crate::souvenirs::delete_owned(&state, &portal.user_id, &id).await?;
+
+    Ok(Json(json!({ "ok": true, "freedBytes": freed })))
 }
 
 async fn download_emulation_save(

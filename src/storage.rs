@@ -35,9 +35,9 @@ pub struct StorageClaims {
 }
 
 /// Total bytes a user is storing here: save backups, emulation saves,
-/// uploaded custom images and Cloud Save V2 blobs. Everything the per-user
-/// quota is measured against lives in one place so the quota check and the
-/// admin panel can't drift.
+/// uploaded custom images, achievement souvenirs and Cloud Save V2 blobs.
+/// Everything the per-user quota is measured against lives in one place so the
+/// quota check and the admin panel can't drift.
 ///
 /// V2 blobs are counted once per distinct hash, which is also how they are
 /// stored — a file duplicated across variants or games costs nothing extra.
@@ -50,7 +50,9 @@ pub async fn used_bytes(state: &AppState, user_id: &str) -> ApiResult<i64> {
               + (SELECT COALESCE(SUM(size_in_bytes), 0)
                    FROM game_artwork WHERE user_id = ?1)
               + (SELECT COALESCE(SUM(size_in_bytes), 0)
-                   FROM cloud_save_blobs WHERE user_id = ?1)",
+                   FROM cloud_save_blobs WHERE user_id = ?1)
+              + (SELECT COALESCE(SUM(size_in_bytes), 0)
+                   FROM souvenirs WHERE user_id = ?1)",
     )
     .bind(user_id)
     .fetch_one(&state.pool)
@@ -367,6 +369,13 @@ async fn finalize_upload(state: &AppState, key: &str, written: u64) -> ApiResult
         .bind(id)
         .execute(&state.pool)
         .await?;
+    }
+
+    /* Souvenir screenshots are reserved before their bytes exist, so the row
+       only counts against the quota — and only becomes visible on a profile —
+       once the upload has actually landed. */
+    if key.starts_with("images/souvenirs/") {
+        crate::souvenirs::mark_uploaded(state, key, written).await?;
     }
 
     if let Some(id) = key

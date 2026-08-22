@@ -50,7 +50,7 @@ export default {
     const counts = {
       saves: user.counts.cloudSaves + user.counts.backups + user.counts.emulationSaves,
       achievements: library.achievements.length,
-      images: library.artwork.length,
+      images: library.artwork.length + library.souvenirs.length,
       sharing: library.shares.length + library.downloadSources.length,
       activity: null,
     };
@@ -86,7 +86,7 @@ export default {
         statTile({
           label: "Playtime",
           value: fmt.duration(user.playtimeSeconds),
-          sub: `${fmt.plural(user.counts.achievementGames, "game")} with achievements`,
+          sub: `${fmt.plural(user.counts.achievementGames, "game")} with achievements · ${fmt.plural(user.counts.souvenirs, "souvenir")}`,
         }),
       ),
       h(
@@ -278,17 +278,58 @@ async function tabContent(tab, { id, ctx, library }) {
   }
 
   if (tab === "images") {
-    if (!library.artwork.length) return emptyState("No custom images", null, "image");
-    return simpleTable(
-      ["Game", "Kind", "Source", "Size", "Updated"],
-      library.artwork.map((entry) => [
-        gameCell(entry.game),
-        pill(entry.kind),
-        entry.source === "upload" ? pill("uploaded", "accent") : pill("SteamGridDB"),
-        h("span", { class: "num", text: entry.sizeBytes ? fmt.bytes(entry.sizeBytes) : "—" }),
-        h("span", { class: "muted", text: fmt.relative(entry.updatedAt) }),
-      ]),
-    );
+    if (!library.artwork.length && !library.souvenirs.length) {
+      return emptyState("No custom images", null, "image");
+    }
+
+    const blocks = [];
+    if (library.artwork.length) {
+      blocks.push(
+        h("div", { class: "card-body tight" }, h("strong", { text: "Custom images" })),
+        simpleTable(
+          ["Game", "Kind", "Source", "Size", "Updated"],
+          library.artwork.map((entry) => [
+            gameCell(entry.game),
+            pill(entry.kind),
+            entry.source === "upload" ? pill("uploaded", "accent") : pill("SteamGridDB"),
+            h("span", { class: "num", text: entry.sizeBytes ? fmt.bytes(entry.sizeBytes) : "—" }),
+            h("span", { class: "muted", text: fmt.relative(entry.updatedAt) }),
+          ]),
+        ),
+      );
+    }
+    if (library.souvenirs.length) {
+      blocks.push(
+        h("div", { class: "card-body tight" }, h("strong", { text: "Achievement souvenirs" })),
+        simpleTable(
+          ["Game", "Achievement", "Visibility", "Likes", "Size", "Captured"],
+          library.souvenirs.map((entry) => [
+            gameCell(entry.game),
+            h(
+              "div",
+              { class: "row", style: { gap: "8px" } },
+              /* The picture itself, because a report is impossible to judge
+                 from an achievement name. */
+              h("a", {
+                class: "mono truncate",
+                href: entry.url,
+                target: "_blank",
+                rel: "noreferrer",
+                text: entry.primaryAchievementName || "—",
+              }),
+              entry.achievementCount > 1 ? pill(`+${entry.achievementCount - 1}`) : null,
+              entry.reports ? pill(fmt.plural(entry.reports, "report"), "warning") : null,
+            ),
+            entry.visibility === "PRIVATE" ? pill("hidden") : pill("public", "accent"),
+            h("span", { class: "num", text: fmt.number(entry.likes) }),
+            h("span", { class: "num", text: entry.sizeBytes ? fmt.bytes(entry.sizeBytes) : "—" }),
+            h("span", { class: "muted", text: fmt.relative(entry.capturedAt) }),
+          ]),
+        ),
+      );
+    }
+
+    return h("div", { class: "grid" }, ...blocks);
   }
 
   if (tab === "sharing") {
@@ -376,6 +417,7 @@ const PURGE_CATEGORIES = [
   ["backups", "Legacy save backups"],
   ["emulationSaves", "Emulation saves"],
   ["artwork", "Custom images"],
+  ["souvenirs", "Achievement souvenirs"],
   ["achievements", "Achievements"],
   ["playtime", "Playtime history"],
   ["downloadSources", "Download sources"],

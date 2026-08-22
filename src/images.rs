@@ -32,21 +32,45 @@ pub struct PresignRequest {
     pub image_ext: String,
     #[serde(default)]
     pub image_length: Option<i64>,
+    /* Only the achievement-image flow sends these: the capture's idempotency
+       key and the game the souvenir belongs to. */
+    #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub remote_game_id: Option<String>,
 }
 
-/// POST /presigned-urls/{profile-image|background-image}
+/// POST /presigned-urls/{profile-image|background-image|achievement-image}
 ///
 /// Mirrors the official endpoint the launcher uses when changing profile
 /// images: returns a presigned PUT URL plus the final public URL, which the
 /// launcher then saves to the official profile via PATCH /profile. The image
 /// itself is stored and served by this server, so it works without a Hydra
 /// Cloud subscription.
+///
+/// `achievement-image` is the souvenir capture flow, which answers in a
+/// different shape and reserves a row before the bytes arrive — see
+/// [`crate::souvenirs`].
 pub async fn presign(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(image_type): Path<String>,
     Json(payload): Json<PresignRequest>,
 ) -> ApiResult<Json<Value>> {
+    if image_type == "achievement-image" {
+        return crate::souvenirs::authorize(
+            &state,
+            &user.0.id,
+            crate::souvenirs::AuthorizeRequest {
+                image_ext: &payload.image_ext,
+                image_length: payload.image_length.unwrap_or(0),
+                client_id: payload.client_id.as_deref(),
+                remote_game_id: payload.remote_game_id.as_deref(),
+            },
+        )
+        .await;
+    }
+
     let url_field = match image_type.as_str() {
         "background-image" => "backgroundImageUrl",
         "profile-image" => "profileImageUrl",

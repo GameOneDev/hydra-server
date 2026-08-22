@@ -178,12 +178,23 @@ async fn sweep_pending(state: &AppState) -> ApiResult<Value> {
         cloud_saves::collect_orphan_blobs(state, user_id).await?;
     }
 
+    /* Souvenir captures reserve a row (and sometimes upload bytes) before the
+       achievement sync claims them; one that never got claimed is abandoned
+       the same way, and the launcher rotates its client id rather than
+       resuming, so nothing will ever come back for it. */
+    let souvenirs = crate::souvenirs::sweep_abandoned(state, &cutoff).await?;
+    let swept = stale.len() + souvenirs;
+
     Ok(json!({
-        "summary": match stale.len() {
+        "summary": match swept {
             0 => "No abandoned uploads to sweep.".to_string(),
-            n => format!("Swept {n} abandoned upload(s) across {} user(s).", owners.len()),
+            n => format!(
+                "Swept {n} abandoned upload(s): {} cloud save(s) across {} user(s), {souvenirs} souvenir(s).",
+                stale.len(),
+                owners.len()
+            ),
         },
-        "swept": stale.len(),
+        "swept": swept,
     }))
 }
 

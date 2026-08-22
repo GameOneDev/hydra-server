@@ -1,12 +1,19 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde_json::json;
+use serde_json::{json, Value};
 
 #[derive(Debug)]
 pub struct ApiError {
     pub status: StatusCode,
     pub message: String,
+    /// Extra fields merged into the JSON body next to `message`.
+    ///
+    /// Most errors only need a message. The souvenir sync is the exception:
+    /// the launcher reads a machine-readable `reason` (and echoes the
+    /// `clientId` back) to decide whether to retry, re-upload or give up, so
+    /// those handlers attach the same fields the official API sends.
+    pub extra: Option<Value>,
 }
 
 impl ApiError {
@@ -14,7 +21,15 @@ impl ApiError {
         Self {
             status,
             message: message.into(),
+            extra: None,
         }
+    }
+
+    /// Attaches extra top-level fields to the error body. Ignored unless
+    /// `extra` is a JSON object.
+    pub fn with_extra(mut self, extra: Value) -> Self {
+        self.extra = Some(extra);
+        self
     }
 
     pub fn not_found(message: impl Into<String>) -> Self {
@@ -40,7 +55,18 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, Json(json!({ "message": self.message }))).into_response()
+        let mut body = json!({ "message": self.message });
+
+        if let (Some(object), Some(extra)) = (
+            body.as_object_mut(),
+            self.extra.as_ref().and_then(Value::as_object),
+        ) {
+            for (key, value) in extra {
+                object.insert(key.clone(), value.clone());
+            }
+        }
+
+        (self.status, Json(body)).into_response()
     }
 }
 

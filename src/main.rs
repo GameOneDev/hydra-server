@@ -21,13 +21,14 @@ mod presence;
 mod ratelimit;
 mod settings;
 mod shares;
+mod souvenirs;
 mod sources;
 mod state;
 mod storage;
 mod webhooks;
 
 use axum::extract::DefaultBodyLimit;
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use std::net::SocketAddr;
 use config::Config;
@@ -253,6 +254,34 @@ fn router(_state: AppState) -> Router<AppState> {
             get(playtime::user_heatmap),
         )
         .route("/profile/members/{user_id}", get(members::lookup))
+        /* Achievement souvenirs. The per-souvenir routes sit under /profile,
+           the profile-facing ones under /users/{id} — the same split upstream
+           uses, and the launcher builds both. */
+        .route(
+            "/profile/souvenirs-visibility",
+            patch(souvenirs::set_account_visibility),
+        )
+        .route(
+            "/profile/souvenirs/{id}/visibility",
+            patch(souvenirs::set_visibility),
+        )
+        .route("/profile/souvenirs/{id}", delete(souvenirs::delete))
+        .route("/users/{user_id}/souvenirs", get(souvenirs::list_for_user))
+        .route(
+            "/users/{user_id}/souvenirs/{souvenir_id}/like",
+            post(souvenirs::like),
+        )
+        .route(
+            "/users/{user_id}/souvenirs/{souvenir_id}/report",
+            post(souvenirs::report),
+        )
+        /* Souvenir thumbnails for the achievement list. Named as upstream
+           names it, so the launcher reads the images off the same endpoint it
+           already asks for a profile's achievements. */
+        .route(
+            "/users/{user_id}/games/achievements",
+            get(souvenirs::user_game_achievements),
+        )
         .route("/presigned-urls/{type}", post(images::presign))
         .route("/profile/stats/{user_id}", get(achievements::user_stats))
         .route("/profile/achievements/{user_id}", get(achievements::recent))
@@ -308,6 +337,7 @@ async fn capabilities() -> Json<serde_json::Value> {
             "download-sources",
             "banners",
             "artifact-shares",
+            "souvenirs",
         ],
     }))
 }
