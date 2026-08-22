@@ -424,6 +424,10 @@ Notable behaviour:
   this server "friends only" means "members of this server" — the official
   friend graph isn't visible from here, and everyone who can reach this server
   is someone you let in.
+- **No notifications.** Upstream notifies you when someone likes your
+  souvenir; those arrive on the official API's event stream, which knows
+  nothing about souvenirs stored here. The like count on the picture is where
+  it shows up instead.
 - **Likes and reports.** Any member can like another's souvenir (one POST
   toggles) or report it. A report is recorded and raised as a warning in the
   event log with who, why and which picture — the History screen and the
