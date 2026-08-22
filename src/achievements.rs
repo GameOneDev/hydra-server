@@ -152,20 +152,37 @@ pub async fn user_stats(
     _viewer: CurrentUser,
     Path(user_id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let row: Option<(i64, i64)> = sqlx::query_as(
-        "SELECT COUNT(*), COALESCE(SUM(json_array_length(achievements)), 0)
+    let rows = sqlx::query(
+        "SELECT shop, object_id, json_array_length(achievements) AS cnt
          FROM game_achievements WHERE user_id = ?",
     )
     .bind(&user_id)
-    .fetch_optional(&state.pool)
+    .fetch_all(&state.pool)
     .await?;
 
-    let sum = match row {
-        Some((games, sum)) if games > 0 => Some(sum),
-        _ => None,
-    };
+    if rows.is_empty() {
+        return Ok(Json(json!({ "unlockedAchievementSum": null })));
+    }
 
-    Ok(Json(json!({ "unlockedAchievementSum": sum })))
+    let hidden = crate::hidden_games::hidden_set(&state.pool, &user_id).await?;
+
+    // shop and object_id are nullable. A row synced without them cannot be
+    // matched against the hidden list, but its achievements still count.
+    let sum: i64 = rows
+        .iter()
+        .filter(|row| {
+            let shop: Option<&str> = row.get("shop");
+            let object_id: Option<&str> = row.get("object_id");
+
+            match (shop, object_id) {
+                (Some(shop), Some(object_id)) => !hidden.contains(shop, object_id),
+                _ => true,
+            }
+        })
+        .map(|row| row.get::<i64, _>("cnt"))
+        .sum();
+
+    Ok(Json(json!({ "unlockedAchievementSum": Some(sum) })))
 }
 
 /// How many games' worth of recent unlocks a profile view gets back.
@@ -246,8 +263,11 @@ pub async fn recent(
     .fetch_all(&state.pool)
     .await?;
 
+    let hidden = crate::hidden_games::hidden_set(&state.pool, &user_id).await?;
+
     let mut games: Vec<(i64, Value)> = rows
         .iter()
+        .filter(|row| !hidden.contains(row.get("shop"), row.get("object_id")))
         .filter_map(|row| {
             let achievements: Vec<Value> =
                 serde_json::from_str(&row.get::<String, _>("achievements")).ok()?;

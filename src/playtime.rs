@@ -161,5 +161,18 @@ pub async fn user_heatmap(
     Path(user_id): Path<String>,
     Query(query): Query<HeatmapQuery>,
 ) -> ApiResult<Json<Vec<DayPlaytime>>> {
-    Ok(Json(fetch_heatmap(&state, &user_id, query.days).await?))
+    let mut days = fetch_heatmap(&state, &user_id, query.days).await?;
+
+    let hidden = crate::hidden_games::hidden_set(&state.pool, &user_id).await?;
+
+    for day in &mut days {
+        day.games
+            .retain(|g| !hidden.contains(&g.shop, &g.object_id));
+        day.total_seconds = day.games.iter().map(|g| g.seconds).sum();
+    }
+
+    // Drop days that became empty after filtering
+    days.retain(|day| !day.games.is_empty());
+
+    Ok(Json(days))
 }
