@@ -47,7 +47,9 @@ const MAX_SOUVENIR_BYTES: i64 = 20 * 1024 * 1024;
 const ALLOWED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp"];
 
 /// Matches `MAX_ACHIEVEMENTS_PER_SOUVENIR` in the launcher, which trims the
-/// list before it sends it. A payload above this is a client that didn't.
+/// list before it sends it. Anything longer is truncated rather than refused:
+/// a client that raised its own cap would rotate its id and re-upload the
+/// screenshot on every rejection, forever.
 const MAX_ACHIEVEMENTS_PER_SOUVENIR: usize = 50;
 
 /// The launcher's `SOUVENIRS_PAGE_SIZE`.
@@ -316,13 +318,12 @@ pub async fn claim_from_sync(
             return Err(ApiError::bad_request("souvenir is missing a clientId"));
         }
 
-        let names = normalize_names(&souvenir.achievement_names);
+        let mut names = normalize_names(&souvenir.achievement_names);
         if names.is_empty() {
             return Err(conflict("souvenir_payload_mismatch", client_id));
         }
-        if names.len() > MAX_ACHIEVEMENTS_PER_SOUVENIR {
-            return Err(conflict("souvenir_payload_mismatch", client_id));
-        }
+        names.truncate(MAX_ACHIEVEMENTS_PER_SOUVENIR);
+
         if !key_belongs_to(user_id, &souvenir.image_key) {
             return Err(conflict("souvenir_payload_mismatch", client_id));
         }
@@ -1278,15 +1279,20 @@ mod tests {
         );
     }
 
-    /// The launcher trims to 50 before sending; anything longer is a client
-    /// that didn't, and would grow one row without bound.
+    /// The launcher trims to 50 before sending. A longer payload is truncated
+    /// here rather than refused: rejecting it makes the launcher rotate its
+    /// client id and re-upload the screenshot, on a loop.
     #[test]
-    fn the_achievement_cap_matches_the_launcher() {
+    fn an_over_long_achievement_list_is_truncated_not_refused() {
         let names: Vec<String> = (0..=MAX_ACHIEVEMENTS_PER_SOUVENIR)
             .map(|index| format!("ACH_{index}"))
             .collect();
 
-        assert_eq!(normalize_names(&names).len(), MAX_ACHIEVEMENTS_PER_SOUVENIR + 1);
+        let mut normalized = normalize_names(&names);
+        assert_eq!(normalized.len(), MAX_ACHIEVEMENTS_PER_SOUVENIR + 1);
+
+        normalized.truncate(MAX_ACHIEVEMENTS_PER_SOUVENIR);
+        assert_eq!(normalized.len(), MAX_ACHIEVEMENTS_PER_SOUVENIR);
         assert_eq!(MAX_ACHIEVEMENTS_PER_SOUVENIR, 50);
     }
 

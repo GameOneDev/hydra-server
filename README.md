@@ -414,6 +414,9 @@ Notable behaviour:
   achievement that already has one is refused with `achievement_already_assigned`
   and the launcher syncs the achievements without it. Names are compared
   upper-cased and scoped to the game, since plenty of games ship an `ACH_WIN`.
+  A list longer than the launcher's own cap of 50 is truncated rather than
+  refused — refusing it makes the launcher rotate its id and re-upload the
+  screenshot, on a loop.
 - **Nothing is visible until it is complete.** A reservation whose upload never
   arrived shows on no profile, counts against the quota while its bytes sit on
   disk, and is swept by *Maintenance → Sweep abandoned uploads*.
