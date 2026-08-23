@@ -13,11 +13,11 @@ use sqlx::Row;
 use uuid::Uuid;
 
 /// A memory card, a battery save or a save state: kilobytes to a few dozen
-/// megabytes even for the heaviest emulators. A declaration past this is a bug
-/// or an abuse of the endpoint rather than a save, and on a server that has no
-/// quota configured it is the only bound on a single object — whole-game save
-/// backups have their own endpoint, which is where multi-gigabyte uploads
-/// belong.
+/// megabytes even for the heaviest emulators. A declared size past this is a bug
+/// or an abuse of the endpoint rather than a save. Note that `storage::upload`
+/// enforces the signed limit with some slack, so the absolute uploaded size can be
+/// slightly higher than this value. Whole-game save backups have their own endpoint,
+/// which is where multi-gigabyte uploads belong.
 const MAX_EMULATION_SAVE_BYTES: i64 = 512 * 1024 * 1024;
 
 fn save_key(id: &str) -> String {
