@@ -36,29 +36,64 @@ pub struct StorageClaims {
     pub sha256: Option<String>,
 }
 
-/// Total bytes a user is storing here: save backups, emulation saves,
-/// uploaded custom images, achievement souvenirs and Cloud Save V2 blobs.
-/// Everything the per-user quota is measured against lives in one place so the
-/// quota check and the admin panel can't drift.
+/// Every table the per-user quota is measured against, as
+/// (metric kind, table, size column).
+///
+/// This is the one definition: the quota check, the admin panel's per-user
+/// column, the panel's stored-bytes total and the `/metrics` gauge are all
+/// generated from this list, so a newly metered table cannot reach one of
+/// them and miss another.
+pub const METERED_TABLES: &[(&str, &str, &str)] = &[
+    ("cloud_saves", "cloud_save_blobs", "size_in_bytes"),
+    ("backups", "artifacts", "artifact_length_in_bytes"),
+    (
+        "emulation_saves",
+        "emulation_saves",
+        "artifact_length_in_bytes",
+    ),
+    ("artwork", "game_artwork", "size_in_bytes"),
+    ("souvenirs", "souvenirs", "size_in_bytes"),
+];
+
+/// SQL summing every metered table for one owner: save backups, emulation
+/// saves, uploaded custom images, achievement souvenirs and Cloud Save V2
+/// blobs.
+///
+/// `owner` is the SQL expression naming that owner — `?1` for a bound
+/// parameter, `u.id` to correlate with a joined `users` row. Callers pass a
+/// literal, never anything from a request.
+///
+/// Profile banners and avatars are deliberately absent: each is capped at
+/// `images::MAX_IMAGE_BYTES` and replaces the file it supersedes, so a user
+/// holds at most one of each and the total can't grow.
+pub fn used_bytes_expr(owner: &str) -> String {
+    sum_of_metered(&format!(" WHERE t.user_id = {owner}"))
+}
+
+/// SQL summing every metered table across all users.
+pub fn stored_bytes_expr() -> String {
+    sum_of_metered("")
+}
+
+fn sum_of_metered(predicate: &str) -> String {
+    METERED_TABLES
+        .iter()
+        .map(|(_, table, column)| {
+            format!("(SELECT COALESCE(SUM(t.{column}), 0) FROM {table} t{predicate})")
+        })
+        .collect::<Vec<_>>()
+        .join("\n      + ")
+}
+
+/// Total bytes a user is storing here.
 ///
 /// V2 blobs are counted once per distinct hash, which is also how they are
 /// stored — a file duplicated across variants or games costs nothing extra.
 pub async fn used_bytes(state: &AppState, user_id: &str) -> ApiResult<i64> {
-    let used: i64 = sqlx::query_scalar(
-        "SELECT (SELECT COALESCE(SUM(artifact_length_in_bytes), 0)
-                   FROM artifacts WHERE user_id = ?1)
-              + (SELECT COALESCE(SUM(artifact_length_in_bytes), 0)
-                   FROM emulation_saves WHERE user_id = ?1)
-              + (SELECT COALESCE(SUM(size_in_bytes), 0)
-                   FROM game_artwork WHERE user_id = ?1)
-              + (SELECT COALESCE(SUM(size_in_bytes), 0)
-                   FROM cloud_save_blobs WHERE user_id = ?1)
-              + (SELECT COALESCE(SUM(size_in_bytes), 0)
-                   FROM souvenirs WHERE user_id = ?1)",
-    )
-    .bind(user_id)
-    .fetch_one(&state.pool)
-    .await?;
+    let used: i64 = sqlx::query_scalar(&format!("SELECT {}", used_bytes_expr("?1")))
+        .bind(user_id)
+        .fetch_one(&state.pool)
+        .await?;
 
     Ok(used)
 }
@@ -343,27 +378,16 @@ pub async fn upload(
 async fn finalize_upload(state: &AppState, key: &str, written: u64) -> ApiResult<()> {
     let now = Utc::now().to_rfc3339();
 
-    /* Banner uploads become the user's current banner; the previous file is
-       deleted so banners don't accumulate. */
-    if let Some(rest) = key.strip_prefix("images/banners/") {
-        if let Some((user_id, _file)) = rest.split_once('/') {
-            let old_key: Option<String> =
-                sqlx::query_scalar("SELECT banner_key FROM users WHERE id = ?")
-                    .bind(user_id)
-                    .fetch_optional(&state.pool)
-                    .await?
-                    .flatten();
-
-            sqlx::query("UPDATE users SET banner_key = ? WHERE id = ?")
-                .bind(key)
-                .bind(user_id)
-                .execute(&state.pool)
-                .await?;
-
-            if let Some(old_key) = old_key {
-                if old_key != key {
-                    delete_object(state, &old_key).await;
-                }
+    /* A profile image becomes the user's current one and the file it
+       supersedes is deleted, so avatars and banners hold one file each
+       instead of piling up outside the quota. */
+    for (prefix, column) in [
+        ("images/banners/", "banner_key"),
+        ("images/avatars/", "avatar_key"),
+    ] {
+        if let Some(rest) = key.strip_prefix(prefix) {
+            if let Some((user_id, _file)) = rest.split_once('/') {
+                replace_profile_image(state, column, user_id, key).await?;
             }
         }
     }
@@ -405,6 +429,36 @@ async fn finalize_upload(state: &AppState, key: &str, written: u64) -> ApiResult
         .bind(id)
         .execute(&state.pool)
         .await?;
+    }
+
+    Ok(())
+}
+
+/// Records `key` as the user's current banner or avatar and deletes the file
+/// it replaced. `column` is a literal from [`finalize_upload`].
+async fn replace_profile_image(
+    state: &AppState,
+    column: &str,
+    user_id: &str,
+    key: &str,
+) -> ApiResult<()> {
+    let previous: Option<String> =
+        sqlx::query_scalar(&format!("SELECT {column} FROM users WHERE id = ?"))
+            .bind(user_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .flatten();
+
+    sqlx::query(&format!("UPDATE users SET {column} = ? WHERE id = ?"))
+        .bind(key)
+        .bind(user_id)
+        .execute(&state.pool)
+        .await?;
+
+    if let Some(previous) = previous {
+        if previous != key {
+            delete_object(state, &previous).await;
+        }
     }
 
     Ok(())
@@ -457,6 +511,31 @@ mod tests {
             upload_limit(30 * MIB as i64).map(NonZeroU64::get),
             Some(30 * MIB)
         );
+    }
+
+    /// The quota check, the admin panel and the metrics gauge all read this
+    /// list, so a table reaching one of them reaches every one.
+    #[test]
+    fn both_totals_cover_every_metered_table() {
+        let per_user = used_bytes_expr("?1");
+        let global = stored_bytes_expr();
+
+        for (_, table, column) in METERED_TABLES {
+            assert!(per_user.contains(&format!("FROM {table} t WHERE t.user_id = ?1")));
+            assert!(per_user.contains(&format!("SUM(t.{column})")));
+            assert!(global.contains(&format!("FROM {table} t)")));
+        }
+
+        assert_eq!(per_user.matches("SELECT COALESCE").count(), METERED_TABLES.len());
+        assert_eq!(global.matches("SELECT COALESCE").count(), METERED_TABLES.len());
+    }
+
+    /// Correlating against a joined `users u` needs the inner predicate to
+    /// name its own table, or a column added to `users` could capture it.
+    #[test]
+    fn the_owner_predicate_is_qualified() {
+        assert!(used_bytes_expr("u.id").contains("WHERE t.user_id = u.id"));
+        assert!(!stored_bytes_expr().contains("WHERE"));
     }
 
     #[test]

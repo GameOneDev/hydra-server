@@ -208,7 +208,7 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
     let over_quota: i64 = if current.max_bytes_per_user > 0 {
         sqlx::query_scalar(&format!(
             "SELECT COUNT(*) FROM users u WHERE ({}) >= ?",
-            super::users::USED_BYTES_EXPR
+            super::users::used_bytes_expr()
         ))
         .bind(current.max_bytes_per_user as i64)
         .fetch_one(&state.pool)
@@ -217,7 +217,13 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
         0
     };
 
-    let stored_bytes = cloud_bytes + backup_bytes + emulation_bytes + artwork_bytes;
+    /* Summed from the metered-table list rather than from the per-category
+       figures above, which are shaped for display and drifted once already. */
+    let stored_bytes: i64 = scalar(
+        &state,
+        &format!("SELECT {}", crate::storage::stored_bytes_expr()),
+    )
+    .await?;
 
     /* Alerts are the panel's reason to be checked at all: each is a condition
        an operator would want to act on, with the screen that acts on it. */
@@ -418,7 +424,7 @@ async fn trends(
         "SELECT u.id AS user_id, u.display_name, u.username, u.profile_image_url,
                 ({}) AS bytes
          FROM users u ORDER BY bytes DESC LIMIT 5",
-        super::users::USED_BYTES_EXPR
+        super::users::used_bytes_expr()
     ))
     .fetch_all(&state.pool)
     .await?;

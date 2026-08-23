@@ -283,6 +283,13 @@ fn is_safe_relative_key(key: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
 }
 
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 /// Re-derives ownership for a storage key straight from the database.
 async fn still_referenced(state: &AppState, key: &str) -> ApiResult<bool> {
     if let Some(rest) = key.strip_prefix("cloud-saves/") {
@@ -328,6 +335,23 @@ async fn still_referenced(state: &AppState, key: &str) -> ApiResult<bool> {
                 .bind(key)
                 .fetch_optional(&state.pool)
                 .await?;
+        return Ok(found.is_some());
+    }
+
+    if key.starts_with("images/banners/") || key.starts_with("images/avatars/") {
+        /* The live file is the one on the user's row. `profile_image_url` is
+           consulted too: it is all an avatar uploaded before `avatar_key`
+           existed has, and mistaking one of those for an orphan would delete
+           a picture someone is still using. */
+        let found: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM users
+             WHERE banner_key = ?1 OR avatar_key = ?1
+                OR profile_image_url LIKE ?2 ESCAPE '\\'",
+        )
+        .bind(key)
+        .bind(format!("%{}", escape_like(key)))
+        .fetch_optional(&state.pool)
+        .await?;
         return Ok(found.is_some());
     }
 

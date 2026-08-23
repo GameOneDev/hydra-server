@@ -110,8 +110,8 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
         let (rows, bytes) = expected.get(&key).copied().unwrap_or((0, 0));
         area["expectedRows"] = json!(rows);
         area["expectedBytes"] = json!(bytes);
-        /* Profile images are the one area with no row-per-file to compare
-           against — banners are a column, avatars are proxied. */
+        /* Profile images have a row naming the current file but no recorded
+           size, so there is nothing to compare bytes against. */
         area["tracked"] = json!(expected.contains_key(&key));
     }
 
@@ -275,15 +275,32 @@ async fn integrity(State(state): State<AppState>, _admin: AdminSession) -> ApiRe
             .await?;
     known.extend(pending_souvenir_keys);
 
-    /* Profile images and banners are reachable by URL, not by a per-file row;
-       treat everything under images/ as accounted for rather than orphaned. */
-    let banner_keys: Vec<Option<String>> =
-        sqlx::query_scalar("SELECT banner_key FROM users WHERE banner_key IS NOT NULL")
+    /* A profile image is one key on the user's row, so the current file
+       reconciles like any other and the ones it superseded show up below as
+       orphans. */
+    for (kind, column) in [("banner", "banner_key"), ("avatar", "avatar_key")] {
+        let keys: Vec<Option<String>> =
+            sqlx::query_scalar(&format!("SELECT {column} FROM users"))
+                .fetch_all(&state.pool)
+                .await?;
+        for key in keys.into_iter().flatten() {
+            known.insert(key.clone());
+            if tokio::fs::metadata(root.join(&key)).await.is_err() {
+                missing.push(finding(kind, key, json!({})));
+            }
+        }
+    }
+
+    /* Avatars uploaded before `avatar_key` existed are named only by the
+       profile URL mirrored from the official account. Counting those keeps a
+       picture someone is still using off the orphan list. */
+    let profile_urls: Vec<Option<String>> =
+        sqlx::query_scalar("SELECT profile_image_url FROM users")
             .fetch_all(&state.pool)
             .await?;
-    for key in banner_keys.into_iter().flatten() {
-        if tokio::fs::metadata(root.join(&key)).await.is_err() {
-            missing.push(finding("banner", key, json!({})));
+    for url in profile_urls.into_iter().flatten() {
+        if let Some(at) = url.find("images/avatars/") {
+            known.insert(url[at..].to_string());
         }
     }
 
@@ -308,15 +325,10 @@ async fn integrity(State(state): State<AppState>, _admin: AdminSession) -> ApiRe
             };
             let key = relative.to_string_lossy().replace('\\', "/");
 
-            /* Banners and avatars are reachable by URL with no per-file row
-               to reconcile against (see above) — but custom artwork under
-               images/artwork/ and souvenirs under images/souvenirs/ do have
-               one, so they stay in the scan. A .uploading file is a transfer
-               in flight, not an orphan. */
-            let unreconciled = key.starts_with("images/")
-                && !key.starts_with("images/artwork/")
-                && !key.starts_with("images/souvenirs/");
-            if unreconciled || key.ends_with(".uploading") {
+            /* Every area under images/ now has a row naming its current
+               file, so all of them are reconciled. A .uploading file is a
+               transfer in flight, not an orphan. */
+            if key.ends_with(".uploading") {
                 continue;
             }
             if !known.contains(&key) {
