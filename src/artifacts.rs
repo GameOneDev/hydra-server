@@ -116,9 +116,10 @@ pub async fn create(
     user: CurrentUser,
     Json(payload): Json<CreateArtifact>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if payload.artifact_length_in_bytes < 0 {
-        return Err(ApiError::bad_request("invalid artifact length"));
-    }
+    /* Zero is as invalid as negative: it is the size the upload token is
+       bound to and the number the quota below is checked against. */
+    let limit = storage::upload_limit(payload.artifact_length_in_bytes)
+        .ok_or_else(|| ApiError::bad_request("invalid artifact length"))?;
 
     enforce_quotas(&state, &user.0.id, &payload).await?;
 
@@ -148,11 +149,7 @@ pub async fn create(
     .execute(&state.pool)
     .await?;
 
-    let upload_url = storage::sign_upload_url(
-        &state,
-        &artifact_key(&id),
-        payload.artifact_length_in_bytes as u64,
-    );
+    let upload_url = storage::sign_upload_url(&state, &artifact_key(&id), limit);
 
     crate::events::record(
         &state,

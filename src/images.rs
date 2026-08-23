@@ -58,7 +58,12 @@ pub async fn presign(
         return Err(ApiError::bad_request("unsupported image format"));
     }
 
+    /* A declared size is mandatory: `sign_upload_url` needs a real limit to
+       bind the token to, and the launcher stats the file before asking. */
     let length = payload.image_length.unwrap_or(0);
+    let limit = storage::upload_limit(length)
+        .ok_or_else(|| ApiError::bad_request("imageLength is required"))?;
+
     if length > MAX_IMAGE_BYTES {
         return Err(ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -75,7 +80,7 @@ pub async fn presign(
     let file_name = format!("{}.{ext}", Uuid::new_v4());
     let key = format!("images/{kind}/{}/{file_name}", user.0.id);
 
-    let presigned_url = storage::sign_upload_url(&state, &key, length.max(0) as u64);
+    let presigned_url = storage::sign_upload_url(&state, &key, limit);
     let public_url = format!(
         "{}/images/{kind}/{}/{file_name}",
         state.config.public_url, user.0.id

@@ -101,7 +101,13 @@ pub async fn upload_url(
         return Err(ApiError::bad_request("unsupported image format"));
     }
 
+    /* A declared size is mandatory: `sign_upload_url` needs a real limit to
+       bind the token to, and it is also what the quota below is checked
+       against. The launcher stats the file before asking. */
     let length = payload.image_length.unwrap_or(0);
+    let limit = storage::upload_limit(length)
+        .ok_or_else(|| ApiError::bad_request("imageLength is required"))?;
+
     if length > MAX_ARTWORK_BYTES {
         return Err(ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -117,7 +123,7 @@ pub async fn upload_url(
     if max_bytes_per_user > 0 {
         let used = storage::used_bytes(&state, &user.0.id).await?;
 
-        if used + length.max(0) > max_bytes_per_user as i64 {
+        if used + length > max_bytes_per_user as i64 {
             return Err(ApiError::new(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "storage quota exceeded — free up space or ask the server admin",
@@ -131,7 +137,7 @@ pub async fn upload_url(
     let key = format!("images/artwork/{}/{file_name}", user.0.id);
 
     Ok(Json(json!({
-        "presignedUrl": storage::sign_upload_url(&state, &key, length.max(0) as u64),
+        "presignedUrl": storage::sign_upload_url(&state, &key, limit),
         "imageUrl": format!(
             "{}/images/artwork/{}/{file_name}",
             state.config.public_url, user.0.id

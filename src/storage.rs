@@ -9,6 +9,7 @@ use futures::StreamExt;
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::num::NonZeroU64;
 use tokio::io::AsyncWriteExt;
 
 const UPLOAD_TOKEN_TTL_SECONDS: i64 = 60 * 60;
@@ -23,7 +24,8 @@ pub struct StorageClaims {
     pub op: String,
     /// storage key relative to the storage dir, e.g. "artifacts/<id>.tar"
     pub key: String,
-    /// max upload size in bytes (uploads only)
+    /// Size the uploader declared, in bytes (`put` only). Always enforced by
+    /// `upload`, so zero means an empty object rather than "no limit".
     pub max: u64,
     pub exp: i64,
     /// Expected lowercase-hex SHA-256 of the uploaded bytes (Cloud Save V2
@@ -66,6 +68,9 @@ pub fn cloud_save_blob_key(user_id: &str, hash: &str) -> String {
 }
 
 /// Presigned PUT for a Cloud Save V2 blob, bound to the hash it must contain.
+///
+/// Takes a plain size rather than an `upload_limit`: a zero-byte save file is
+/// legitimate content, and `size_limit` bounds it either way.
 pub fn sign_blob_upload_url(
     state: &AppState,
     user_id: &str,
@@ -82,8 +87,17 @@ pub fn sign_blob_upload_url(
     )
 }
 
-pub fn sign_upload_url(state: &AppState, key: &str, max_bytes: u64) -> String {
-    sign_url(state, "put", key, max_bytes, UPLOAD_TOKEN_TTL_SECONDS)
+/// Byte budget for an upload token, from the size a caller declared.
+///
+/// `None` for a missing, zero or negative declaration. `sign_upload_url` takes
+/// nothing else, so an endpoint that has no real size to state cannot mint a
+/// token at all — a max of zero used to mean "no limit".
+pub fn upload_limit(declared_bytes: i64) -> Option<NonZeroU64> {
+    NonZeroU64::new(u64::try_from(declared_bytes).ok()?)
+}
+
+pub fn sign_upload_url(state: &AppState, key: &str, max_bytes: NonZeroU64) -> String {
+    sign_url(state, "put", key, max_bytes.get(), UPLOAD_TOKEN_TTL_SECONDS)
 }
 
 pub fn sign_download_url(state: &AppState, key: &str) -> String {
@@ -118,6 +132,17 @@ fn sign_url_with_hash(
     .expect("failed to sign storage token");
 
     format!("{}/storage/{}", state.config.public_url, token)
+}
+
+/// Bytes a `put` claim declaring `declared` is allowed to write.
+///
+/// Every declared size gets the same slack, which covers metadata drift
+/// between the launcher's stat() and the upload itself. There is no
+/// "unlimited" case: a zero declaration still buys only the slack.
+fn size_limit(declared: u64) -> u64 {
+    declared
+        .saturating_add(declared / 10)
+        .saturating_add(1024 * 1024)
 }
 
 fn decode_token(state: &AppState, token: &str, expected_op: &str) -> ApiResult<StorageClaims> {
@@ -206,22 +231,13 @@ pub async fn upload(
         ));
     }
 
-    let size_limit = if claims.max > 0 {
-        /* `max` is the size the launcher declared when it created the
-           artifact; a little slack covers metadata drift between stat()
-           and the actual upload. */
-        Some(claims.max + (claims.max / 10) + 1024 * 1024)
-    } else {
-        None
-    };
+    let size_limit = size_limit(claims.max);
 
-    if let (Some(limit), Some(total)) = (size_limit, total) {
-        if total > limit {
-            return Err(ApiError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "upload exceeds declared size",
-            ));
-        }
+    if total.is_some_and(|total| total > size_limit) {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "upload exceeds declared size",
+        ));
     }
 
     let temp_path = path.with_extension("uploading");
@@ -261,11 +277,7 @@ pub async fn upload(
 
         written += chunk.len() as u64;
 
-        let over_declared_size =
-            size_limit.is_some_and(|limit| written > limit);
-        let over_declared_total = total.is_some_and(|total| written > total);
-
-        if over_declared_size || over_declared_total {
+        if written > size_limit || total.is_some_and(|total| written > total) {
             drop(file);
             let _ = tokio::fs::remove_file(&temp_path).await;
             return Err(ApiError::new(
@@ -413,4 +425,35 @@ pub async fn download(
         .map_err(|_| ApiError::internal("failed to build response"))?;
 
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MIB: u64 = 1024 * 1024;
+
+    /// The zero that used to mean "no limit".
+    #[test]
+    fn a_missing_or_non_positive_size_yields_no_upload_limit() {
+        assert_eq!(upload_limit(0), None);
+        assert_eq!(upload_limit(-1), None);
+        assert_eq!(upload_limit(i64::MIN), None);
+    }
+
+    #[test]
+    fn a_positive_size_yields_that_limit() {
+        assert_eq!(upload_limit(1).map(NonZeroU64::get), Some(1));
+        assert_eq!(
+            upload_limit(30 * MIB as i64).map(NonZeroU64::get),
+            Some(30 * MIB)
+        );
+    }
+
+    #[test]
+    fn every_declared_size_is_bounded() {
+        assert_eq!(size_limit(0), MIB);
+        assert_eq!(size_limit(10 * MIB), 10 * MIB + MIB + MIB);
+        assert_eq!(size_limit(u64::MAX), u64::MAX);
+    }
 }
