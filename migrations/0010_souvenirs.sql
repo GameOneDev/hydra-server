@@ -95,6 +95,12 @@ CREATE UNIQUE INDEX idx_souvenir_reports_unique
 
 CREATE INDEX idx_souvenir_reports_created ON souvenir_reports (created_at DESC);
 
+-- The per-reporter hourly rate limit counts one person's recent reports, which
+-- neither index above serves: the unique one leads with souvenir_id, and the
+-- one above spans every reporter.
+CREATE INDEX idx_souvenir_reports_reporter_created
+    ON souvenir_reports (reporter_user_id, created_at);
+
 -- Account-level souvenir privacy, mirrored from the official profile by the
 -- launcher (the official API owns the setting; this server only needs to know
 -- it to answer for other viewers). 'PRIVATE' by default so nothing is exposed

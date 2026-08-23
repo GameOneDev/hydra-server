@@ -53,20 +53,28 @@ impl ApiError {
     }
 }
 
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let mut body = json!({ "message": self.message });
+impl ApiError {
+    /// The JSON body this error responds with.
+    ///
+    /// `message` is written last on purpose: an `extra` carrying its own
+    /// `message` key would otherwise replace the real one, and the callers of
+    /// `with_extra` are exactly the paths whose message a client matches on.
+    fn body(&self) -> Value {
+        let mut body = serde_json::Map::new();
 
-        if let (Some(object), Some(extra)) = (
-            body.as_object_mut(),
-            self.extra.as_ref().and_then(Value::as_object),
-        ) {
-            for (key, value) in extra {
-                object.insert(key.clone(), value.clone());
-            }
+        if let Some(extra) = self.extra.as_ref().and_then(Value::as_object) {
+            body.extend(extra.iter().map(|(key, value)| (key.clone(), value.clone())));
         }
 
-        (self.status, Json(body)).into_response()
+        body.insert("message".to_string(), json!(self.message));
+
+        Value::Object(body)
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.status, Json(self.body())).into_response()
     }
 }
 
@@ -85,3 +93,40 @@ impl From<std::io::Error> for ApiError {
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extra_fields_sit_beside_the_message() {
+        let error = ApiError::new(StatusCode::CONFLICT, "achievements/souvenir-conflict")
+            .with_extra(json!({ "reason": "reservation_not_found", "clientId": "c1" }));
+
+        assert_eq!(
+            error.body(),
+            json!({
+                "message": "achievements/souvenir-conflict",
+                "reason": "reservation_not_found",
+                "clientId": "c1",
+            })
+        );
+    }
+
+    /// The launcher decides how to recover from the message, so an `extra`
+    /// must never be able to stand in for it.
+    #[test]
+    fn extra_cannot_replace_the_message() {
+        let error = ApiError::bad_request("real message")
+            .with_extra(json!({ "message": "impostor" }));
+
+        assert_eq!(error.body()["message"], "real message");
+    }
+
+    #[test]
+    fn a_non_object_extra_is_ignored() {
+        let error = ApiError::bad_request("plain").with_extra(json!("not an object"));
+
+        assert_eq!(error.body(), json!({ "message": "plain" }));
+    }
+}

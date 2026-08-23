@@ -172,6 +172,16 @@ pub async fn authorize(
         return Err(ApiError::bad_request("unsupported image format"));
     }
 
+    /* A declared size is mandatory, and not only so the quota can be checked
+       before the bytes arrive: `sign_upload_url` treats a max of 0 as "no
+       limit", so a request that omitted the length would mint a token good
+       for an upload of any size — past MAX_SOUVENIR_BYTES and past the
+       quota, since the pre-check saw nothing. The launcher stats the file
+       before asking, so it always has one. */
+    if request.image_length <= 0 {
+        return Err(ApiError::bad_request("imageLength is required"));
+    }
+
     if request.image_length > MAX_SOUVENIR_BYTES {
         return Err(ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -179,7 +189,7 @@ pub async fn authorize(
         ));
     }
 
-    let length = request.image_length.max(0);
+    let length = request.image_length;
     let client_id = request
         .client_id
         .map(str::to_string)
