@@ -514,7 +514,9 @@ fn hidden_reason(account_visibility: &str, is_owner: bool) -> Option<&'static st
 /// GET /users/{userId}/souvenirs — the profile's souvenir tab.
 ///
 /// Any member sees another's public souvenirs; the owner also sees the ones
-/// they hid.
+/// they hid. `isMember` tells the launcher whether this server is the right
+/// one to ask at all — a profile it has never seen keeps its souvenirs on
+/// official Hydra, and the launcher reads them from there instead.
 pub async fn list_for_user(
     State(state): State<AppState>,
     viewer: CurrentUser,
@@ -524,19 +526,31 @@ pub async fn list_for_user(
 ) -> ApiResult<Json<Value>> {
     let is_owner = viewer.0.id == user_id;
 
-    let account_visibility: String = sqlx::query_scalar(
+    let account_visibility: Option<String> = sqlx::query_scalar(
         "SELECT souvenirs_visibility FROM users WHERE id = ?",
     )
     .bind(&user_id)
     .fetch_optional(&state.pool)
-    .await?
-    .unwrap_or_else(|| "PRIVATE".to_string());
+    .await?;
+
+    /* A profile this server has never seen keeps its souvenirs on official
+       Hydra. Saying "hidden" would be a lie the launcher renders as a locked
+       tab, so it is told plainly that this isn't the right server to ask. */
+    let Some(account_visibility) = account_visibility else {
+        return Ok(Json(json!({
+            "items": [],
+            "total": 0,
+            "hiddenReason": Value::Null,
+            "isMember": false,
+        })));
+    };
 
     if let Some(reason) = hidden_reason(&account_visibility, is_owner) {
         return Ok(Json(json!({
             "items": [],
             "total": 0,
             "hiddenReason": reason,
+            "isMember": true,
         })));
     }
 
@@ -651,6 +665,7 @@ pub async fn list_for_user(
         "items": items,
         "total": total,
         "hiddenReason": Value::Null,
+        "isMember": true,
     })))
 }
 

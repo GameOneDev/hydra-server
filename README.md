@@ -420,6 +420,12 @@ Notable behaviour:
 - **Nothing is visible until it is complete.** A reservation whose upload never
   arrived shows on no profile, counts against the quota while its bytes sit on
   disk, and is swept by *Maintenance → Sweep abandoned uploads*.
+- **Profiles this server doesn't know.** `GET /users/{id}/souvenirs` answers
+  `isMember: false` for a profile that has never signed in here, so the
+  launcher knows to read that person's souvenirs from official Hydra instead —
+  a Hydra Cloud subscriber's profile still shows their souvenirs to your
+  members. It reports `hiddenReason: null` for them rather than "private":
+  claiming a stranger's souvenirs are hidden would render a locked tab.
 - **Two levels of privacy.** Each souvenir is `PUBLIC` or `PRIVATE`, and the
   whole tab is gated by the account-level setting from the official profile.
   That setting lives on the official API, so the launcher mirrors it here; until
