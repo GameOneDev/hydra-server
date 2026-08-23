@@ -205,6 +205,11 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
 
     let current = state.settings.read().await.clone();
 
+    /* `>=`, not `>`: the endpoints refuse when `used + declared` passes the
+       quota and no declared size is ever less than a byte, so an account
+       sitting exactly on its quota is one whose next upload is already
+       refused. That is what the alert below says, and
+       `storage::exceeds_quota` is the same boundary asked of one byte. */
     let over_quota: i64 = if current.max_bytes_per_user > 0 {
         sqlx::query_scalar(&format!(
             "SELECT COUNT(*) FROM users u WHERE ({}) >= ?",

@@ -809,7 +809,7 @@ async fn enforce_quota(
     }
 
     let used = storage::used_bytes(state, user_id).await?;
-    if used + incoming_bytes > max_bytes_per_user as i64 {
+    if storage::exceeds_quota(max_bytes_per_user, used, incoming_bytes) {
         crate::events::record(
             state,
             Event::sync("cloud_save.quota_exceeded", user_id, "Upload refused — quota full")
@@ -822,10 +822,7 @@ async fn enforce_quota(
         )
         .await;
 
-        return Err(ApiError::new(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "storage quota exceeded — free up space or ask the server admin",
-        ));
+        return Err(storage::quota_error());
     }
 
     Ok(())

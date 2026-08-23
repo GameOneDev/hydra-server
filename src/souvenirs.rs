@@ -193,17 +193,9 @@ pub async fn authorize(
     }
 
     /* Against the declared length: the file doesn't exist yet, and the real
-       size is recorded once the upload lands. */
-    let max_bytes_per_user = state.settings.read().await.max_bytes_per_user;
-    if max_bytes_per_user > 0 {
-        let used = storage::used_bytes(state, user_id).await?;
-        if used + length > max_bytes_per_user as i64 {
-            return Err(ApiError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "storage quota exceeded — free up space or ask the server admin",
-            ));
-        }
-    }
+       size is recorded once the upload lands — which is also where the bytes
+       are held to this. */
+    storage::check_quota(state, user_id, length).await?;
 
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();

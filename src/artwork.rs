@@ -116,20 +116,9 @@ pub async fn upload_url(
     }
 
     /* Checked against the length the launcher declares, since the file
-       doesn't exist yet. The stored size recorded in `save` is the real one,
-       so an understated length can overshoot the quota by at most one
-       image. */
-    let max_bytes_per_user = state.settings.read().await.max_bytes_per_user;
-    if max_bytes_per_user > 0 {
-        let used = storage::used_bytes(&state, &user.0.id).await?;
-
-        if used + length > max_bytes_per_user as i64 {
-            return Err(ApiError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "storage quota exceeded — free up space or ask the server admin",
-            ));
-        }
-    }
+       doesn't exist yet. `storage::upload` checks the bytes themselves, so an
+       understated length buys nothing. */
+    storage::check_quota(&state, &user.0.id, length).await?;
 
     /* Flat, uuid-named keys: the game a file belongs to is tracked in the
        database, so nothing user-controlled ends up in a filesystem path. */

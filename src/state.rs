@@ -69,6 +69,9 @@ pub struct AppState {
     pub started_at: DateTime<Utc>,
     /// Counters behind `/metrics`.
     pub metrics: Arc<crate::metrics::Counters>,
+    /// Uploads currently streaming, so two of them are measured against each
+    /// other and not only against what the database already knows.
+    pub uploads: Arc<crate::storage::InFlightUploads>,
     /// Failed sign-ins per address, for the login lockout.
     pub login_guard: Arc<RwLock<crate::ratelimit::Guard>>,
     /// Last time each user was seen calling, for the presence log. Memory

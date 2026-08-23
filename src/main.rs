@@ -95,6 +95,7 @@ async fn main() {
         settings: Arc::new(RwLock::new(runtime_settings)),
         started_at: chrono::Utc::now(),
         metrics: Arc::new(metrics::Counters::default()),
+        uploads: Arc::new(storage::InFlightUploads::default()),
         login_guard: Arc::new(RwLock::new(Default::default())),
         presence: Arc::new(RwLock::new(Default::default())),
     };
