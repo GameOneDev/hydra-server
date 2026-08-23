@@ -404,7 +404,7 @@ impl QuotaGate {
                     "Upload refused — quota full",
                 )
                 .detail(serde_json::json!({
-                    "key": self.key,
+                    "key": &self.key,
                     "writtenBytes": written,
                     "declaredBytes": self.declared,
                     "quotaBytes": self.quota,
