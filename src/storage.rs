@@ -994,4 +994,279 @@ mod tests {
             assert!(targets.contains(&format!("FROM {table} ")), "{table}");
         }
     }
+
+    // -----------------------------------------------------------------------
+    // The quota gate, through `upload` itself
+    // -----------------------------------------------------------------------
+
+    use axum::body::Bytes;
+    use std::path::PathBuf;
+
+    /// A server on a scratch database and storage directory.
+    ///
+    /// The upload path is worth exercising against the real thing: what it
+    /// allows depends on rows other endpoints wrote, on the settings, and on
+    /// what is already on disk. A stand-in for those would only be testing
+    /// the stand-in.
+    struct TestServer {
+        state: AppState,
+        dir: PathBuf,
+    }
+
+    impl TestServer {
+        async fn start(quota: u64) -> Self {
+            let dir = std::env::temp_dir().join(format!("hydra-upload-test-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).expect("scratch directory");
+
+            let mut config = crate::config::Config::for_test();
+            config.data_dir = dir.clone();
+
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(
+                    sqlx::sqlite::SqliteConnectOptions::new()
+                        .filename(config.database_path())
+                        .create_if_missing(true),
+                )
+                .await
+                .expect("scratch database");
+
+            sqlx::migrate!("./migrations")
+                .run(&pool)
+                .await
+                .expect("migrations");
+
+            let mut settings = crate::state::RuntimeSettings::from_config(&config);
+            settings.max_bytes_per_user = quota;
+
+            let now = Utc::now().to_rfc3339();
+            sqlx::query(
+                "INSERT INTO users (id, display_name, created_at, last_seen_at)
+                 VALUES ('alice', 'alice', ?, ?)",
+            )
+            .bind(&now)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .expect("a user to charge");
+
+            let state = AppState {
+                pool,
+                config: Arc::new(config),
+                http: reqwest::Client::new(),
+                token_cache: Default::default(),
+                settings: Arc::new(tokio::sync::RwLock::new(settings)),
+                started_at: Utc::now(),
+                metrics: Default::default(),
+                uploads: Default::default(),
+                login_guard: Default::default(),
+                presence: Default::default(),
+            };
+
+            Self { state, dir }
+        }
+
+        /// A reserved emulation save, exactly as `create_upload_url` leaves
+        /// one: a row carrying the declared size, and a token bound to it.
+        async fn reserve(&self, declared: i64) -> Save {
+            let id = uuid::Uuid::new_v4().to_string();
+            let now = Utc::now().to_rfc3339();
+
+            sqlx::query(
+                "INSERT INTO emulation_saves
+                   (id, user_id, platform, emulator, save_identity,
+                    artifact_length_in_bytes, created_at, updated_at)
+                 VALUES (?, 'alice', 'ps2', 'pcsx2', 'slot', ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(declared)
+            .bind(&now)
+            .bind(&now)
+            .execute(&self.state.pool)
+            .await
+            .expect("a reserved save");
+
+            let key = format!("emulation-saves/{id}.bin");
+            let url = sign_upload_url(
+                &self.state,
+                &key,
+                upload_limit(declared).expect("a positive declared size"),
+            );
+
+            Save {
+                id,
+                token: url.rsplit('/').next().expect("a signed token").to_string(),
+                path: storage_path(&self.state, &key),
+            }
+        }
+
+        /// PUTs `frames` to the token, one body frame each — the quota is
+        /// re-checked per frame, so this is what a body arriving in pieces
+        /// looks like from the inside.
+        async fn put(
+            &self,
+            save: &Save,
+            query: UploadQuery,
+            frames: Vec<Vec<u8>>,
+        ) -> ApiResult<StatusCode> {
+            let body = Body::from_stream(futures::stream::iter(
+                frames
+                    .into_iter()
+                    .map(|frame| Ok::<_, std::io::Error>(Bytes::from(frame))),
+            ));
+
+            upload(
+                State(self.state.clone()),
+                Path(save.token.clone()),
+                Query(query),
+                body,
+            )
+            .await
+        }
+
+        /// `(is_uploaded, artifact_length_in_bytes)` as the row stands now.
+        async fn row(&self, id: &str) -> (i64, i64) {
+            sqlx::query_as(
+                "SELECT is_uploaded, artifact_length_in_bytes FROM emulation_saves WHERE id = ?",
+            )
+            .bind(id)
+            .fetch_one(&self.state.pool)
+            .await
+            .expect("the reserved row")
+        }
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    struct Save {
+        id: String,
+        token: String,
+        path: PathBuf,
+    }
+
+    impl Save {
+        /// Where the bytes accumulate before they are complete.
+        fn partial(&self) -> PathBuf {
+            self.path.with_extension("uploading")
+        }
+    }
+
+    const ONE_SHOT: UploadQuery = UploadQuery {
+        offset: None,
+        total: None,
+    };
+
+    /// The point of the gate: a token bound to one byte cannot spend an
+    /// account's whole quota, however much its holder sends.
+    #[tokio::test]
+    async fn an_upload_that_outgrows_the_quota_is_refused_mid_body() {
+        let server = TestServer::start(100_000).await;
+        let save = server.reserve(1).await;
+
+        let refusal = server
+            .put(&save, ONE_SHOT, vec![vec![7; 40_000]; 4])
+            .await
+            .expect_err("160 000 bytes into a 100 000 byte quota");
+
+        /* The declared-size cap would have let all of this through: that is
+           the hole this closes, so the refusal has to be the quota's. */
+        assert!(size_limit(1) > 160_000);
+        assert_eq!(refusal.status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(refusal.message, QUOTA_MESSAGE);
+
+        assert!(!save.path.exists(), "nothing was stored");
+        assert!(!save.partial().exists(), "and no partial file was left");
+        assert_eq!(server.row(&save.id).await, (0, 1), "the row never landed");
+    }
+
+    /// The honest case still lands, and what is recorded is the size that
+    /// actually arrived — which is what the next upload is measured against.
+    #[tokio::test]
+    async fn an_upload_inside_the_quota_lands_and_records_its_real_size() {
+        let server = TestServer::start(100_000).await;
+        let save = server.reserve(50_000).await;
+
+        let status = server
+            .put(&save, ONE_SHOT, vec![vec![7; 25_000]; 2])
+            .await
+            .expect("50 000 bytes into a 100 000 byte quota");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            std::fs::metadata(&save.path).expect("the stored object").len(),
+            50_000
+        );
+        assert!(!save.partial().exists());
+        assert_eq!(server.row(&save.id).await, (1, 50_000));
+    }
+
+    /// A chunked upload that loses its room between chunks can never be
+    /// finished, so the part already on disk goes with the refusal.
+    #[tokio::test]
+    async fn a_chunked_upload_refused_between_chunks_drops_its_partial_file() {
+        let server = TestServer::start(100_000).await;
+        let save = server.reserve(80_000).await;
+
+        let status = server
+            .put(
+                &save,
+                UploadQuery {
+                    offset: Some(0),
+                    total: Some(80_000),
+                },
+                vec![vec![7; 40_000]],
+            )
+            .await
+            .expect("the first chunk fits");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            std::fs::metadata(save.partial()).expect("a partial file").len(),
+            40_000
+        );
+
+        /* The operator lowers the quota under what this upload reserved. */
+        server.state.settings.write().await.max_bytes_per_user = 10_000;
+
+        let refusal = server
+            .put(
+                &save,
+                UploadQuery {
+                    offset: Some(40_000),
+                    total: Some(80_000),
+                },
+                vec![vec![7; 40_000]],
+            )
+            .await
+            .expect_err("the room it reserved is gone");
+
+        assert_eq!(refusal.status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(refusal.message, QUOTA_MESSAGE);
+        assert!(
+            !save.partial().exists(),
+            "the half an upload that can never be finished"
+        );
+        assert!(!save.path.exists());
+    }
+
+    /// Nothing above should cost anything on a server that has no quota: the
+    /// gate never opens, so it never reads the database.
+    #[tokio::test]
+    async fn an_unlimited_server_stores_what_it_is_given() {
+        let server = TestServer::start(0).await;
+        let save = server.reserve(1).await;
+
+        let status = server
+            .put(&save, ONE_SHOT, vec![vec![7; 40_000]])
+            .await
+            .expect("no quota, no refusal");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(server.row(&save.id).await, (1, 40_000));
+    }
+
 }
