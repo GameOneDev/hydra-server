@@ -1,28 +1,20 @@
-//! Achievement souvenirs (upstream hydralauncher/hydra#2700, this fork's
-//! 4.1.2 launcher build onwards).
+//! Achievement souvenirs (upstream hydralauncher/hydra#2700).
 //!
-//! When an achievement pops, the launcher grabs a screenshot of the game and
-//! files it on the player's profile. Several achievements that unlock together
-//! share one picture, so the picture is the record and the achievement names
-//! hang off it.
+//! A screenshot taken when an achievement pops, filed on the player's profile.
+//! Achievements that unlock together share one picture, so the picture is the
+//! record and the names hang off it.
 //!
-//! Upstream gates this behind Hydra Cloud, which means a launcher pointed at a
-//! self-hosted server routes the whole flow here:
+//! Uploading takes three calls, because the row exists before the bytes do:
 //!
 //! 1. `POST /presigned-urls/achievement-image` reserves the capture's
 //!    `clientId` and answers with the storage key plus a presigned PUT.
 //! 2. The launcher PUTs the bytes to `/storage/{token}`.
-//! 3. `PUT /profile/games/achievements` arrives carrying the souvenir next to
-//!    the achievements it belongs to; that call promotes the reservation and
-//!    **must** echo `souvenirs: [{ clientId, id }]` back, or the launcher
-//!    treats the sync as unacknowledged and retries forever.
+//! 3. `PUT /profile/games/achievements` carries the souvenir next to its
+//!    achievements, promoting the reservation. That response **must** echo
+//!    `souvenirs: [{ clientId, id }]` or the launcher retries forever.
 //!
-//! Every step is retried with the same `clientId` until it is acknowledged, so
-//! every step here is idempotent. Failures answer with the same machine-readable
-//! codes the launcher's retry policy knows (`achievements/souvenir-conflict`
-//! plus a `reason`, or `achievements/souvenir-upload-*`), because those decide
-//! whether it retries, re-uploads under a new id, or gives up and syncs the
-//! achievements alone.
+//! The launcher retries the whole sequence under the same `clientId`, so every
+//! step here is idempotent.
 
 use crate::auth::CurrentUser;
 use crate::error::{ApiError, ApiResult};
@@ -40,43 +32,35 @@ use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-/// Screenshots are JPEGs a few hundred KB in size; this is a sanity bound, not
-/// a target.
 const MAX_SOUVENIR_BYTES: i64 = 20 * 1024 * 1024;
 
 const ALLOWED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp"];
 
-/// Matches `MAX_ACHIEVEMENTS_PER_SOUVENIR` in the launcher, which trims the
-/// list before it sends it. Anything longer is truncated rather than refused:
-/// a client that raised its own cap would rotate its id and re-upload the
-/// screenshot on every rejection, forever.
+/// The launcher's own cap. A longer list is truncated rather than refused —
+/// refusing it makes the launcher rotate its id and re-upload, on a loop.
 const MAX_ACHIEVEMENTS_PER_SOUVENIR: usize = 50;
 
 /// The launcher's `SOUVENIRS_PAGE_SIZE`.
 const DEFAULT_PAGE_SIZE: i64 = 24;
-
-/// Bound on `take`, so a hand-made request can't ask for everything at once.
 const MAX_PAGE_SIZE: i64 = 100;
 
-/// How long the presigned PUT stays valid, mirrored back to the launcher as
-/// `expiresAt`. Must match `UPLOAD_TOKEN_TTL_SECONDS` in [`crate::storage`].
+/// Must match `UPLOAD_TOKEN_TTL_SECONDS` in [`crate::storage`]; reported to
+/// the launcher as `expiresAt`.
 const UPLOAD_TTL_SECONDS: i64 = 60 * 60;
 
 const ALLOWED_REPORT_REASONS: &[&str] =
     &["hate", "sexual_content", "violence", "spam", "other"];
 
-/// Reports one person may file per hour before further ones are refused with
-/// 429, which the launcher surfaces as "try again later".
 const REPORT_RATE_LIMIT_PER_HOUR: i64 = 30;
 
-/// Errors the launcher's retry policy understands. Returning the wrong one
-/// doesn't just mislabel a failure — it picks the wrong recovery, so a souvenir
-/// that only needed a retry gets abandoned instead.
+/// Codes the launcher's retry policy matches on. The wrong one doesn't just
+/// mislabel a failure, it picks the wrong recovery — a souvenir that needed a
+/// retry gets abandoned instead.
 const CONFLICT_CODE: &str = "achievements/souvenir-conflict";
 const UPLOAD_INCOMPLETE_CODE: &str = "achievements/souvenir-upload-incomplete";
 
-/// 409 with the reason the launcher matches on, echoing the `clientId` so it
-/// can tell a failure about *this* capture from one about another.
+/// The `clientId` rides along so the launcher can tell a failure about *this*
+/// capture from one about another.
 fn conflict(reason: &str, client_id: &str) -> ApiError {
     ApiError::new(StatusCode::CONFLICT, CONFLICT_CODE).with_extra(json!({
         "reason": reason,
@@ -88,8 +72,8 @@ fn storage_key(user_id: &str, file_name: &str) -> String {
     format!("images/souvenirs/{user_id}/{file_name}")
 }
 
-/// Souvenir images live under the owner's own prefix, so a payload can't claim
-/// a key that belongs to somebody else.
+/// Images live under the owner's own prefix, so a payload can't claim someone
+/// else's key.
 fn key_belongs_to(user_id: &str, key: &str) -> bool {
     key.starts_with(&format!("images/souvenirs/{user_id}/"))
         && !key.contains("..")
@@ -115,9 +99,8 @@ fn normalize_visibility(value: &str) -> Option<&'static str> {
     }
 }
 
-/// Achievement names are compared upper-cased everywhere — the launcher reads
-/// them from achievement files whose casing doesn't reliably match the
-/// catalogue's.
+/// Upper-cased throughout: the launcher reads names out of achievement files,
+/// whose casing doesn't reliably match the catalogue's.
 fn normalize_names(names: &[String]) -> Vec<String> {
     let mut seen = HashSet::new();
     names
@@ -135,12 +118,9 @@ fn parse_names(raw: &str) -> Vec<String> {
 // Upload authorization
 // ---------------------------------------------------------------------------
 
-/// The launcher's request body for `POST /presigned-urls/achievement-image`.
-///
-/// `clientId` and `remoteGameId` arrive from the grouped capture flow. The
-/// older per-achievement upload sent neither; a reservation is still
-/// created for those so the bytes stay accounted for, they just can't be
-/// deduplicated across retries.
+/// `POST /presigned-urls/achievement-image`. The pre-grouped upload flow sent
+/// no `clientId`, so one is invented for it — the bytes stay accounted for,
+/// they just can't be deduplicated across retries.
 pub struct AuthorizeRequest<'a> {
     pub image_ext: &'a str,
     pub image_length: i64,
@@ -148,16 +128,11 @@ pub struct AuthorizeRequest<'a> {
     pub remote_game_id: Option<&'a str>,
 }
 
-/// POST /presigned-urls/achievement-image
+/// POST /presigned-urls/achievement-image — reserves a capture.
 ///
-/// Answers with the launcher's `AchievementSouvenirUploadAuthorization`:
-///
-/// * `status: "pending"` + `presignedUrl` — upload the bytes, then sync.
-/// * `status: "claimed"` + `presignedUrl: null` — the bytes are already here
-///   (a retry after a successful upload); skip straight to the sync.
-///
-/// Re-authorizing the same `clientId` always returns the same key, so a retry
-/// after a lost response doesn't leave the first upload behind as garbage.
+/// Answers `pending` with a URL to upload to, or `claimed` when the bytes are
+/// already here and the launcher should go straight to the sync. The same
+/// `clientId` always gets the same key, so a retry doesn't strand an upload.
 pub async fn authorize(
     state: &AppState,
     user_id: &str,
@@ -172,12 +147,10 @@ pub async fn authorize(
         return Err(ApiError::bad_request("unsupported image format"));
     }
 
-    /* A declared size is mandatory, and not only so the quota can be checked
-       before the bytes arrive: `sign_upload_url` treats a max of 0 as "no
-       limit", so a request that omitted the length would mint a token good
-       for an upload of any size — past MAX_SOUVENIR_BYTES and past the
-       quota, since the pre-check saw nothing. The launcher stats the file
-       before asking, so it always has one. */
+    /* `sign_upload_url` reads a max of 0 as "no limit", so a request without a
+       length would mint a token good for an upload of any size — past both
+       MAX_SOUVENIR_BYTES and the quota, whose check would have seen nothing.
+       The launcher stats the file before asking. */
     if request.image_length <= 0 {
         return Err(ApiError::bad_request("imageLength is required"));
     }
@@ -208,9 +181,6 @@ pub async fn authorize(
     if let Some(row) = existing {
         let image_key: String = row.get("image_key");
 
-        /* The bytes already landed. Telling the launcher to upload them again
-           would work, but re-uploading a screenshot it already stored is the
-           one thing "claimed" exists to avoid. */
         if row.get::<i64, _>("is_uploaded") == 1 {
             return Ok(Json(json!({
                 "imageKey": image_key,
@@ -223,8 +193,8 @@ pub async fn authorize(
         return Ok(Json(authorization(state, &image_key, length)));
     }
 
-    /* Checked against the length the launcher declares, since the file
-       doesn't exist yet — the real size is recorded when the upload lands. */
+    /* Against the declared length: the file doesn't exist yet, and the real
+       size is recorded once the upload lands. */
     let max_bytes_per_user = state.settings.read().await.max_bytes_per_user;
     if max_bytes_per_user > 0 {
         let used = storage::used_bytes(state, user_id).await?;
@@ -265,7 +235,7 @@ fn authorization(state: &AppState, image_key: &str, length: i64) -> Value {
         "imageKey": image_key,
         "presignedUrl": storage::sign_upload_url(state, image_key, length as u64),
         "status": "pending",
-        /* Milliseconds, as the launcher's `expiresAt` is a JS timestamp. */
+        // Milliseconds — the launcher reads `expiresAt` as a JS timestamp.
         "expiresAt": (Utc::now().timestamp() + UPLOAD_TTL_SECONDS) * 1000,
     })
 }
@@ -300,17 +270,24 @@ pub struct SyncSouvenir {
     pub achievement_names: Vec<String>,
 }
 
-/// Promotes the souvenirs in an achievement sync payload and returns the
+/// The game an achievement sync is about. `shop`/`object_id` are absent when
+/// the launcher only knows the official game id.
+#[derive(Clone, Copy)]
+pub struct SyncGame<'a> {
+    pub remote_id: &'a str,
+    pub shop: Option<&'a str>,
+    pub object_id: Option<&'a str>,
+}
+
+/// Promotes the souvenirs in an achievement sync and returns the
 /// `[{ clientId, id }]` acknowledgements the launcher waits for.
 ///
 /// `merged` is the achievement set the sync just stored, so a souvenir can only
-/// be filed against achievements this server actually knows are unlocked.
+/// be filed against unlocks this server knows about.
 pub async fn claim_from_sync(
     state: &AppState,
     user_id: &str,
-    remote_game_id: &str,
-    shop: Option<&str>,
-    object_id: Option<&str>,
+    game: SyncGame<'_>,
     souvenirs: &[SyncSouvenir],
     merged: &[Value],
 ) -> ApiResult<Vec<Value>> {
@@ -328,116 +305,113 @@ pub async fn claim_from_sync(
             return Err(ApiError::bad_request("souvenir is missing a clientId"));
         }
 
-        let mut names = normalize_names(&souvenir.achievement_names);
-        if names.is_empty() {
-            return Err(conflict("souvenir_payload_mismatch", client_id));
-        }
-        names.truncate(MAX_ACHIEVEMENTS_PER_SOUVENIR);
-
-        if !key_belongs_to(user_id, &souvenir.image_key) {
-            return Err(conflict("souvenir_payload_mismatch", client_id));
-        }
-
-        /* Every name has to be an achievement this server has recorded as
-           unlocked. "rebuild" is the launcher's recovery for this, which is
-           what we want: its own achievement state is ahead of ours. */
-        if names.iter().any(|name| !unlocked.contains(name)) {
-            return Err(conflict("achievement_not_found", client_id));
-        }
-
-        let reservation = sqlx::query(
-            "SELECT id, image_key, is_uploaded, status FROM souvenirs
-             WHERE user_id = ? AND client_id = ?",
-        )
-        .bind(user_id)
-        .bind(client_id)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or_else(|| conflict("reservation_not_found", client_id))?;
-
-        let id: String = reservation.get("id");
-
-        if reservation.get::<String, _>("image_key") != souvenir.image_key {
-            return Err(conflict("reservation_mismatch", client_id));
-        }
-
-        /* The sync can overtake its own upload: the launcher only sends the
-           souvenir once the PUT returned, but a proxy that buffered the body
-           or an interrupted transfer leaves the row unflipped. "retry" is the
-           right answer — the bytes are probably seconds away. */
-        if reservation.get::<i64, _>("is_uploaded") != 1 {
-            return Err(ApiError::new(StatusCode::CONFLICT, UPLOAD_INCOMPLETE_CODE)
-                .with_extra(json!({ "clientId": client_id })));
-        }
-
-        /* One souvenir per achievement, matching the profile: the achievement
-           list shows a single thumbnail per unlock. A second capture for an
-           achievement that already has one is abandoned by the launcher, which
-           then syncs the achievements alone. */
-        let taken =
-            achievement_already_captured(state, user_id, remote_game_id, &id, &names).await?;
-        if taken {
-            return Err(conflict("achievement_already_assigned", client_id));
-        }
-
-        let names_json = serde_json::to_string(&names)
-            .map_err(|_| ApiError::internal("failed to serialize achievement names"))?;
-        let now = Utc::now().to_rfc3339();
-
-        sqlx::query(
-            "UPDATE souvenirs SET
-               status = 'ready',
-               remote_game_id = ?,
-               shop = COALESCE(?, shop),
-               object_id = COALESCE(?, object_id),
-               primary_achievement_name = ?,
-               achievement_names = ?,
-               captured_at = ?,
-               updated_at = ?
-             WHERE id = ?",
-        )
-        .bind(remote_game_id)
-        .bind(shop)
-        .bind(object_id)
-        .bind(&names[0])
-        .bind(&names_json)
-        .bind(souvenir.captured_at)
-        .bind(&now)
-        .bind(&id)
-        .execute(&state.pool)
-        .await?;
-
-        let size: i64 = sqlx::query_scalar("SELECT size_in_bytes FROM souvenirs WHERE id = ?")
-            .bind(&id)
-            .fetch_one(&state.pool)
-            .await?;
-
-        let mut event = Event::sync(
-            "souvenir.synced",
-            user_id,
-            match names.len() {
-                1 => "Stored an achievement souvenir".to_string(),
-                n => format!("Stored an achievement souvenir ({n} achievements)"),
-            },
-        )
-        .detail(json!({ "souvenirId": id, "achievements": names }))
-        .size(size);
-
-        if let (Some(shop), Some(object_id)) = (shop, object_id) {
-            event = event.game(shop, object_id);
-        }
-
-        crate::events::record(state, event).await;
-
+        let id = claim_one(state, user_id, game, souvenir, client_id, &unlocked).await?;
         acknowledgements.push(json!({ "clientId": client_id, "id": id }));
     }
 
     Ok(acknowledgements)
 }
 
-/// Whether any of `names` is already covered by a different ready souvenir of
-/// the same game.
-///
+/// Claims one reservation, returning the souvenir id to acknowledge.
+async fn claim_one(
+    state: &AppState,
+    user_id: &str,
+    game: SyncGame<'_>,
+    souvenir: &SyncSouvenir,
+    client_id: &str,
+    unlocked: &HashSet<String>,
+) -> ApiResult<String> {
+    let mut names = normalize_names(&souvenir.achievement_names);
+    if names.is_empty() || !key_belongs_to(user_id, &souvenir.image_key) {
+        return Err(conflict("souvenir_payload_mismatch", client_id));
+    }
+    names.truncate(MAX_ACHIEVEMENTS_PER_SOUVENIR);
+
+    /* "rebuild" is the launcher's recovery for this, which is what we want:
+       its achievement state is ahead of ours. */
+    if names.iter().any(|name| !unlocked.contains(name)) {
+        return Err(conflict("achievement_not_found", client_id));
+    }
+
+    let reservation = sqlx::query(
+        "SELECT id, image_key, is_uploaded FROM souvenirs
+         WHERE user_id = ? AND client_id = ?",
+    )
+    .bind(user_id)
+    .bind(client_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| conflict("reservation_not_found", client_id))?;
+
+    let id: String = reservation.get("id");
+
+    if reservation.get::<String, _>("image_key") != souvenir.image_key {
+        return Err(conflict("reservation_mismatch", client_id));
+    }
+
+    /* The sync can overtake its own upload — a buffering proxy, an interrupted
+       transfer — and the bytes are usually seconds away, so this asks for a
+       retry rather than reporting a conflict. */
+    if reservation.get::<i64, _>("is_uploaded") != 1 {
+        return Err(ApiError::new(StatusCode::CONFLICT, UPLOAD_INCOMPLETE_CODE)
+            .with_extra(json!({ "clientId": client_id })));
+    }
+
+    /* One souvenir per achievement, as the achievement list shows a single
+       thumbnail per unlock. The launcher abandons a second capture and syncs
+       the achievements alone. */
+    if achievement_already_captured(state, user_id, game.remote_id, &id, &names).await? {
+        return Err(conflict("achievement_already_assigned", client_id));
+    }
+
+    let names_json = serde_json::to_string(&names)
+        .map_err(|_| ApiError::internal("failed to serialize achievement names"))?;
+    let now = Utc::now().to_rfc3339();
+
+    let size: i64 = sqlx::query_scalar(
+        "UPDATE souvenirs SET
+           status = 'ready',
+           remote_game_id = ?,
+           shop = COALESCE(?, shop),
+           object_id = COALESCE(?, object_id),
+           primary_achievement_name = ?,
+           achievement_names = ?,
+           captured_at = ?,
+           updated_at = ?
+         WHERE id = ?
+         RETURNING size_in_bytes",
+    )
+    .bind(game.remote_id)
+    .bind(game.shop)
+    .bind(game.object_id)
+    .bind(&names[0])
+    .bind(&names_json)
+    .bind(souvenir.captured_at)
+    .bind(&now)
+    .bind(&id)
+    .fetch_one(&state.pool)
+    .await?;
+
+    let mut event = Event::sync(
+        "souvenir.synced",
+        user_id,
+        match names.len() {
+            1 => "Stored an achievement souvenir".to_string(),
+            n => format!("Stored an achievement souvenir ({n} achievements)"),
+        },
+    )
+    .detail(json!({ "souvenirId": id, "achievements": names }))
+    .size(size);
+
+    if let (Some(shop), Some(object_id)) = (game.shop, game.object_id) {
+        event = event.game(shop, object_id);
+    }
+
+    crate::events::record(state, event).await;
+
+    Ok(id)
+}
+
 /// Scoped to the game on purpose: achievement names are only unique within
 /// one, and plenty of games ship an `ACH_WIN`.
 async fn achievement_already_captured(
@@ -477,13 +451,12 @@ pub struct ListQuery {
     pub sort_by: Option<String>,
 }
 
+/// Only `name` and `unlock_time` are ever known here; the launcher joins the
+/// public catalogue for the display name, icon and points.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProfileSouvenirAchievement {
     name: String,
-    /// The launcher joins the public catalogue for real display names, icons
-    /// and points — this server only ever learns the raw achievement name, so
-    /// it sends that and lets the client fill the rest in.
     display_name: String,
     description: String,
     achievement_icon: Option<String>,
@@ -512,7 +485,7 @@ struct ProfileSouvenir {
 }
 
 /// `shop` may be repeated (`?shop=steam&shop=launchbox`), which the typed
-/// query extractor collapses, so the filter is read off the raw string.
+/// extractor collapses, so it is read off the raw query string.
 fn shops_from_query(raw: Option<&str>) -> Vec<String> {
     let Some(raw) = raw else { return Vec::new() };
 
@@ -524,12 +497,9 @@ fn shops_from_query(raw: Option<&str>) -> Vec<String> {
         .collect()
 }
 
-/// Why a viewer is seeing nothing, so the launcher can say "this profile's
-/// souvenirs are hidden" instead of "no souvenirs yet".
-///
-/// `FRIENDS` means "members of this server". The official friend graph isn't
-/// visible from here, and everyone who can reach this server is someone the
-/// operator let in — the same reading the members badge already uses.
+/// Lets the launcher say "hidden" rather than "none yet". `FRIENDS` reads as
+/// "members of this server": the official friend graph isn't visible from
+/// here, and everyone who can reach this server is someone the operator let in.
 fn hidden_reason(account_visibility: &str, is_owner: bool) -> Option<&'static str> {
     if is_owner {
         return None;
@@ -541,10 +511,10 @@ fn hidden_reason(account_visibility: &str, is_owner: bool) -> Option<&'static st
     }
 }
 
-/// GET /users/{userId}/souvenirs
+/// GET /users/{userId}/souvenirs — the profile's souvenir tab.
 ///
-/// The profile's souvenir tab. Any member may read another member's public
-/// souvenirs; the owner also sees the ones they hid.
+/// Any member sees another's public souvenirs; the owner also sees the ones
+/// they hid.
 pub async fn list_for_user(
     State(state): State<AppState>,
     viewer: CurrentUser,
@@ -574,9 +544,8 @@ pub async fn list_for_user(
     let skip = query.skip.unwrap_or(0).max(0);
     let shops = shops_from_query(raw.as_deref());
 
-    /* "rare" ranks by achievement rarity, which needs the catalogue points
-       this server never receives. Ordering by capture time is the honest
-       fallback; the launcher still renders the tab, it just doesn't reorder. */
+    /* "rare" would rank by catalogue points, which never reach this server;
+       capture order is the honest fallback. */
     let order = match query.sort_by.as_deref() {
         Some("oldest") => "s.captured_at ASC",
         _ => "s.captured_at DESC",
@@ -602,8 +571,7 @@ pub async fn list_for_user(
     }
     let total: i64 = count.fetch_one(&state.pool).await?.get(0);
 
-    /* Parameters bind in the order they appear in the statement, so the
-       `liked_by_me` sub-select's viewer id comes before the filter's own. */
+    // Binds in statement order: the sub-select's viewer id precedes the filter's.
     let page_sql = format!(
         "SELECT s.*,
                 (SELECT COUNT(*) FROM souvenir_likes l WHERE l.souvenir_id = s.id) AS like_count,
@@ -686,8 +654,8 @@ pub async fn list_for_user(
     })))
 }
 
-/// Unlock times for every achievement of the games in `rows`, so the profile
-/// shows when the achievement popped rather than when the file was written.
+/// So the profile shows when each achievement popped rather than when its
+/// screenshot was written.
 async fn unlock_times_for(
     state: &AppState,
     user_id: &str,
@@ -743,12 +711,11 @@ async fn unlock_times_for(
 // Per-achievement souvenir images
 // ---------------------------------------------------------------------------
 
-/// GET /users/{userId}/games/achievements?shop=&objectId=
+/// GET /users/{userId}/games/achievements — thumbnails for the achievement list.
 ///
-/// The achievement list shows the souvenir taken for each unlock. Upstream
-/// serves it off the same endpoint the launcher already used for a profile's
-/// achievements, so this answers in the launcher's `UserAchievement` shape and
-/// fills in `imageUrl` from the souvenirs stored here.
+/// Upstream serves these off the endpoint the launcher already used for a
+/// profile's achievements, so the reply keeps the `UserAchievement` shape and
+/// only `imageUrl` comes from here.
 pub async fn user_game_achievements(
     State(state): State<AppState>,
     viewer: CurrentUser,
@@ -780,8 +747,6 @@ pub async fn user_game_achievements(
     let achievements: Vec<Value> =
         serde_json::from_str(&row.get::<String, _>("achievements")).unwrap_or_default();
 
-    /* A hidden souvenir stays hidden here too — the achievement list is part
-       of the profile as far as other viewers are concerned. */
     let mut images = sqlx::query(
         "SELECT achievement_names, image_key, visibility FROM souvenirs
          WHERE user_id = ? AND shop = ? AND object_id = ?
@@ -862,10 +827,10 @@ async fn readable_souvenir(
     Ok(row)
 }
 
-/// POST /users/{userId}/souvenirs/{souvenirId}/like — toggles the viewer's like.
+/// POST /users/{userId}/souvenirs/{souvenirId}/like
 ///
-/// The launcher flips its own state optimistically and sends one POST for both
-/// directions, so this is a toggle rather than an idempotent "like".
+/// A toggle, not an idempotent "like": the launcher flips its own state
+/// optimistically and sends one POST for both directions.
 pub async fn like(
     State(state): State<AppState>,
     viewer: CurrentUser,
@@ -913,10 +878,9 @@ pub struct ReportRequest {
 
 /// POST /users/{userId}/souvenirs/{souvenirId}/report
 ///
-/// Records the report and raises a warning in the event log — that is what an
-/// operator watches, and it survives the souvenir being deleted. 201 is the
-/// only status the launcher treats as "reported", including for a duplicate:
-/// re-reporting is a retry, not a second complaint.
+/// Raises a warning in the event log, which is what an operator watches and
+/// what outlives the souvenir being deleted. 201 is the only status the
+/// launcher reads as "reported", duplicates included.
 pub async fn report(
     State(state): State<AppState>,
     viewer: CurrentUser,
@@ -955,8 +919,6 @@ pub async fn report(
         .as_deref()
         .map(str::trim)
         .filter(|description| !description.is_empty())
-        /* Long enough for a real explanation, short enough that the log stays
-           readable. */
         .map(|description| description.chars().take(1000).collect::<String>());
 
     let inserted = sqlx::query(
@@ -1035,10 +997,9 @@ pub async fn set_visibility(
 
 /// PATCH /profile/souvenirs-visibility — the account-level setting.
 ///
-/// The official API owns this preference (it lives on the Hydra profile); the
-/// launcher mirrors it here because this server has to answer for other
-/// viewers, and it cannot read the official profile of a user who isn't the
-/// one calling.
+/// The official profile owns this; the launcher mirrors it here because this
+/// server answers for other viewers and can't read the official profile of
+/// anyone but the caller.
 pub async fn set_account_visibility(
     State(state): State<AppState>,
     user: CurrentUser,
@@ -1067,10 +1028,8 @@ pub async fn delete(
     Ok(Json(json!({ "ok": true, "freedBytes": freed })))
 }
 
-/// Deletes one souvenir the user owns and returns the bytes freed.
-///
-/// Shared with the portal, where players delete their own souvenirs without a
-/// launcher: ownership is re-checked here rather than at either call site.
+/// Shared with the portal, so ownership is re-checked here rather than at
+/// either call site. Returns the bytes freed.
 pub async fn delete_owned(
     state: &AppState,
     user_id: &str,
@@ -1111,7 +1070,7 @@ pub async fn delete_owned(
 // Housekeeping used by the admin panel
 // ---------------------------------------------------------------------------
 
-/// Storage keys of everything this user has stored here, for account deletion.
+/// Read before the rows go: the database cascades, disk does not.
 pub async fn storage_keys_for_user(state: &AppState, user_id: &str) -> Vec<String> {
     sqlx::query_scalar("SELECT image_key FROM souvenirs WHERE user_id = ?")
         .bind(user_id)
@@ -1120,7 +1079,6 @@ pub async fn storage_keys_for_user(state: &AppState, user_id: &str) -> Vec<Strin
         .unwrap_or_default()
 }
 
-/// Deletes a user's souvenirs and their files.
 pub async fn purge_for_user(state: &AppState, user_id: &str) -> ApiResult<()> {
     let keys = storage_keys_for_user(state, user_id).await;
 
@@ -1129,8 +1087,7 @@ pub async fn purge_for_user(state: &AppState, user_id: &str) -> ApiResult<()> {
         .execute(&state.pool)
         .await?;
 
-    /* Likes the user left on other people's souvenirs aren't cascaded by the
-       souvenir rows above. */
+    // Not reachable from their own rows, so the cascade above misses these.
     sqlx::query("DELETE FROM souvenir_likes WHERE user_id = ?")
         .bind(user_id)
         .execute(&state.pool)
@@ -1143,11 +1100,9 @@ pub async fn purge_for_user(state: &AppState, user_id: &str) -> ApiResult<()> {
     Ok(())
 }
 
-/// Reservations whose upload never arrived, older than `cutoff` (RFC 3339).
-///
-/// A capture that fails before the sync leaves a row and possibly bytes behind;
-/// the launcher rotates its client id rather than resuming, so nothing will
-/// ever claim them.
+/// Reservations older than `cutoff` (RFC 3339) whose upload never arrived. The
+/// launcher rotates its client id rather than resuming, so nothing will ever
+/// claim them.
 pub async fn sweep_abandoned(state: &AppState, cutoff: &str) -> ApiResult<usize> {
     let stale = sqlx::query(
         "SELECT id, image_key FROM souvenirs
@@ -1224,9 +1179,8 @@ mod tests {
         keys
     }
 
-    /// The launcher's `ProfileSouvenir` is what the profile tab renders from.
-    /// A renamed or missing field doesn't fail loudly — it renders an empty
-    /// card — so the shape is asserted here.
+    /// A renamed or missing field doesn't fail loudly, it renders an empty
+    /// card, so the shape the profile tab reads is asserted here.
     #[test]
     fn a_listed_souvenir_matches_the_launcher_shape() {
         let souvenir = ProfileSouvenir {
@@ -1289,8 +1243,7 @@ mod tests {
         );
     }
 
-    /// The launcher trims to 50 before sending. A longer payload is truncated
-    /// here rather than refused: rejecting it makes the launcher rotate its
+    /// Truncated rather than refused: rejecting makes the launcher rotate its
     /// client id and re-upload the screenshot, on a loop.
     #[test]
     fn an_over_long_achievement_list_is_truncated_not_refused() {
@@ -1306,8 +1259,8 @@ mod tests {
         assert_eq!(MAX_ACHIEVEMENTS_PER_SOUVENIR, 50);
     }
 
-    /// An incomplete upload has to read as "retry", not as a conflict: the
-    /// launcher abandons a souvenir it thinks the server refused.
+    /// Has to read as "retry": the launcher abandons a souvenir it believes
+    /// the server refused outright.
     #[test]
     fn an_incomplete_upload_is_reported_with_its_own_code() {
         let error = ApiError::new(StatusCode::CONFLICT, UPLOAD_INCOMPLETE_CODE)

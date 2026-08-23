@@ -32,8 +32,7 @@ pub struct PresignRequest {
     pub image_ext: String,
     #[serde(default)]
     pub image_length: Option<i64>,
-    /* Only the achievement-image flow sends these: the capture's idempotency
-       key and the game the souvenir belongs to. */
+    // Only the achievement-image flow sends these.
     #[serde(default)]
     pub client_id: Option<String>,
     #[serde(default)]
@@ -48,9 +47,8 @@ pub struct PresignRequest {
 /// itself is stored and served by this server, so it works without a Hydra
 /// Cloud subscription.
 ///
-/// `achievement-image` is the souvenir capture flow, which answers in a
-/// different shape and reserves a row before the bytes arrive — see
-/// [`crate::souvenirs`].
+/// `achievement-image` answers in a different shape and reserves a row before
+/// the bytes arrive — see [`crate::souvenirs`].
 pub async fn presign(
     State(state): State<AppState>,
     user: CurrentUser,

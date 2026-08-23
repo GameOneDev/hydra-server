@@ -23,10 +23,8 @@ pub struct SyncAchievements {
     pub shop: Option<String>,
     #[serde(default)]
     pub achievements: Vec<Value>,
-    /// Achievement souvenirs captured alongside these unlocks. The
-    /// screenshot is already uploaded by the time it arrives
-    /// here; this call is what files it against the achievements it belongs
-    /// to. See [`crate::souvenirs`].
+    /// Screenshots captured alongside these unlocks, already uploaded by the
+    /// time they arrive here. See [`crate::souvenirs`].
     #[serde(default)]
     pub souvenirs: Vec<crate::souvenirs::SyncSouvenir>,
 }
@@ -85,9 +83,8 @@ fn merge_achievements(existing: Vec<Value>, incoming: Vec<Value>) -> Vec<Value> 
 /// game mapping is known, otherwise 204 (the launcher falls back to its
 /// local merge on an empty response).
 ///
-/// A payload carrying souvenirs always gets a body, even without that mapping:
-/// the launcher only stops retrying a souvenir once it reads its own client id
-/// back out of `souvenirs`.
+/// A payload carrying souvenirs always gets a body: the launcher only stops
+/// retrying one once it reads its own client id back out of `souvenirs`.
 pub async fn sync(
     State(state): State<AppState>,
     user: CurrentUser,
@@ -143,9 +140,11 @@ pub async fn sync(
     let souvenirs = crate::souvenirs::claim_from_sync(
         &state,
         &user.0.id,
-        &payload.id,
-        shop.as_deref(),
-        object_id.as_deref(),
+        crate::souvenirs::SyncGame {
+            remote_id: &payload.id,
+            shop: shop.as_deref(),
+            object_id: object_id.as_deref(),
+        },
         &payload.souvenirs,
         &merged,
     )

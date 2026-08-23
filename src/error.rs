@@ -7,12 +7,9 @@ use serde_json::{json, Value};
 pub struct ApiError {
     pub status: StatusCode,
     pub message: String,
-    /// Extra fields merged into the JSON body next to `message`.
-    ///
-    /// Most errors only need a message. The souvenir sync is the exception:
-    /// the launcher reads a machine-readable `reason` (and echoes the
-    /// `clientId` back) to decide whether to retry, re-upload or give up, so
-    /// those handlers attach the same fields the official API sends.
+    /// Extra fields merged into the JSON body next to `message`. The souvenir
+    /// sync needs them: the launcher reads a machine-readable `reason` to
+    /// decide whether to retry, re-upload or give up.
     pub extra: Option<Value>,
 }
 
@@ -25,8 +22,7 @@ impl ApiError {
         }
     }
 
-    /// Attaches extra top-level fields to the error body. Ignored unless
-    /// `extra` is a JSON object.
+    /// Ignored unless `extra` is a JSON object.
     pub fn with_extra(mut self, extra: Value) -> Self {
         self.extra = Some(extra);
         self
@@ -54,11 +50,8 @@ impl ApiError {
 }
 
 impl ApiError {
-    /// The JSON body this error responds with.
-    ///
-    /// `message` is written last on purpose: an `extra` carrying its own
-    /// `message` key would otherwise replace the real one, and the callers of
-    /// `with_extra` are exactly the paths whose message a client matches on.
+    /// `message` is written last on purpose: an `extra` carrying that key
+    /// would otherwise replace the string a client matches on.
     fn body(&self) -> Value {
         let mut body = serde_json::Map::new();
 
@@ -113,8 +106,8 @@ mod tests {
         );
     }
 
-    /// The launcher decides how to recover from the message, so an `extra`
-    /// must never be able to stand in for it.
+    /// The launcher recovers based on the message, so an `extra` must never
+    /// stand in for it.
     #[test]
     fn extra_cannot_replace_the_message() {
         let error = ApiError::bad_request("real message")

@@ -352,8 +352,7 @@ async fn library(
         "souvenirs": souvenirs.iter().map(|row| json!({
             "id": row.get::<String, _>("id"),
             "game": super::game_ref(row),
-            /* Same public URL the profile renders, so an operator handling a
-               report can look at the picture instead of guessing from a name. */
+            // So an operator handling a report can look at the picture.
             "url": format!(
                 "{}/{}",
                 state.config.public_url,
