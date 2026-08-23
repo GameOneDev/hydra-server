@@ -23,6 +23,10 @@ pub struct SyncAchievements {
     pub shop: Option<String>,
     #[serde(default)]
     pub achievements: Vec<Value>,
+    /// Screenshots captured alongside these unlocks, already uploaded by the
+    /// time they arrive here. See [`crate::souvenirs`].
+    #[serde(default)]
+    pub souvenirs: Vec<crate::souvenirs::SyncSouvenir>,
 }
 
 fn achievement_name(achievement: &Value) -> Option<&str> {
@@ -78,6 +82,9 @@ fn merge_achievements(existing: Vec<Value>, incoming: Vec<Value>) -> Vec<Value> 
 /// Returns the merged set as `{ objectId, shop, achievements }` when the
 /// game mapping is known, otherwise 204 (the launcher falls back to its
 /// local merge on an empty response).
+///
+/// A payload carrying souvenirs always gets a body: the launcher only stops
+/// retrying one once it reads its own client id back out of `souvenirs`.
 pub async fn sync(
     State(state): State<AppState>,
     user: CurrentUser,
@@ -130,11 +137,36 @@ pub async fn sync(
     .execute(&state.pool)
     .await?;
 
+    let souvenirs = crate::souvenirs::claim_from_sync(
+        &state,
+        &user.0.id,
+        crate::souvenirs::SyncGame {
+            remote_id: &payload.id,
+            shop: shop.as_deref(),
+            object_id: object_id.as_deref(),
+        },
+        &payload.souvenirs,
+        &merged,
+    )
+    .await?;
+
     match (object_id, shop) {
         (Some(object_id), Some(shop)) => Ok(Json(json!({
             "objectId": object_id,
             "shop": shop,
             "achievements": merged,
+            "souvenirs": souvenirs,
+        }))
+        .into_response()),
+        /* Without shop/objectId the launcher can't repaint its local state
+           from this response, but an acknowledged souvenir still has to be
+           reported — losing it would leave the launcher retrying a souvenir
+           this server already stored. */
+        _ if !souvenirs.is_empty() => Ok(Json(json!({
+            "objectId": Value::Null,
+            "shop": Value::Null,
+            "achievements": merged,
+            "souvenirs": souvenirs,
         }))
         .into_response()),
         _ => Ok(StatusCode::NO_CONTENT.into_response()),

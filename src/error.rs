@@ -1,12 +1,16 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde_json::json;
+use serde_json::{json, Value};
 
 #[derive(Debug)]
 pub struct ApiError {
     pub status: StatusCode,
     pub message: String,
+    /// Extra fields merged into the JSON body next to `message`. The souvenir
+    /// sync needs them: the launcher reads a machine-readable `reason` to
+    /// decide whether to retry, re-upload or give up.
+    pub extra: Option<Value>,
 }
 
 impl ApiError {
@@ -14,7 +18,14 @@ impl ApiError {
         Self {
             status,
             message: message.into(),
+            extra: None,
         }
+    }
+
+    /// Ignored unless `extra` is a JSON object.
+    pub fn with_extra(mut self, extra: Value) -> Self {
+        self.extra = Some(extra);
+        self
     }
 
     pub fn not_found(message: impl Into<String>) -> Self {
@@ -38,9 +49,25 @@ impl ApiError {
     }
 }
 
+impl ApiError {
+    /// `message` is written last on purpose: an `extra` carrying that key
+    /// would otherwise replace the string a client matches on.
+    fn body(&self) -> Value {
+        let mut body = serde_json::Map::new();
+
+        if let Some(extra) = self.extra.as_ref().and_then(Value::as_object) {
+            body.extend(extra.iter().map(|(key, value)| (key.clone(), value.clone())));
+        }
+
+        body.insert("message".to_string(), json!(self.message));
+
+        Value::Object(body)
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, Json(json!({ "message": self.message }))).into_response()
+        (self.status, Json(self.body())).into_response()
     }
 }
 
@@ -59,3 +86,40 @@ impl From<std::io::Error> for ApiError {
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extra_fields_sit_beside_the_message() {
+        let error = ApiError::new(StatusCode::CONFLICT, "achievements/souvenir-conflict")
+            .with_extra(json!({ "reason": "reservation_not_found", "clientId": "c1" }));
+
+        assert_eq!(
+            error.body(),
+            json!({
+                "message": "achievements/souvenir-conflict",
+                "reason": "reservation_not_found",
+                "clientId": "c1",
+            })
+        );
+    }
+
+    /// The launcher recovers based on the message, so an `extra` must never
+    /// stand in for it.
+    #[test]
+    fn extra_cannot_replace_the_message() {
+        let error = ApiError::bad_request("real message")
+            .with_extra(json!({ "message": "impostor" }));
+
+        assert_eq!(error.body()["message"], "real message");
+    }
+
+    #[test]
+    fn a_non_object_extra_is_ignored() {
+        let error = ApiError::bad_request("plain").with_extra(json!("not an object"));
+
+        assert_eq!(error.body(), json!({ "message": "plain" }));
+    }
+}
