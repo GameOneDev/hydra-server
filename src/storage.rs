@@ -116,11 +116,11 @@ pub fn quota_error() -> ApiError {
 /// The one quota boundary: `used` bytes plus `incoming` more, against a
 /// `quota` where zero means unlimited.
 ///
-/// The admin panel counts an account as being at its quota with
-/// `used >= quota`. That is this same boundary asked of a single byte — and
-/// every declared size is at least one, since [`upload_limit`] refuses zero —
-/// so the number an operator sees is exactly the set of users whose next
-/// upload is refused.
+/// The admin panel counts an account as being at its quota with `used >= quota`.
+/// For endpoints that require a positive declared size (those using
+/// [`upload_limit`]), this matches the refusal boundary for an additional byte,
+/// so the panel's count corresponds to users whose next non-empty upload will be
+/// refused.
 pub fn exceeds_quota(quota: u64, used: i64, incoming: i64) -> bool {
     quota > 0 && used.saturating_add(incoming) > signed(quota)
 }
