@@ -514,9 +514,9 @@ fn hidden_reason(account_visibility: &str, is_owner: bool) -> Option<&'static st
 /// GET /users/{userId}/souvenirs — the profile's souvenir tab.
 ///
 /// Any member sees another's public souvenirs; the owner also sees the ones
-/// they hid. `isMember` tells the launcher whether this server is the right
-/// one to ask at all — a profile it has never seen keeps its souvenirs on
-/// official Hydra, and the launcher reads them from there instead.
+/// they hid. An empty page tells the launcher to read the profile from
+/// official Hydra instead, so a profile this server has never seen must not
+/// come back claiming to be hidden; `isMember` says which of the two it was.
 pub async fn list_for_user(
     State(state): State<AppState>,
     viewer: CurrentUser,
