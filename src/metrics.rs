@@ -165,6 +165,7 @@ pub async fn render(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
         ("backups", "SELECT COALESCE(SUM(artifact_length_in_bytes), 0) FROM artifacts"),
         ("emulation_saves", "SELECT COALESCE(SUM(artifact_length_in_bytes), 0) FROM emulation_saves"),
         ("artwork", "SELECT COALESCE(SUM(size_in_bytes), 0) FROM game_artwork"),
+        ("souvenirs", "SELECT COALESCE(SUM(size_in_bytes), 0) FROM souvenirs"),
     ] {
         labelled(
             &mut out,

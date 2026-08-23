@@ -39,7 +39,7 @@ export default {
         statTile({
           label: "Playtime",
           value: fmt.duration(overview.playtimeSeconds),
-          sub: `${fmt.plural(overview.counts.achievementGames, "game")} with achievements`,
+          sub: `${fmt.plural(overview.counts.achievementGames, "game")} with achievements · ${fmt.plural(overview.counts.souvenirs, "souvenir")}`,
         }),
       ),
       h(
