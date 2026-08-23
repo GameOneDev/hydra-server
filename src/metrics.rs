@@ -160,18 +160,16 @@ pub async fn render(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
         out,
         "# HELP hydra_stored_bytes Stored bytes by kind.\n# TYPE hydra_stored_bytes gauge"
     );
-    for (label, sql) in [
-        ("cloud_saves", "SELECT COALESCE(SUM(size_in_bytes), 0) FROM cloud_save_blobs"),
-        ("backups", "SELECT COALESCE(SUM(artifact_length_in_bytes), 0) FROM artifacts"),
-        ("emulation_saves", "SELECT COALESCE(SUM(artifact_length_in_bytes), 0) FROM emulation_saves"),
-        ("artwork", "SELECT COALESCE(SUM(size_in_bytes), 0) FROM game_artwork"),
-        ("souvenirs", "SELECT COALESCE(SUM(size_in_bytes), 0) FROM souvenirs"),
-    ] {
+    for (kind, table, column) in crate::storage::METERED_TABLES {
         labelled(
             &mut out,
             "hydra_stored_bytes",
-            &format!("kind=\"{label}\""),
-            scalar(&state, sql).await,
+            &format!("kind=\"{kind}\""),
+            scalar(
+                &state,
+                &format!("SELECT COALESCE(SUM({column}), 0) FROM {table}"),
+            )
+            .await,
         );
     }
 

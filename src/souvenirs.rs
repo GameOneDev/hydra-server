@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::Row;
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroU64;
 use uuid::Uuid;
 
 const MAX_SOUVENIR_BYTES: i64 = 20 * 1024 * 1024;
@@ -147,13 +148,11 @@ pub async fn authorize(
         return Err(ApiError::bad_request("unsupported image format"));
     }
 
-    /* `sign_upload_url` reads a max of 0 as "no limit", so a request without a
-       length would mint a token good for an upload of any size — past both
-       MAX_SOUVENIR_BYTES and the quota, whose check would have seen nothing.
-       The launcher stats the file before asking. */
-    if request.image_length <= 0 {
-        return Err(ApiError::bad_request("imageLength is required"));
-    }
+    /* A declared size is mandatory: `sign_upload_url` needs a real limit to
+       bind the token to, and it is also what the quota below is checked
+       against. The launcher stats the file before asking. */
+    let limit = storage::upload_limit(request.image_length)
+        .ok_or_else(|| ApiError::bad_request("imageLength is required"))?;
 
     if request.image_length > MAX_SOUVENIR_BYTES {
         return Err(ApiError::new(
@@ -190,7 +189,7 @@ pub async fn authorize(
             })));
         }
 
-        return Ok(Json(authorization(state, &image_key, length)));
+        return Ok(Json(authorization(state, &image_key, limit)));
     }
 
     /* Against the declared length: the file doesn't exist yet, and the real
@@ -227,13 +226,13 @@ pub async fn authorize(
     .execute(&state.pool)
     .await?;
 
-    Ok(Json(authorization(state, &image_key, length)))
+    Ok(Json(authorization(state, &image_key, limit)))
 }
 
-fn authorization(state: &AppState, image_key: &str, length: i64) -> Value {
+fn authorization(state: &AppState, image_key: &str, limit: NonZeroU64) -> Value {
     json!({
         "imageKey": image_key,
-        "presignedUrl": storage::sign_upload_url(state, image_key, length as u64),
+        "presignedUrl": storage::sign_upload_url(state, image_key, limit),
         "status": "pending",
         // Milliseconds — the launcher reads `expiresAt` as a JS timestamp.
         "expiresAt": (Utc::now().timestamp() + UPLOAD_TTL_SECONDS) * 1000,

@@ -1,0 +1,11 @@
+-- Profile avatars, tracked the way banners already are.
+--
+-- Without a recorded key nothing knew which avatar file was current, so every
+-- upload left the previous one on disk forever — outside the per-user quota,
+-- which counts no profile image. `finalize_upload` now records the key and
+-- deletes the file it supersedes, and the integrity scan can tell a live
+-- avatar from an abandoned one.
+--
+-- Not backfilled: for rows uploaded before this, the current avatar is only
+-- knowable from `profile_image_url`, which the integrity scan consults too.
+ALTER TABLE users ADD COLUMN avatar_key TEXT;

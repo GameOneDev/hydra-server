@@ -22,16 +22,13 @@ pub fn router() -> Router<AppState> {
         .route("/admin/api/users/{id}/portal-link", post(portal_link))
 }
 
-/// Stored bytes for the user aliased `u`, mirroring [`storage::used_bytes`] —
-/// the same sources the quota is measured against, V2 blobs counted once per
-/// distinct hash exactly as they are stored. The panel and the quota must
-/// never disagree about how full an account is.
-pub(crate) const USED_BYTES_EXPR: &str = "
-    (SELECT COALESCE(SUM(artifact_length_in_bytes), 0) FROM artifacts a WHERE a.user_id = u.id)
-  + (SELECT COALESCE(SUM(artifact_length_in_bytes), 0) FROM emulation_saves e WHERE e.user_id = u.id)
-  + (SELECT COALESCE(SUM(size_in_bytes), 0) FROM game_artwork w WHERE w.user_id = u.id)
-  + (SELECT COALESCE(SUM(size_in_bytes), 0) FROM cloud_save_blobs b WHERE b.user_id = u.id)
-  + (SELECT COALESCE(SUM(size_in_bytes), 0) FROM souvenirs v WHERE v.user_id = u.id)";
+/// Stored bytes for the user aliased `u`: the same sum the quota is measured
+/// against, correlated with the `users u` row each query here joins. Generated
+/// from [`crate::storage::METERED_TABLES`], so the panel and the quota cannot
+/// disagree about how full an account is.
+pub(crate) fn used_bytes_expr() -> String {
+    crate::storage::used_bytes_expr("u.id")
+}
 
 /// The counts shown for every user, in the list and on the detail screen.
 const USER_COUNTS: &str = "
@@ -162,8 +159,9 @@ async fn list(
         count.fetch_one(&state.pool).await?
     };
 
+    let used_bytes = used_bytes_expr();
     let sql = format!(
-        "SELECT u.*, ({USED_BYTES_EXPR}) AS used_bytes, {USER_COUNTS}
+        "SELECT u.*, ({used_bytes}) AS used_bytes, {USER_COUNTS}
          FROM users u WHERE {where_clause}
          ORDER BY {order} LIMIT ?{limit_slot} OFFSET ?{offset_slot}"
     );
@@ -193,9 +191,10 @@ async fn detail(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let quota = state.settings.read().await.max_bytes_per_user;
+    let used_bytes = used_bytes_expr();
 
     let row = sqlx::query(&format!(
-        "SELECT u.*, ({USED_BYTES_EXPR}) AS used_bytes, {USER_COUNTS}
+        "SELECT u.*, ({used_bytes}) AS used_bytes, {USER_COUNTS}
          FROM users u WHERE u.id = ?"
     ))
     .bind(&id)

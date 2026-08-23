@@ -143,6 +143,12 @@ pub async fn create_upload_url(
     user: CurrentUser,
     Json(payload): Json<CreateUploadUrl>,
 ) -> ApiResult<Json<Value>> {
+    /* Before the insert, so a save that declares no size leaves no row: the
+       upload token is bound to this number, and a zero used to mean "no
+       limit". The launcher has the buffer in hand before it asks. */
+    let limit = storage::upload_limit(payload.artifact_length_in_bytes)
+        .ok_or_else(|| ApiError::bad_request("invalid artifact length"))?;
+
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
 
@@ -166,11 +172,7 @@ pub async fn create_upload_url(
     .execute(&state.pool)
     .await?;
 
-    let upload_url = storage::sign_upload_url(
-        &state,
-        &save_key(&id),
-        payload.artifact_length_in_bytes.max(0) as u64,
-    );
+    let upload_url = storage::sign_upload_url(&state, &save_key(&id), limit);
 
     Ok(Json(json!({ "id": id, "uploadUrl": upload_url })))
 }
