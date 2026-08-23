@@ -12,6 +12,14 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
 
+/// A memory card, a battery save or a save state: kilobytes to a few dozen
+/// megabytes even for the heaviest emulators. A declared size past this is a bug
+/// or an abuse of the endpoint rather than a save. Note that `storage::upload`
+/// enforces the signed limit with some slack, so the absolute uploaded size can be
+/// slightly higher than this value. Whole-game save backups have their own endpoint,
+/// which is where multi-gigabyte uploads belong.
+const MAX_EMULATION_SAVE_BYTES: i64 = 512 * 1024 * 1024;
+
 fn save_key(id: &str) -> String {
     format!("emulation-saves/{id}.bin")
 }
@@ -148,6 +156,18 @@ pub async fn create_upload_url(
        limit". The launcher has the buffer in hand before it asks. */
     let limit = storage::upload_limit(payload.artifact_length_in_bytes)
         .ok_or_else(|| ApiError::bad_request("invalid artifact length"))?;
+
+    if payload.artifact_length_in_bytes > MAX_EMULATION_SAVE_BYTES {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "emulation save is too large",
+        ));
+    }
+
+    /* Against the declared length, like every other presign — the file isn't
+       here yet. `storage::upload` re-checks against the bytes that arrive, so
+       an understated length can't spend more than this reserves. */
+    storage::check_quota(&state, &user.0.id, payload.artifact_length_in_bytes).await?;
 
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();

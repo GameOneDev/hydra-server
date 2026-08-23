@@ -175,10 +175,7 @@ async fn enforce_quotas(
     user_id: &str,
     payload: &CreateArtifact,
 ) -> ApiResult<()> {
-    let (max_bytes_per_user, backups_per_game_limit) = {
-        let settings = state.settings.read().await;
-        (settings.max_bytes_per_user, settings.backups_per_game_limit)
-    };
+    let backups_per_game_limit = state.settings.read().await.backups_per_game_limit;
 
     let per_game: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM artifacts WHERE user_id = ? AND shop = ? AND object_id = ?",
@@ -195,16 +192,9 @@ async fn enforce_quotas(
         ));
     }
 
-    if max_bytes_per_user > 0 {
-        let used = storage::used_bytes(state, user_id).await?;
-
-        if used + payload.artifact_length_in_bytes > max_bytes_per_user as i64 {
-            return Err(ApiError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "storage quota exceeded — free up space or ask the server admin",
-            ));
-        }
-    }
+    /* The declared length, which is all there is to go on before the upload:
+       `storage::upload` holds the bytes to what is actually left. */
+    storage::check_quota(state, user_id, payload.artifact_length_in_bytes).await?;
 
     Ok(())
 }
