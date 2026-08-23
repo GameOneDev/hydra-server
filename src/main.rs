@@ -12,6 +12,7 @@ mod emulation;
 mod error;
 mod events;
 mod games;
+mod hidden_games;
 mod images;
 mod members;
 mod metrics;
@@ -288,6 +289,10 @@ fn router(_state: AppState) -> Router<AppState> {
         .route("/profile/banners/{user_id}", get(images::get_banner))
         .route("/profile/banner", delete(images::delete_banner))
         .route("/images/{*path}", get(images::serve))
+        .route(
+            "/profile/hidden-games",
+            get(hidden_games::list).post(hidden_games::hide).delete(hidden_games::unhide),
+        )
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024));
 
     Router::new()
@@ -338,6 +343,7 @@ async fn capabilities() -> Json<serde_json::Value> {
             "banners",
             "artifact-shares",
             "souvenirs",
+            "hidden-games",
         ],
     }))
 }
