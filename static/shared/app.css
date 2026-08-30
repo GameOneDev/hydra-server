@@ -764,8 +764,6 @@ table.sub td { padding: 7px 14px; border-top: 1px solid var(--border); }
   padding: 20px;
   display: grid;
   gap: 14px;
-  /* Title and actions stay put; a tall body scrolls inside the modal rather
-     than growing past the viewport, where it had no scrollbar of its own. */
   grid-template-rows: auto minmax(0, 1fr) auto;
   max-height: calc(100vh - 32px);
   max-height: calc(100dvh - 32px);
@@ -780,12 +778,8 @@ table.sub td { padding: 7px 14px; border-top: 1px solid var(--border); }
   align-content: start;
   overflow: auto;
   overscroll-behavior: contain;
-  /* An always-drawn scrollbar rather than the platform's overlay one: when the
-     form is taller than the modal, that bar is the only hint it scrolls. */
   scrollbar-width: thin;
   scrollbar-color: var(--border-strong) transparent;
-  /* Cancels itself out visually, but gives the scroll box room for the 4px
-     that a :focus-visible outline sits outside its field. */
   margin: -4px;
   padding: 4px;
 }
