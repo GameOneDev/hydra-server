@@ -406,6 +406,7 @@ a:hover { text-decoration: underline; }
 }
 
 .input::placeholder { color: var(--text-muted); }
+.input:disabled, .select:disabled { opacity: 0.5; cursor: not-allowed; }
 .field { display: grid; gap: 6px; min-width: 0; }
 .field label { color: var(--text-2); font-size: 12px; font-weight: 550; }
 .field .hint { color: var(--text-muted); font-size: 11.5px; }

@@ -22,6 +22,10 @@ pub struct Config {
     pub max_bytes_per_user: u64,
     /// Max save backups kept per game per user.
     pub backups_per_game_limit: u32,
+    /// Whether the server deletes a save it has replaced: the older cloud
+    /// save a commit supersedes, the older emulation save in a slot. Set to
+    /// `false` to keep both and delete by hand.
+    pub auto_delete_saves: bool,
     /// Comma-separated official user ids or usernames allowed to use this
     /// server. Empty = everyone with a valid official login.
     pub allowed_users: Vec<String>,
@@ -113,6 +117,7 @@ impl Config {
             backups_per_game_limit: env("HYDRA_BACKUPS_PER_GAME_LIMIT", "100")
                 .parse()
                 .unwrap_or(100),
+            auto_delete_saves: env_flag("HYDRA_AUTO_DELETE_SAVES", true),
             allowed_users: env("HYDRA_ALLOWED_USERS", "")
                 .split(',')
                 .map(|s| s.trim().to_lowercase())
@@ -150,6 +155,7 @@ impl Config {
             admin_password: String::new(),
             max_bytes_per_user: 0,
             backups_per_game_limit: 100,
+            auto_delete_saves: true,
             allowed_users: Vec::new(),
             login_max_attempts: 8,
             login_lockout_minutes: 15,

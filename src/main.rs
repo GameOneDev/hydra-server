@@ -14,6 +14,7 @@ mod events;
 mod games;
 mod hidden_games;
 mod images;
+mod limits;
 mod members;
 mod metrics;
 mod playtime;
@@ -26,6 +27,8 @@ mod souvenirs;
 mod sources;
 mod state;
 mod storage;
+#[cfg(test)]
+mod testing;
 mod webhooks;
 
 use axum::extract::DefaultBodyLimit;

@@ -102,6 +102,9 @@ pub async fn list(
         "SELECT * FROM emulation_saves
          WHERE user_id = ?
            AND is_uploaded = 1
+           /* One save per slot, as the launcher expects: versions kept
+              because automatic deletion is off are not offered back to it. */
+           AND superseded_at IS NULL
            AND (? IS NULL OR platform = ?)
            AND (? IS NULL OR emulator = ?)
            AND (? IS NULL OR save_kind = ?)
@@ -226,7 +229,7 @@ pub async fn commit(
     /* Replace older saves for the same slot: the launcher expects one save
        per saveIdentity, mirroring how a memory card slot works. */
     let old_rows = sqlx::query(
-        "SELECT s.id FROM emulation_saves s
+        "SELECT s.id, s.is_uploaded FROM emulation_saves s
          JOIN emulation_saves new_save ON new_save.id = ?
          WHERE s.user_id = ?
            AND s.id != new_save.id
@@ -240,13 +243,41 @@ pub async fn commit(
     .fetch_all(&state.pool)
     .await?;
 
+    /* With automatic deletion off the slot's older saves are stamped rather
+       than deleted: out of the launcher's list, still on disk, and still
+       counted against the owner's quota until someone deletes them. The
+       query above picks up ones stamped earlier too, so switching deletion
+       back on clears what it left behind. */
+    let auto_delete = crate::limits::for_user(&state, &user.0.id)
+        .await?
+        .auto_delete_saves;
+
+    let mut deleted = 0usize;
+    let mut retained = 0usize;
+
     for old in &old_rows {
         let old_id: String = old.get("id");
-        sqlx::query("DELETE FROM emulation_saves WHERE id = ?")
+
+        /* A reservation whose upload never arrived holds no save to keep —
+           only a declared size charged to its owner — so it goes either way. */
+        if auto_delete || old.get::<i64, _>("is_uploaded") == 0 {
+            sqlx::query("DELETE FROM emulation_saves WHERE id = ?")
+                .bind(&old_id)
+                .execute(&state.pool)
+                .await?;
+            storage::delete_object(&state, &save_key(&old_id)).await;
+            deleted += 1;
+        } else {
+            sqlx::query(
+                "UPDATE emulation_saves SET superseded_at = COALESCE(superseded_at, ?)
+                 WHERE id = ?",
+            )
+            .bind(&now)
             .bind(&old_id)
             .execute(&state.pool)
             .await?;
-        storage::delete_object(&state, &save_key(&old_id)).await;
+            retained += 1;
+        }
     }
 
     sqlx::query(
@@ -289,7 +320,8 @@ pub async fn commit(
         .detail(serde_json::json!({
             "saveId": id,
             "fileName": row.get::<Option<String>, _>("file_name"),
-            "replaced": old_rows.len(),
+            "replaced": deleted,
+            "retained": retained,
         }))
         .size(row.get::<i64, _>("artifact_length_in_bytes")),
     )
@@ -375,4 +407,202 @@ pub async fn delete(
     storage::delete_object(&state, &save_key(&id)).await;
 
     Ok(StatusCode::OK)
+}
+
+/// Replacing a save in a slot is the one place the server deletes something
+/// nobody asked it to, so both answers to "may it?" are pinned here.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::limits::Overrides;
+    use crate::testing::TestServer;
+
+    /// Two saves in one PCSX2 slot: `old`, already uploaded, and `new`,
+    /// waiting to be committed over it.
+    async fn slot(server: &TestServer) {
+        for (id, uploaded) in [("old", 1), ("new", 0)] {
+            sqlx::query(
+                "INSERT INTO emulation_saves
+                   (id, user_id, platform, emulator, save_kind, save_identity,
+                    artifact_length_in_bytes, is_uploaded, created_at, updated_at)
+                 VALUES (?, 'alice', 'ps2', 'pcsx2', 'game_save', 'slot-1', 64, ?,
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            )
+            .bind(id)
+            .bind(uploaded)
+            .execute(&server.state.pool)
+            .await
+            .expect("a save in the slot");
+        }
+
+        let path = storage::storage_path(&server.state, &save_key("old"));
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("the storage dir");
+        std::fs::write(&path, [7u8; 64]).expect("the older save's bytes");
+    }
+
+    async fn commit_new(server: &TestServer) {
+        let _ = commit(
+            State(server.state.clone()),
+            server.user("alice"),
+            Path("new".to_string()),
+            Json(CommitSave {
+                artifact_length_in_bytes: Some(64),
+                file_name: None,
+                hostname: None,
+                local_last_modified_at: None,
+                label: None,
+            }),
+        )
+        .await
+        .expect("the commit");
+    }
+
+    async fn listed(server: &TestServer) -> Vec<String> {
+        let Json(saves) = list(
+            State(server.state.clone()),
+            server.user("alice"),
+            Query(ListQuery {
+                platform: None,
+                emulator: None,
+                save_kind: None,
+                shop: None,
+                object_id: None,
+            }),
+        )
+        .await
+        .expect("the listing");
+
+        saves.into_iter().map(|save| save.id).collect()
+    }
+
+    #[tokio::test]
+    async fn the_slots_older_save_is_deleted_by_default() {
+        let server = TestServer::start().await;
+        slot(&server).await;
+
+        let older = storage::storage_path(&server.state, &save_key("old"));
+        commit_new(&server).await;
+
+        assert_eq!(
+            server.scalar::<i64>("SELECT COUNT(*) FROM emulation_saves").await,
+            1
+        );
+        assert!(!older.exists(), "its bytes went with the row");
+        assert_eq!(listed(&server).await, vec!["new".to_string()]);
+    }
+
+    /// Off, the older save keeps its row and its bytes — and stays out of the
+    /// launcher's listing, which expects exactly one save per slot.
+    #[tokio::test]
+    async fn the_slots_older_save_is_kept_when_the_user_opts_out() {
+        let server = TestServer::start().await;
+        server
+            .limits(
+                "alice",
+                Overrides {
+                    auto_delete_saves: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await;
+        slot(&server).await;
+
+        let older = storage::storage_path(&server.state, &save_key("old"));
+        commit_new(&server).await;
+
+        assert!(older.exists(), "the older save's bytes are still here");
+        assert_eq!(
+            server
+                .scalar::<i64>(
+                    "SELECT COUNT(*) FROM emulation_saves WHERE superseded_at IS NOT NULL"
+                )
+                .await,
+            1
+        );
+        assert_eq!(listed(&server).await, vec!["new".to_string()]);
+
+        /* And the bytes are still the owner's to pay for. */
+        assert_eq!(storage::used_bytes(&server.state, "alice").await.unwrap(), 128);
+    }
+
+    /// Keeping older versions is about saves, not about reservations: a row
+    /// whose upload never arrived is charged to its owner and holds nothing,
+    /// so the slot's next commit drops it whatever the setting says.
+    #[tokio::test]
+    async fn an_upload_that_never_arrived_is_never_kept() {
+        let server = TestServer::start().await;
+        server
+            .limits(
+                "alice",
+                Overrides {
+                    auto_delete_saves: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await;
+        slot(&server).await;
+        server
+            .execute("UPDATE emulation_saves SET is_uploaded = 0 WHERE id = 'old'")
+            .await;
+
+        commit_new(&server).await;
+
+        assert_eq!(
+            server.scalar::<i64>("SELECT COUNT(*) FROM emulation_saves").await,
+            1,
+            "the abandoned reservation went, and its declared bytes with it"
+        );
+        assert_eq!(storage::used_bytes(&server.state, "alice").await.unwrap(), 64);
+    }
+
+    /// Switching deletion back on clears what it left behind, on the next
+    /// sync of that slot.
+    #[tokio::test]
+    async fn turning_deletion_back_on_clears_what_was_kept() {
+        let server = TestServer::start().await;
+        server
+            .limits(
+                "alice",
+                Overrides {
+                    auto_delete_saves: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await;
+        slot(&server).await;
+        commit_new(&server).await;
+
+        server.limits("alice", Overrides::default()).await;
+        server
+            .execute(
+                "INSERT INTO emulation_saves
+                   (id, user_id, platform, emulator, save_kind, save_identity,
+                    artifact_length_in_bytes, is_uploaded, created_at, updated_at)
+                 VALUES ('newer', 'alice', 'ps2', 'pcsx2', 'game_save', 'slot-1', 64, 0,
+                         '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z')",
+            )
+            .await;
+
+        let _ = commit(
+            State(server.state.clone()),
+            server.user("alice"),
+            Path("newer".to_string()),
+            Json(CommitSave {
+                artifact_length_in_bytes: Some(64),
+                file_name: None,
+                hostname: None,
+                local_last_modified_at: None,
+                label: None,
+            }),
+        )
+        .await
+        .expect("the commit");
+
+        assert_eq!(listed(&server).await, vec!["newer".to_string()]);
+        assert_eq!(
+            server.scalar::<i64>("SELECT COUNT(*) FROM emulation_saves").await,
+            1,
+            "the kept save went with the one it was kept beside"
+        );
+    }
 }

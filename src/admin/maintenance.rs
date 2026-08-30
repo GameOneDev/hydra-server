@@ -46,6 +46,12 @@ fn catalogue() -> Vec<Value> {
             "danger": false,
         }),
         json!({
+            "id": "delete-retained-versions",
+            "title": "Delete retained older versions",
+            "description": "Delete every save kept because automatic save deletion is off — the previous cloud save version of a game, the previous save in an emulator slot. The current one is never touched.",
+            "danger": true,
+        }),
+        json!({
             "id": "delete-orphan-files",
             "title": "Delete orphaned files",
             "description": "Remove files on disk that no database row points at. Review them on the Storage screen first — this cannot be undone.",
@@ -102,6 +108,7 @@ async fn run(
     let result = match action.as_str() {
         "sweep-pending" => sweep_pending(&state).await?,
         "gc-blobs" => gc_blobs(&state).await?,
+        "delete-retained-versions" => delete_retained_versions(&state).await?,
         "delete-orphan-files" => delete_orphan_files(&state, request.keys).await?,
         "refresh-metadata" => refresh_metadata(&state).await?,
         "clear-token-cache" => {
@@ -146,6 +153,68 @@ async fn run(
     .await;
 
     Ok(Json(json!({ "ok": true, "action": action, "result": result })))
+}
+
+/// Deletes the older versions kept while automatic save deletion is off.
+///
+/// Turning the switch back on clears a game's retained versions on its next
+/// sync, which never comes for a game nobody plays any more. This is the
+/// sweep for those: the committed cloud save of each game and the current
+/// save in each emulator slot are left exactly as they are.
+async fn delete_retained_versions(state: &AppState) -> ApiResult<Value> {
+    let snapshots = sqlx::query(
+        "SELECT id, user_id FROM cloud_save_snapshots WHERE status = 'superseded'",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut owners: std::collections::HashSet<String> = Default::default();
+    for row in &snapshots {
+        let id: String = row.get("id");
+        owners.insert(row.get("user_id"));
+
+        sqlx::query("DELETE FROM cloud_save_snapshot_files WHERE snapshot_id = ?")
+            .bind(&id)
+            .execute(&state.pool)
+            .await?;
+        sqlx::query("DELETE FROM cloud_save_snapshots WHERE id = ?")
+            .bind(&id)
+            .execute(&state.pool)
+            .await?;
+    }
+
+    let saves: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM emulation_saves WHERE superseded_at IS NOT NULL")
+            .fetch_all(&state.pool)
+            .await?;
+
+    for id in &saves {
+        sqlx::query("DELETE FROM emulation_saves WHERE id = ?")
+            .bind(id)
+            .execute(&state.pool)
+            .await?;
+        storage::delete_object(state, &format!("emulation-saves/{id}.bin")).await;
+    }
+
+    /* The snapshots are gone, so the blobs only they referenced are now
+       orphans — this is what actually frees the bytes. */
+    for user_id in &owners {
+        cloud_saves::collect_orphan_blobs(state, user_id).await?;
+    }
+
+    let deleted = snapshots.len() + saves.len();
+
+    Ok(json!({
+        "summary": match deleted {
+            0 => "Nothing retained — no older versions to delete.".to_string(),
+            n => format!(
+                "Deleted {n} retained version(s): {} cloud save(s), {} emulation save(s).",
+                snapshots.len(),
+                saves.len()
+            ),
+        },
+        "deleted": deleted,
+    }))
 }
 
 async fn sweep_pending(state: &AppState) -> ApiResult<Value> {
@@ -481,6 +550,7 @@ async fn export(State(state): State<AppState>, _admin: AdminSession) -> ApiResul
         "settings": {
             "maxBytesPerUser": settings.max_bytes_per_user,
             "backupsPerGameLimit": settings.backups_per_game_limit,
+            "autoDeleteSaves": settings.auto_delete_saves,
             "allowedUsers": settings.allowed_users,
         },
         "users": users.iter().map(|row| json!({

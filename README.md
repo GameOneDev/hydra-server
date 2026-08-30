@@ -84,6 +84,7 @@ subscription needed.
 | `HYDRA_SERVER_SECRET` | auto-generated | Secret signing storage URLs and admin sessions; persisted to `<data dir>/.secret` when auto-generated |
 | `HYDRA_MAX_BYTES_PER_USER` | `0` (unlimited) | Per-user storage quota in bytes — counts save backups, Cloud Save V2 blobs (once per distinct file), emulation saves, custom game artwork and achievement souvenirs. Profile banners and avatars are excluded: each is capped at 30 MB and replaces the file it supersedes, so they can't grow. Checked when an upload is authorized, against the size the launcher declares |
 | `HYDRA_BACKUPS_PER_GAME_LIMIT` | `100` | Max save backups per game per user |
+| `HYDRA_AUTO_DELETE_SAVES` | `true` | Delete a save the launcher replaces — the previous Cloud Save V2 version of a game, the previous save in an emulator slot. `false` keeps the older version instead: out of the launcher's way, still on the owner's quota, and deleted only by hand. Uploads that never finished are swept either way |
 | `HYDRA_ALLOWED_USERS` | *(empty = everyone)* | Comma-separated official user ids or usernames allowed to use this server |
 | `HYDRA_LOGIN_MAX_ATTEMPTS` | `8` | Failed sign-ins from one address before it is locked out |
 | `HYDRA_LOGIN_LOCKOUT_MINUTES` | `15` | How long a locked-out address stays locked |
@@ -99,9 +100,14 @@ subscription needed.
 | `HYDRA_EVENT_RETENTION_DAYS` | `90` | Days of history kept in the event log |
 | `HYDRA_PRESENCE_IDLE_MINUTES` | `15` | Quiet minutes after which a launcher counts as away, so its next call is logged as coming online (`0` switches these events off) |
 
-`HYDRA_MAX_BYTES_PER_USER`, `HYDRA_BACKUPS_PER_GAME_LIMIT` and
-`HYDRA_ALLOWED_USERS` can also be edited live from the admin panel; values saved
-there are stored in the database and override the environment until reset.
+`HYDRA_MAX_BYTES_PER_USER`, `HYDRA_BACKUPS_PER_GAME_LIMIT`,
+`HYDRA_AUTO_DELETE_SAVES` and `HYDRA_ALLOWED_USERS` can also be edited live from
+the admin panel; values saved there are stored in the database and override the
+environment until reset.
+
+The first three are the server's answer for everyone. Any one of them can be
+overridden for a single account on that user's page in the panel — see
+[Per-user limits](#per-user-limits).
 
 ### Admin panel
 
@@ -134,8 +140,8 @@ full blob is still one click away in the expanded row.
 account opens onto its own screen: what it stores broken down by kind, the
 machines it syncs from (hostname, platform, last seen), its top games, and
 tabs for saves, achievements, custom images, shares, download sources and
-activity. Blocking, a per-category data purge, and full deletion live there
-too, with byte counts reported for whatever was freed.
+activity. Blocking, per-user limits (see below), a per-category data purge and
+full deletion live there too, with byte counts reported for whatever was freed.
 
 **Saves** — every stored save on the server in one filterable table, across
 all three generations: Cloud Save V2 snapshots, legacy tarball backups and
@@ -159,9 +165,9 @@ reports — deleting is a separate, explicit step.
 **Maintenance** — database backups (take one, download it, upload one taken
 elsewhere, restore from any of them — see [Backups](#backups)) plus the
 housekeeping the server otherwise only does lazily: sweep abandoned uploads,
-collect orphaned blobs, delete orphaned files, re-resolve missing game
-metadata, prune old history, clear the token cache, compact the database. Each
-reports what it actually changed. There is also a JSON export of the whole
+collect orphaned blobs, delete retained older versions, delete orphaned files,
+re-resolve missing game metadata, prune old history, clear the token cache,
+compact the database. Each reports what it actually changed. There is also a JSON export of the whole
 inventory.
 
 **Webhooks** — send events anywhere that accepts a POST. Filter by event family
@@ -170,9 +176,34 @@ for Discord/Slack), and set a secret to have each delivery signed. A test button
 sends one immediately and reports the status code; a hook that fails twenty
 times in a row switches itself off.
 
-**Settings** — per-user quota, backups-per-game limit and the allowed-users
-list, applied immediately and persisted. Each value shows all three layers:
-the environment default, whether an override is saved, and what is in force.
+**Settings** — the default storage quota, the backups-per-game limit, whether
+the server deletes a save the launcher replaces, and the allowed-users list,
+applied immediately and persisted. Each value shows all three layers: the
+environment default, whether an override is saved, and what is in force.
+
+#### Per-user limits
+
+A user's page in the panel carries a **Limits** card: the storage quota, the
+backups-per-game limit and automatic save deletion, each either following the
+server's setting or set for that account alone. The directory marks accounts
+that have their own with a *custom limits* pill, and *Follow the server* on the
+card drops them again.
+
+Turning **automatic save deletion** off — for one user or server-wide — stops
+the server deleting a save it is replacing:
+
+- Cloud Save V2 keeps the game's previous version alongside the current one.
+  The launcher still sees exactly one save per game and restores the current
+  one; older versions appear under *Saves* (and in the user's own portal) as
+  *older version*, to download or delete.
+- Emulation saves keep the slot's previous save the same way, out of the
+  listing the launcher reads.
+
+Kept versions hold on to their bytes, so they count against the owner's quota
+until something deletes them. Turning deletion back on clears a game's kept
+versions on its next sync; *Delete retained older versions* under Maintenance
+clears the rest, for games nobody syncs any more. Uploads that never finished
+are swept regardless — they are abandoned bytes, not a save anyone chose.
 
 Everywhere else: ⌘K (Ctrl-K) opens a command palette that jumps to any screen
 or searches users and games, and the panel follows your system light/dark
@@ -184,7 +215,9 @@ theme with a toggle to override it.
 here, how much of their quota it uses, which machines they sync from, and their
 achievements, custom images, shares and playtime. They can download any save —
 including individual files out of a cloud save — and delete what they no longer
-want, without an operator in the loop.
+want, without an operator in the loop. Where automatic save deletion is off,
+the versions the server kept for them are listed as *older version*, so they
+can reclaim their own quota.
 
 Signing in asks for the Hydra account they already have. The server forwards
 those credentials **once** to the official Hydra API (`HYDRA_OFFICIAL_LOGIN_PATH`,

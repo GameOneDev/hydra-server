@@ -173,12 +173,14 @@ async fn integrity(State(state): State<AppState>, _admin: AdminSession) -> ApiRe
     }
 
     /* A committed manifest referencing a hash with no blob row at all is the
-       same failure one step earlier, and just as fatal to a restore. */
+       same failure one step earlier, and just as fatal to a restore. A
+       retained older version is checked too: it is kept to be downloaded, so
+       one that can't be is worth the same report. */
     let dangling = sqlx::query(
         "SELECT DISTINCT s.user_id, f.hash, s.id AS snapshot_id
          FROM cloud_save_snapshot_files f
          JOIN cloud_save_snapshots s ON s.id = f.snapshot_id
-         WHERE s.status = 'committed'
+         WHERE s.status IN ('committed', 'superseded')
            AND NOT EXISTS (
              SELECT 1 FROM cloud_save_blobs b
              WHERE b.user_id = s.user_id AND b.hash = f.hash
