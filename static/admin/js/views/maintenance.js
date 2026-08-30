@@ -309,17 +309,9 @@ function actionCard(action, ctx) {
   });
 }
 
-/**
- * What the same job does when nobody is watching.
- *
- * Every button here is also a task on the Schedule screen, and an operator
- * about to run one by hand deserves to know it is due in an hour anyway.
- */
 function scheduleLine(action) {
   if (!action.schedule) return null;
 
-  /* "off" is paused; "on demand only" is a task whose triggers were all
-     removed. Neither is something that runs on its own. */
   const scheduled = !["off", "on demand only"].includes(action.schedule);
   return h(
     "div",

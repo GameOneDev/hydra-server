@@ -104,9 +104,6 @@ async fn main() {
         presence: Arc::new(RwLock::new(Default::default())),
     };
 
-    /* Backups, sweeps and pruning run in-process: the premise of this server
-       is that it is one binary you start, not a binary plus a cron entry.
-       What runs, how often and at what time is the Schedule screen's. */
     schedule::spawn(app_state.clone());
 
     events::record(

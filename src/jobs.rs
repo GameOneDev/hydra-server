@@ -1,14 +1,3 @@
-//! The operations the server can run on itself.
-//!
-//! Every one of these is something that would otherwise only happen lazily —
-//! on the next upload, on the next lookup, on the next restart — or not at
-//! all. They have two triggers and one implementation: the [`Maintenance`
-//! screen](crate::admin::maintenance) runs them on demand, and the
-//! [scheduler](crate::schedule) runs them on a timetable the operator sets.
-//!
-//! Each returns a `summary` plus whatever it counted, so the answer is always
-//! "this is what changed" rather than "done".
-
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 use crate::triggers::{Trigger, Unit};
@@ -17,49 +6,27 @@ use chrono::{Duration, Utc};
 use serde_json::{json, Value};
 use sqlx::Row;
 
-/// Abandoned uploads older than this are swept — the same threshold the
-/// upload path applies on a user's next sync.
 pub const PENDING_TTL_HOURS: i64 = 24;
 
-/// Minutes in an hour, so a default time of day reads as a clock does.
 const HOUR: i64 = 60;
 
-/// Weekdays count from Monday, the way `chrono` does.
 const SUNDAY: i64 = 6;
 
-/// One thing the server knows how to do to itself.
 pub struct Job {
-    /// Stable id: the URL segment, and the key of its row in
-    /// `scheduled_tasks`. Never change one — a renamed job loses its
-    /// schedule and its history.
     pub id: &'static str,
     pub title: &'static str,
     pub description: &'static str,
-    /// Offered as a button on the Maintenance screen. False for the database
-    /// backup, which has a whole card of its own there.
     pub manual: bool,
-    /// Can go on the schedule. False for the two that need an operator: one
-    /// deletes files and takes the list from a scan, the other only makes
-    /// sense as a deliberate act.
     pub schedulable: bool,
-    /// Destroys something. The panel makes these confirm first.
     pub danger: bool,
-    /// Cadence a server gets before anyone edits it: how many `default_unit`s
-    /// apart, and the minute of the day (UTC) a daily-or-longer run lands on.
     pub default_every: i64,
     pub default_unit: Unit,
     pub default_at_minute: Option<i64>,
-    /// Whether the schedule starts switched on. The two that cost real work —
-    /// a store lookup per game, a full rewrite of the database — start off,
-    /// so nobody inherits them by upgrading.
     pub default_enabled: bool,
 }
 
 pub const BACKUP: &str = "backup";
 
-/// The catalogue. A new job is one entry here plus one match arm in [`run`];
-/// both screens and the scheduler pick it up with no further wiring, and the
-/// scheduler creates its row on the next start.
 pub const JOBS: &[Job] = &[
     Job {
         id: BACKUP,
@@ -164,7 +131,6 @@ pub fn find(id: &str) -> Option<&'static Job> {
 }
 
 impl Job {
-    /// The catalogue entry the panel renders, without any schedule.
     pub fn json(&self) -> Value {
         json!({
             "id": self.id,
@@ -175,11 +141,6 @@ impl Job {
         })
     }
 
-    /// Whether this job starts switched on, and the triggers it starts with.
-    ///
-    /// The backup is the one that reads the environment: a server that set
-    /// `HYDRA_BACKUP_INTERVAL_HOURS` keeps exactly the cadence it had before
-    /// there was a schedule to edit, including having it switched off.
     pub fn default_schedule(&self, config: &crate::config::Config) -> (bool, Vec<Trigger>) {
         let timer = |count, unit, at_minute| Trigger::Every {
             count,
@@ -201,20 +162,11 @@ impl Job {
                 true,
                 vec![timer((hours / 24) as i64, Unit::Day, Some(3 * HOUR))],
             ),
-            /* A time of day only means something for a cadence that is a whole
-               number of days; "every 6 hours at 03:00" would be a lie the
-               screen then has to explain. */
             hours => (true, vec![timer(hours as i64, Unit::Hour, None)]),
         }
     }
 }
 
-/// Runs one job by id. `trigger` is "schedule" or "manual", and reaches the
-/// event log so a backup taken by the timer reads differently from one an
-/// operator asked for.
-///
-/// `delete-orphan-files` is deliberately absent: it takes the keys a scan
-/// produced, so it lives on the maintenance endpoint that can receive them.
 pub async fn run(state: &AppState, id: &str, trigger: &str) -> ApiResult<Value> {
     match id {
         BACKUP => backup(state, trigger).await,
@@ -270,10 +222,6 @@ async fn sweep_pending(state: &AppState) -> ApiResult<Value> {
         cloud_saves::collect_orphan_blobs(state, user_id).await?;
     }
 
-    /* Souvenir captures reserve a row (and sometimes upload bytes) before the
-       achievement sync claims them; one that never got claimed is abandoned
-       the same way, and the launcher rotates its client id rather than
-       resuming, so nothing will ever come back for it. */
     let souvenirs = crate::souvenirs::sweep_abandoned(state, &cutoff).await?;
     let swept = stale.len() + souvenirs;
 
@@ -326,9 +274,6 @@ async fn gc_blobs(state: &AppState) -> ApiResult<Value> {
 }
 
 async fn refresh_metadata(state: &AppState) -> ApiResult<Value> {
-    /* Games with data but no resolved name. Bounded: a store lookup is a
-       network round trip each, and neither the panel nor a scheduled run
-       should hang on a thousand. */
     let pending: Vec<(String, String)> = sqlx::query_as(
         "SELECT DISTINCT t.shop, t.object_id FROM (
              SELECT shop, object_id FROM cloud_save_snapshots
@@ -344,8 +289,6 @@ async fn refresh_metadata(state: &AppState) -> ApiResult<Value> {
 
     let mut resolved = 0usize;
     for (shop, object_id) in &pending {
-        /* resolve() re-fetches only when the cached failure is old enough;
-           dropping the row first makes this an explicit retry. */
         sqlx::query("DELETE FROM game_metadata WHERE shop = ? AND object_id = ?")
             .bind(shop)
             .bind(object_id)
@@ -415,8 +358,6 @@ async fn vacuum(state: &AppState) -> ApiResult<Value> {
     }))
 }
 
-/// The database and its write-ahead log, as they sit on disk. Read by the
-/// compaction job and by the schedule's size trigger.
 pub async fn database_bytes(state: &AppState) -> u64 {
     let db_path = state.config.database_path();
     let mut total = 0u64;
@@ -433,8 +374,6 @@ pub async fn database_bytes(state: &AppState) -> u64 {
 mod tests {
     use super::*;
 
-    /// Ids are the primary key of a task's schedule and of its history, so a
-    /// duplicate would silently merge two jobs' rows.
     #[test]
     fn every_job_has_a_distinct_id() {
         let mut ids: Vec<&str> = JOBS.iter().map(|job| job.id).collect();
@@ -444,9 +383,6 @@ mod tests {
         assert_eq!(ids.len(), count);
     }
 
-    /// The job that takes arguments can never be put on a timer that has none
-    /// to give it, and the two the schedule offers to run must be reachable
-    /// by id (`schedule::tests` runs each of them for real).
     #[test]
     fn only_jobs_that_can_run_unattended_are_schedulable() {
         assert!(!find("delete-orphan-files").expect("the file sweep").schedulable);
@@ -454,8 +390,6 @@ mod tests {
         assert!(find("no-such-job").is_none());
     }
 
-    /// The backup task inherits the cadence the environment already asked
-    /// for, including "never".
     #[test]
     fn the_backup_default_follows_the_environment() {
         let job = find(BACKUP).expect("the backup job");
@@ -466,8 +400,6 @@ mod tests {
         assert!(enabled);
         assert_eq!(triggers[0].label(), "every day at 03:00 UTC");
 
-        /* Not a whole number of days, so it keeps the hours and drops the
-           time of day rather than inventing one. */
         config.backup_interval_hours = 6;
         assert_eq!(job.default_schedule(&config).1[0].label(), "every 6 hours");
 

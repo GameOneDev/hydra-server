@@ -36,9 +36,6 @@ async fn list(State(state): State<AppState>, _admin: AdminSession) -> ApiResult<
     let backups = backup::list(&state).await;
     let data_dir = &state.config.data_dir;
 
-    /* The cadence is the scheduled task's, not the environment's: the
-       environment only seeds it, and an operator who has since moved it must
-       not be shown the value they overrode. */
     let task = crate::schedule::get(&state, crate::jobs::BACKUP).await?;
 
     Ok(Json(json!({

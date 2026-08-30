@@ -74,12 +74,6 @@ pub struct AppState {
     pub uploads: Arc<crate::storage::InFlightUploads>,
     /// Failed sign-ins per address, for the login lockout.
     pub login_guard: Arc<RwLock<crate::ratelimit::Guard>>,
-    /// Scheduled tasks running right now, so the timer and the panel's "run
-    /// now" can never start the same job twice over the same database.
-    ///
-    /// A blocking mutex rather than the async one: nothing awaits while it is
-    /// held, and a run has to be able to release its claim from a destructor
-    /// even if the job it started panicked.
     pub running_tasks: Arc<std::sync::Mutex<HashSet<String>>>,
     /// Last time each user was seen calling, for the presence log. Memory
     /// only: the database keeps the durable answer, this keeps the hot path

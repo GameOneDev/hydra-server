@@ -1,15 +1,3 @@
-//! What makes a task run.
-//!
-//! A timer is only the most common answer. A task carries a list of triggers
-//! and any one of them can start it, so "every night at three" and "whenever
-//! the abandoned uploads pile up" are the same kind of thing to the scheduler
-//! and to the operator editing them.
-//!
-//! Triggers are stored as JSON on the task's row: they are always read and
-//! written whole, and each kind carries different fields. Unknown kinds — a
-//! schedule written by a newer build — are dropped on load rather than
-//! failing it, so a downgrade costs a trigger and not the whole screen.
-
 use crate::state::AppState;
 use chrono::{DateTime, Datelike, Duration, Months, TimeZone, Timelike, Utc};
 use serde::{Deserialize, Serialize};
@@ -17,16 +5,10 @@ use serde_json::{json, Value};
 
 pub const MINUTES_PER_DAY: i64 = 24 * 60;
 
-/// The shortest gap a timer may be set to. Below this the tick that looks for
-/// due work becomes the thing that decides the cadence.
 pub const MIN_GAP_MINUTES: i64 = 5;
 
-/// The most triggers one task may carry. Not a technical limit — a task whose
-/// rules don't fit on a screen is one nobody can reason about.
 pub const MAX_TRIGGERS: usize = 8;
 
-/// The unit an interval is counted in. Months and weeks are calendar steps,
-/// not fixed multiples of a day, so "every month on the 1st" stays on the 1st.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Unit {
@@ -48,14 +30,10 @@ impl Unit {
         }
     }
 
-    /// Whether a run of this cadence lands on a time of day. A cadence shorter
-    /// than a day just runs every interval.
     pub fn has_time_of_day(self) -> bool {
         matches!(self, Unit::Day | Unit::Week | Unit::Month)
     }
 
-    /// Roughly how long one is, for sorting and for the "too often" guard.
-    /// Approximate for months on purpose: it is a floor, not a calendar.
     fn minutes(self) -> i64 {
         match self {
             Unit::Minute => 1,
@@ -74,12 +52,6 @@ impl Unit {
     }
 }
 
-/// A number the server can measure about itself, cheaply, on every tick.
-///
-/// Each one is a reason some job exists: uploads that were abandoned, games
-/// nothing could name, history past its window, a database that has grown, a
-/// volume running out. Turning them into triggers is what lets a task run
-/// because the server needs it rather than because a clock came round.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Metric {
@@ -119,13 +91,10 @@ impl Metric {
         }
     }
 
-    /// Bytes are shown and entered as sizes; the rest are plain counts.
     pub fn is_bytes(self) -> bool {
         matches!(self, Metric::DatabaseBytes | Metric::FreeDiskBytes)
     }
 
-    /// The comparison that makes sense for it, so the editor opens on the one
-    /// an operator meant: disk space is a floor, everything else a ceiling.
     pub fn natural_comparison(self) -> Comparison {
         match self {
             Metric::FreeDiskBytes => Comparison::Below,
@@ -133,7 +102,6 @@ impl Metric {
         }
     }
 
-    /// What this number is right now.
     pub async fn measure(self, state: &AppState) -> i64 {
         match self {
             Metric::PendingUploads => {
@@ -222,50 +190,33 @@ impl Comparison {
     }
 }
 
-/// One reason a task may run. Any trigger firing runs the task.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-/* `rename_all_fields` as well as `rename_all`: the variant names are the
-   `type` tag the panel switches on, and the fields inside them are the ones it
-   sends back. Without it a time of day would arrive as `atMinute`, match no
-   field, and be silently dropped.
-   Unknown fields are ignored rather than refused, because the panel edits a
-   trigger by sending back the object it was given — `label` and all. */
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Trigger {
-    /// A timer: every `count` `unit`s, landing on `at_minute` (UTC) for
-    /// cadences of a day or more, on `weekday` for weeks and on `day` of the
-    /// month for months.
     Every {
         count: i64,
         unit: Unit,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         at_minute: Option<i64>,
-        /// 0 = Monday.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         weekday: Option<i64>,
-        /// 1–31, clamped to the length of the month.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         day: Option<i64>,
     },
-    /// Once, shortly after the server starts.
     Startup {
         #[serde(default)]
         delay_minutes: i64,
     },
-    /// When another task finishes successfully.
     AfterTask {
         task: String,
         #[serde(default)]
         delay_minutes: i64,
     },
-    /// When an event of one of these kinds is recorded. Prefixes, so
-    /// `cloud_save.` keeps matching a kind added later.
     OnEvent {
         kinds: Vec<String>,
         #[serde(default)]
         min_gap_minutes: i64,
     },
-    /// While a measured number is over (or under) a line.
     Condition {
         metric: Metric,
         comparison: Comparison,
@@ -276,7 +227,6 @@ pub enum Trigger {
 }
 
 impl Trigger {
-    /// The phrase the panel prints for this trigger.
     pub fn label(&self) -> String {
         match self {
             Trigger::Every {
@@ -335,8 +285,6 @@ impl Trigger {
         }
     }
 
-    /// Rejects a trigger that couldn't do what it says: a cadence faster than
-    /// the tick, a weekday that isn't one, a task that doesn't exist.
     pub fn validate(&self, owner: &str) -> Result<(), String> {
         match self {
             Trigger::Every {
@@ -406,8 +354,6 @@ impl Trigger {
         }
     }
 
-    /// When this trigger next fires on its own clock. `None` for the ones that
-    /// wait for something to happen instead.
     pub fn next_run(&self, from: DateTime<Utc>) -> Option<DateTime<Utc>> {
         let Trigger::Every {
             count,
@@ -430,8 +376,6 @@ impl Trigger {
         })
     }
 
-    /// The trigger as the panel reads it: its own fields, tagged with the
-    /// kind (`type`), plus the phrase to print for it.
     pub fn json(&self) -> Value {
         let mut value = serde_json::to_value(self).unwrap_or_else(|_| json!({}));
         value["label"] = json!(self.label());
@@ -446,8 +390,6 @@ fn bounded_delay(minutes: i64) -> Result<(), String> {
     Ok(())
 }
 
-/// The next `at_minute` that is a whole number of `count` days away, counting
-/// from the day `from` falls in.
 fn step_days(from: DateTime<Utc>, count: i64, at_minute: i64) -> DateTime<Utc> {
     let mut candidate = midnight(from) + Duration::minutes(at_minute.rem_euclid(MINUTES_PER_DAY));
     while candidate <= from {
@@ -456,7 +398,6 @@ fn step_days(from: DateTime<Utc>, count: i64, at_minute: i64) -> DateTime<Utc> {
     candidate
 }
 
-/// The next `weekday` at `at_minute`, stepping whole `count`-week blocks.
 fn step_weeks(from: DateTime<Utc>, count: i64, weekday: i64, at_minute: i64) -> DateTime<Utc> {
     let target = weekday.rem_euclid(7);
     let today = from.weekday().num_days_from_monday() as i64;
@@ -471,9 +412,6 @@ fn step_weeks(from: DateTime<Utc>, count: i64, weekday: i64, at_minute: i64) -> 
     candidate
 }
 
-/// The next `day` of a month at `at_minute`, stepping whole calendar months.
-/// A day past the end of a short month lands on its last day rather than
-/// skipping it — "the 31st" in February is the 28th.
 fn step_months(from: DateTime<Utc>, count: i64, day: i64, at_minute: i64) -> DateTime<Utc> {
     let months = Months::new(count.clamp(1, 120) as u32);
     let mut anchor = midnight(from);
@@ -489,7 +427,6 @@ fn step_months(from: DateTime<Utc>, count: i64, day: i64, at_minute: i64) -> Dat
     from + Duration::days(30)
 }
 
-/// `anchor`'s month, on `day` — clamped to the month's length.
 fn on_day(anchor: DateTime<Utc>, day: i64) -> DateTime<Utc> {
     let first = Utc
         .with_ymd_and_hms(anchor.year(), anchor.month(), 1, 0, 0, 0)
@@ -544,13 +481,11 @@ fn ordinal(day: i64) -> String {
     format!("{day}{suffix}")
 }
 
-/// A minute of the day as `HH:MM`.
 pub fn clock(at_minute: i64) -> String {
     let at = at_minute.rem_euclid(MINUTES_PER_DAY);
     format!("{:02}:{:02}", at / 60, at % 60)
 }
 
-/// Sizes the way the panel prints them, for a threshold in a sentence.
 fn bytes_label(bytes: i64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = bytes as f64;
@@ -566,7 +501,6 @@ fn bytes_label(bytes: i64) -> String {
     }
 }
 
-/// Whether `comparison` of `metric` against `value` holds right now.
 pub async fn condition_holds(
     state: &AppState,
     metric: Metric,
@@ -597,9 +531,6 @@ mod tests {
         }
     }
 
-    /// "Every day at 03:00" has to mean 03:00 — not "24 hours after whenever
-    /// the last run finished", which drifts an hour further into the morning
-    /// every time a run takes a minute.
     #[test]
     fn a_daily_timer_lands_on_its_time_of_day() {
         let daily = every(1, Unit::Day, Some(180));
@@ -608,25 +539,20 @@ mod tests {
             daily.next_run(at("2026-08-30T14:20:00Z")),
             Some(at("2026-08-31T03:00:00Z"))
         );
-        /* Before today's slot: today, not tomorrow. */
         assert_eq!(
             daily.next_run(at("2026-08-30T02:59:00Z")),
             Some(at("2026-08-30T03:00:00Z"))
         );
-        /* Exactly on it: the next one, so a run can never re-trigger itself. */
         assert_eq!(
             daily.next_run(at("2026-08-30T03:00:00Z")),
             Some(at("2026-08-31T03:00:00Z"))
         );
-        /* Every two days steps two, from the day it is asked on. */
         assert_eq!(
             every(2, Unit::Day, Some(180)).next_run(at("2026-08-30T14:00:00Z")),
             Some(at("2026-09-01T03:00:00Z"))
         );
     }
 
-    /// A cadence shorter than a day has no time of day to land on, so it runs
-    /// an interval from now.
     #[test]
     fn a_short_timer_runs_an_interval_from_now() {
         assert_eq!(
@@ -640,11 +566,8 @@ mod tests {
         );
     }
 
-    /// A weekly timer lands on the weekday it names, and steps whole weeks
-    /// from there.
     #[test]
     fn a_weekly_timer_lands_on_its_weekday() {
-        /* 2026-08-30 is a Sunday; 6 is Sunday counting from Monday. */
         let sunday = Trigger::Every {
             count: 1,
             unit: Unit::Week,
@@ -666,8 +589,6 @@ mod tests {
         assert_eq!(sunday.label(), "every week on Sunday at 04:30 UTC");
     }
 
-    /// A monthly timer steps calendar months, and a day past the end of a
-    /// short one lands on its last day rather than skipping the month.
     #[test]
     fn a_monthly_timer_clamps_to_the_month() {
         let thirty_first = Trigger::Every {
@@ -702,8 +623,6 @@ mod tests {
         assert_eq!(quarterly.label(), "every 3 months on the 1st at 00:00 UTC");
     }
 
-    /// The triggers that wait for something have no clock of their own; the
-    /// scheduler asks them each tick instead.
     #[test]
     fn only_timers_have_a_next_run() {
         let now = at("2026-08-30T14:20:00Z");
@@ -723,8 +642,6 @@ mod tests {
         .is_none());
     }
 
-    /// Every trigger has to say what it does in one line — it is the only
-    /// thing the list screen shows.
     #[test]
     fn every_trigger_reads_as_a_sentence() {
         assert_eq!(every(1, Unit::Day, Some(180)).label(), "every day at 03:00 UTC");
@@ -762,8 +679,6 @@ mod tests {
         );
     }
 
-    /// A trigger that couldn't do what it says is refused when it is saved,
-    /// not discovered when it fires.
     #[test]
     fn a_trigger_that_cannot_work_is_refused() {
         assert!(every(1, Unit::Minute, None).validate("vacuum").is_err(), "faster than the tick");
@@ -801,8 +716,6 @@ mod tests {
         .is_err());
     }
 
-    /// The stored shape is the wire shape: a trigger written by the panel has
-    /// to come back as the same trigger.
     #[test]
     fn triggers_round_trip_through_json() {
         let triggers = vec![
@@ -824,9 +737,6 @@ mod tests {
         let decoded: Vec<Trigger> = serde_json::from_str(&encoded).expect("readable");
         assert_eq!(decoded, triggers);
 
-        /* The panel edits a trigger by sending back what it was given, which
-           carries the rendered label and camelCase fields. Both have to
-           survive the trip, or a saved run time would quietly become 00:00. */
         let from_panel: Trigger = serde_json::from_value(json!({
             "type": "every",
             "count": 2,

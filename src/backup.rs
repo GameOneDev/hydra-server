@@ -8,11 +8,6 @@
 //! `VACUUM INTO` is the mechanism: SQLite produces a fully consistent copy of
 //! a live database without blocking writers, which a file copy of a WAL-mode
 //! database cannot promise.
-//!
-//! The timing is [`crate::schedule`]'s: this module owns what a backup *is*,
-//! and the schedule owns when one is taken. Its cadence starts from
-//! `HYDRA_BACKUP_INTERVAL_HOURS`, so nothing changes for a server whose
-//! operator never opens the panel.
 
 use crate::events::Event;
 use crate::state::AppState;

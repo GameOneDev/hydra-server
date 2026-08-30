@@ -230,9 +230,6 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
     )
     .await?;
 
-    /* A scheduled job that failed is the one condition nobody would otherwise
-       notice: it happened at 03:00, to nobody, and the screen that records it
-       is not the one an operator opens first. */
     let failed_tasks: Vec<String> = sqlx::query_scalar(
         "SELECT id FROM scheduled_tasks WHERE last_status = 'error' ORDER BY id",
     )

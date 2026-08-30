@@ -1,10 +1,5 @@
 //! One-shot operations an operator runs by hand.
 //!
-//! The work itself lives in [`crate::jobs`], which the
-//! [scheduler](crate::schedule) runs from the same catalogue — this module is
-//! the "do it now" half: the buttons, the one job that takes arguments only a
-//! human can supply, and the inventory export.
-//!
 //! Everything here is something the server would otherwise only do lazily —
 //! on the next upload, on the next lookup, on the next restart. Exposing them
 //! as buttons turns "wait and hope" into "run it and read the result", and
@@ -31,9 +26,6 @@ pub fn router() -> Router<AppState> {
         .route("/admin/api/maintenance/export", get(export))
 }
 
-/// The catalogue the panel renders: the jobs offered as buttons, each with
-/// the schedule it is on, so the Maintenance screen can say "this also runs
-/// every day at 03:00" instead of implying it only ever happens by hand.
 async fn catalogue(state: &AppState) -> ApiResult<Vec<Value>> {
     let tasks = schedule::list(state).await?;
 
@@ -72,8 +64,6 @@ async fn run(
 ) -> ApiResult<Json<Value>> {
     let request = body.map(|Json(body)| body).unwrap_or_default();
 
-    /* The one job that can't go on a schedule: it takes the keys the
-       integrity scan produced, so it can only be run by whoever saw them. */
     let result = if action == "delete-orphan-files" {
         delete_orphan_files(&state, request.keys).await?
     } else {
@@ -81,9 +71,6 @@ async fn run(
             .filter(|job| job.manual)
             .ok_or_else(|| ApiError::bad_request(format!("unknown maintenance action: {action}")))?;
 
-        /* Through the scheduler even when a button started it: the run is
-           logged against the task, re-arms its timer, and can't collide with
-           the timer's own run of the same job. */
         if job.schedulable {
             return Ok(Json(json!({
                 "ok": true,

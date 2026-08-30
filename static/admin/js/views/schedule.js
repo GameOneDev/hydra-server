@@ -1,12 +1,3 @@
-/**
- * The maintenance schedule: what this server runs on its own.
- *
- * The screen is a list of every task, and a task opens into a drawer holding
- * everything about it — the switch, the triggers that start it, and its run
- * log. Edits save as they are made: there is no form to submit, so the screen
- * never shows a schedule the server hasn't got.
- */
-
 import { h, icon } from "/assets/shared/js/dom.js";
 import * as fmt from "/assets/shared/js/format.js";
 import { api } from "/assets/shared/js/api.js";
@@ -38,14 +29,10 @@ export default {
   },
 };
 
-// ------------------------------------------------------------------ summary
-
 function summaryCard(data) {
   const enabled = data.tasks.filter((task) => task.enabled);
   const failing = data.tasks.filter((task) => task.lastStatus === "error");
 
-  /* The soonest run across every enabled task — the answer to "is anything
-     going to happen tonight", which is the whole point of the screen. */
   const next = enabled
     .filter((task) => task.nextRunAt)
     .sort((a, b) => new Date(a.nextRunAt) - new Date(b.nextRunAt))[0];
@@ -100,8 +87,6 @@ function failureAlert(failing) {
     ),
   );
 }
-
-// --------------------------------------------------------------------- list
 
 function tasksCard(data, ctx) {
   return card({
@@ -189,7 +174,6 @@ function tasksCard(data, ctx) {
   });
 }
 
-/** The triggers as chips, which is all the list has room for. */
 function triggerPills(task) {
   if (!task.enabled) return pill("off", "warning");
   if (!task.triggers.length) return h("span", { class: "muted small", text: "on demand only" });
@@ -214,7 +198,6 @@ function nextRun(task) {
   if (task.running) return pill("running now", "accent");
   if (!task.enabled) return h("span", { class: "muted", text: "—" });
   if (!task.nextRunAt) {
-    /* No timer, but something else may still start it. */
     return h("span", {
       class: "muted small",
       text: task.triggers.length ? "when it is asked for" : "—",
@@ -227,15 +210,6 @@ function nextRun(task) {
   });
 }
 
-// ------------------------------------------------------------------- drawer
-
-/**
- * One task, in full: its status, the triggers that start it, and its log.
- *
- * The drawer holds its own copy of the task and repaints from whatever the
- * server last said, so a refused edit snaps back to the stored schedule
- * instead of leaving the screen claiming something untrue.
- */
 function openTask(initial, data, ctx) {
   let task = initial;
   let log = null;
@@ -244,12 +218,7 @@ function openTask(initial, data, ctx) {
   const apply = (updated) => {
     task = updated;
     paint();
-    /* The log is re-read with the task: a trigger can fire between two edits,
-       and a drawer that says "ran just now" over an empty log is worse than
-       one that takes a moment to catch up. */
     refreshLog();
-    /* The list underneath, the sidebar counts and the Overview alerts all
-       read from this. The drawer lives on the body, so it survives. */
     ctx.refresh();
   };
 
@@ -261,10 +230,6 @@ function openTask(initial, data, ctx) {
       })
       .catch(() => {});
 
-  /* Adjusting a field inside a trigger saves silently: the drawer repaints
-     with what the server stored, which says more than a toast would, and a
-     row of them would bury the screen they came from. Adding, removing and
-     switching a task on or off still say so. */
   const save = async (patch, control, { quiet = false } = {}) => {
     if (control) control.disabled = true;
     try {
@@ -273,8 +238,6 @@ function openTask(initial, data, ctx) {
       apply(response.task);
     } catch (error) {
       toast(error.message, "critical");
-      /* Repaint from the unchanged task, so the control snaps back to what is
-         actually stored rather than to what was asked for. */
       paint();
     }
   };
@@ -290,8 +253,6 @@ function openTask(initial, data, ctx) {
       apply(response.task);
     } catch (error) {
       toast(error.message, "critical");
-      /* A failed run is still a run: re-read the task so its status and log
-         show what just happened rather than what came before. */
       const { task: refreshed } = await api
         .get(`/admin/api/schedule/${encodeURIComponent(task.id)}`)
         .catch(() => ({ task }));
@@ -410,8 +371,6 @@ function lastRun(task) {
   );
 }
 
-// ------------------------------------------------------------ trigger editor
-
 const TRIGGER_KINDS = [
   { type: "every", label: "On a timer" },
   { type: "startup", label: "When the server starts" },
@@ -475,7 +434,6 @@ function triggerSection(task, vocabulary, saveTriggers) {
   );
 }
 
-/** A sensible trigger of this kind, for the operator to adjust. */
 function blankTrigger(type, task, vocabulary) {
   if (type === "every") return { type, count: 1, unit: "day", atMinute: 180 };
   if (type === "startup") return { type, delayMinutes: 5 };
@@ -495,7 +453,6 @@ function blankTrigger(type, task, vocabulary) {
   };
 }
 
-/** One trigger, with only the fields its kind actually has. */
 function triggerRow(trigger, vocabulary, { onChange, onRemove }) {
   const fields = {
     every: everyFields,
@@ -539,7 +496,6 @@ function triggerRow(trigger, vocabulary, { onChange, onRemove }) {
   );
 }
 
-/** `Every [2] [days ▾] at [03:00] UTC` — the mini form for a timer. */
 function everyFields(trigger, vocabulary, onChange) {
   const unit = vocabulary.units.find((entry) => entry.unit === trigger.unit) ?? { timeOfDay: false };
   const edit = (patch, control) => onChange({ ...trigger, ...patch }, control);
@@ -559,8 +515,6 @@ function everyFields(trigger, vocabulary, onChange) {
           edit(
             {
               unit: next,
-              /* Carry a time of day over to another day-or-longer cadence, and
-                 drop it for one that has no room for it. */
               atMinute: known?.timeOfDay ? trigger.atMinute ?? 180 : undefined,
               weekday: next === "week" ? trigger.weekday ?? 6 : undefined,
               day: next === "month" ? trigger.day ?? 1 : undefined,
@@ -789,7 +743,6 @@ function conditionFields(trigger, vocabulary, onChange) {
   );
 }
 
-/** A size as a number plus a unit, so nobody types a threshold in bytes. */
 function byteValue(trigger, onChange) {
   const gigabyte = 1024 ** 3;
   const inGigabytes = trigger.value >= gigabyte || trigger.value === 0;
@@ -826,8 +779,6 @@ function number(value, min, max, onCommit, { step } = {}) {
     step: step ?? "1",
     value,
     style: { width: "88px" },
-    /* On change, not on input: a half-typed "1" out of "15" is not a schedule
-       anybody asked to save. */
     onchange: (event) => {
       const parsed = Number(event.target.value);
       if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
@@ -841,8 +792,6 @@ function number(value, min, max, onCommit, { step } = {}) {
 }
 
 const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-
-// ---------------------------------------------------------------------- log
 
 function logSection(task, runs, reload) {
   const body = !runs
@@ -886,8 +835,6 @@ function logRow(run) {
     ),
     h("span", {
       class: "small",
-      /* The counters the job reported, for the run whose one-line summary
-         raises a question it doesn't answer. */
       title: run.detail ? JSON.stringify(run.detail, null, 2) : "",
       text: run.summary,
     }),
@@ -902,11 +849,8 @@ const STARTED_BY = {
   event: "an event",
   condition: "a threshold",
   manual: "by hand",
-  /* Runs recorded before triggers had kinds. */
   schedule: "on a timer",
 };
-
-// ------------------------------------------------------------------ chrome
 
 function section(title, body) {
   return h(
@@ -947,9 +891,6 @@ function explainerCard() {
   });
 }
 
-// ----------------------------------------------------------------- helpers
-
-/** A minute of the UTC day as HH:MM. */
 function clock(minutes) {
   const value = (((Number(minutes) || 0) % 1440) + 1440) % 1440;
   return `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`;
@@ -962,11 +903,6 @@ function parseClock(value) {
   return minutes >= 0 && minutes < 1440 ? minutes : null;
 }
 
-/**
- * What the run time means to whoever is reading it — theirs is the clock they
- * will be asleep in. A reader already on UTC is told that instead of being
- * shown the same number twice.
- */
 function timeHint(minutes) {
   if (new Date().getTimezoneOffset() === 0) return "UTC — your clock too";
   const date = new Date();
