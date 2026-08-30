@@ -1,11 +1,13 @@
-//! The maintenance schedule, from the panel: what runs unattended, when it
-//! runs, whether it worked, and the log of the last few times.
+//! The maintenance schedule, from the panel: what runs unattended, what
+//! starts it, whether it worked, and the log of the last few times.
 
 use super::AdminSession;
 use crate::error::{ApiError, ApiResult};
 use crate::events::Event;
-use crate::schedule::{self, Trigger};
+use crate::jobs;
+use crate::schedule::{self, Reason};
 use crate::state::AppState;
+use crate::triggers::{Metric, Trigger, Unit, MAX_TRIGGERS, MIN_GAP_MINUTES};
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -23,37 +25,75 @@ pub fn router() -> Router<AppState> {
 /// How many past runs a task's log shows before the panel asks for more.
 const DEFAULT_RUN_LIMIT: i64 = 20;
 
-async fn payload(state: &AppState) -> ApiResult<Value> {
-    let tasks = schedule::list(state).await?;
+/// The event families the trigger editor offers. Prefixes, so one keeps
+/// matching a kind added in a later release.
+const EVENT_KINDS: &[&str] = &[
+    "cloud_save.",
+    "backup.",
+    "emulation_save.",
+    "achievements.",
+    "souvenir.",
+    "artwork.",
+    "user.",
+    "auth.",
+    "admin.",
+    "system.",
+];
+
+/// Everything the editor needs to draw a trigger it has never seen: the units
+/// an interval counts in, the numbers a condition can watch (with what each
+/// one reads right now), the events it can listen for, and the other tasks it
+/// can follow.
+async fn vocabulary(state: &AppState) -> ApiResult<Value> {
+    let mut metrics = Vec::new();
+    for metric in Metric::ALL {
+        let mut value = metric.json();
+        /* The current reading, so a threshold is set against what this server
+           actually looks like rather than against a guess. */
+        value["now"] = json!(metric.measure(state).await);
+        metrics.push(value);
+    }
+
+    let units: Vec<Value> = [Unit::Minute, Unit::Hour, Unit::Day, Unit::Week, Unit::Month]
+        .iter()
+        .map(|unit| {
+            json!({
+                "unit": unit.as_str(),
+                "timeOfDay": unit.has_time_of_day(),
+            })
+        })
+        .collect();
 
     Ok(json!({
-        "tasks": tasks
+        "units": units,
+        "metrics": metrics,
+        "eventKinds": EVENT_KINDS,
+        "tasks": jobs::JOBS
             .iter()
-            .map(|task| task.json(schedule::is_running(state, task.job.id)))
-            .collect::<Vec<_>>(),
-        /* The clock the schedule is kept in, so the screen can say what
-           "03:00" means here and offer the reader's own time beside it. */
-        "now": chrono::Utc::now().to_rfc3339(),
-        "frequencies": schedule::FREQUENCIES
-            .iter()
-            .map(|minutes| json!({
-                "minutes": minutes,
-                "label": schedule::frequency_label(*minutes),
-                /* Only whole-day cadences land on a time of day; the panel
-                   greys the time field out for the others. */
-                "timeOfDay": minutes % schedule::MINUTES_PER_DAY == 0,
-            }))
+            .filter(|job| job.schedulable)
+            .map(|job| json!({ "id": job.id, "title": job.title }))
             .collect::<Vec<_>>(),
         "limits": {
-            "minIntervalMinutes": schedule::MIN_INTERVAL_MINUTES,
-            "maxIntervalMinutes": schedule::MAX_INTERVAL_MINUTES,
+            "maxTriggers": MAX_TRIGGERS,
+            "minGapMinutes": MIN_GAP_MINUTES,
         },
     }))
 }
 
 /// GET /admin/api/schedule
 async fn list(State(state): State<AppState>, _admin: AdminSession) -> ApiResult<Json<Value>> {
-    Ok(Json(payload(&state).await?))
+    let tasks = schedule::list(&state).await?;
+
+    Ok(Json(json!({
+        "tasks": tasks
+            .iter()
+            .map(|task| task.json(schedule::is_running(&state, task.job.id)))
+            .collect::<Vec<_>>(),
+        /* The clock the schedule is kept in, so the screen can say what
+           "03:00" means here and offer the reader's own time beside it. */
+        "now": chrono::Utc::now().to_rfc3339(),
+        "vocabulary": vocabulary(&state).await?,
+    })))
 }
 
 async fn task_json(state: &AppState, id: &str) -> ApiResult<Value> {
@@ -74,56 +114,32 @@ async fn show(
 #[serde(rename_all = "camelCase")]
 struct UpdateRequest {
     enabled: Option<bool>,
-    interval_minutes: Option<i64>,
-    /// Minute of the day, UTC. Explicit `null` clears the time of day; an
-    /// absent field leaves it as it was.
-    #[serde(default, deserialize_with = "double_option")]
-    at_minute: Option<Option<i64>>,
+    /// The whole list, replacing whatever was stored. A trigger is edited by
+    /// sending the list it belongs to, so the screen can never save half of a
+    /// change.
+    triggers: Option<Vec<Trigger>>,
 }
 
-/// Tells "field absent" from "field set to null", which
-/// `Option<Option<T>>` alone cannot.
-fn double_option<'de, D>(deserializer: D) -> Result<Option<Option<i64>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    serde::Deserialize::deserialize(deserializer).map(Some)
-}
-
-/// PUT /admin/api/schedule/{id} — enable/disable, change the cadence, move
-/// the time of day.
+/// PUT /admin/api/schedule/{id} — enable/disable, and set the triggers.
 async fn update(
     State(state): State<AppState>,
     _admin: AdminSession,
     Path(id): Path<String>,
     Json(request): Json<UpdateRequest>,
 ) -> ApiResult<Json<Value>> {
-    let task = schedule::update(
-        &state,
-        &id,
-        request.enabled,
-        request.interval_minutes,
-        request.at_minute,
-    )
-    .await?;
-
-    let label = schedule::schedule_label(
-        task.enabled,
-        task.interval_minutes,
-        task.times_of_day().then_some(task.at_minute).flatten(),
-    );
+    let task = schedule::update(&state, &id, request.enabled, request.triggers).await?;
+    let summary = task.summary();
 
     crate::events::record(
         &state,
         Event::admin(
             "admin.schedule.updated",
-            format!("{} is now {label}", task.job.title),
+            format!("{} is now {summary}", task.job.title),
         )
         .detail(json!({
             "task": id,
             "enabled": task.enabled,
-            "intervalMinutes": task.interval_minutes,
-            "atMinute": task.at_minute,
+            "triggers": task.triggers.iter().map(Trigger::json).collect::<Vec<_>>(),
         })),
     )
     .await;
@@ -131,7 +147,7 @@ async fn update(
     Ok(Json(json!({
         "ok": true,
         "task": task_json(&state, &id).await?,
-        "summary": format!("{} — {label}.", task.job.title),
+        "summary": format!("{} — {summary}.", task.job.title),
     })))
 }
 
@@ -141,7 +157,7 @@ async fn run(
     _admin: AdminSession,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let result = schedule::run(&state, &id, Trigger::Manual).await?;
+    let result = schedule::run(&state, &id, Reason::Manual).await?;
 
     Ok(Json(json!({
         "ok": true,

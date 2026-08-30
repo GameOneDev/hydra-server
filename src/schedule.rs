@@ -1,11 +1,12 @@
-//! The maintenance schedule: which jobs run unattended, when, and what
-//! happened the last few times they did.
+//! The maintenance schedule: which jobs run unattended, what starts them, and
+//! what happened the last few times they did.
 //!
-//! The premise of this server is that it is one binary you start, not a
-//! binary plus a cron entry — so the timetable lives here, in-process and in
-//! the database, where the panel can show it and change it. Every entry is a
-//! [`crate::jobs::Job`]; the operator picks the cadence, the time of day and
-//! whether it runs at all, and each run is recorded with what it changed.
+//! The premise of this server is that it is one binary you start, not a binary
+//! plus a cron entry — so the timetable lives here, in-process and in the
+//! database, where the panel can show it and change it. Every entry is a
+//! [`crate::jobs::Job`] carrying a list of [`Trigger`]s, and any one of them
+//! firing runs the job: a timer, the server starting, another task finishing,
+//! an event being recorded, or a measured number crossing a line.
 //!
 //! Times are UTC throughout. A minute-of-day is a plain integer rather than a
 //! local wall clock: the server has no timezone to speak of, and a schedule
@@ -16,13 +17,14 @@ use crate::error::{ApiError, ApiResult};
 use crate::events::Event;
 use crate::jobs::{self, Job};
 use crate::state::AppState;
+use crate::triggers::{self, Trigger, MAX_TRIGGERS};
 use axum::http::StatusCode;
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{json, Value};
 use sqlx::Row;
 
-/// How often the timer looks for due work. Fine enough that "every 15
-/// minutes" means it, cheap enough to be one indexed query.
+/// How often the timer looks for due work. Fine enough that a five-minute
+/// cadence means it, cheap enough to be a handful of indexed queries.
 const TICK_SECONDS: u64 = 30;
 
 /// Runs kept per task. The panel shows the most recent handful; the rest is
@@ -34,32 +36,11 @@ const RUN_HISTORY: i64 = 50;
 /// straight away instead of waiting a day to prove the schedule works.
 const FIRST_RUN_DELAY_MINUTES: i64 = 5;
 
-pub const MIN_INTERVAL_MINUTES: i64 = 15;
-pub const MAX_INTERVAL_MINUTES: i64 = 30 * 24 * 60;
-
-pub const MINUTES_PER_DAY: i64 = 24 * 60;
-
-/// The cadences the panel offers. Any interval in range is accepted by the
-/// API; these are the ones with a name.
-pub const FREQUENCIES: &[i64] = &[
-    30,
-    60,
-    3 * 60,
-    6 * 60,
-    12 * 60,
-    MINUTES_PER_DAY,
-    2 * MINUTES_PER_DAY,
-    7 * MINUTES_PER_DAY,
-    30 * MINUTES_PER_DAY,
-];
-
-/// One job's schedule and its last outcome.
+/// One job's triggers and its last outcome.
 pub struct Task {
     pub job: &'static Job,
     pub enabled: bool,
-    pub interval_minutes: i64,
-    /// Minute of the day, UTC. Only meaningful for whole-day intervals.
-    pub at_minute: Option<i64>,
+    pub triggers: Vec<Trigger>,
     pub next_run_at: Option<String>,
     pub last_run_at: Option<String>,
     pub last_status: Option<String>,
@@ -68,24 +49,35 @@ pub struct Task {
 }
 
 impl Task {
-    /// True when the time of day is part of this task's schedule. A cadence
-    /// shorter than a day just runs every interval from the last run.
-    pub fn times_of_day(&self) -> bool {
-        self.interval_minutes % MINUTES_PER_DAY == 0
+    /// The whole schedule in one line, for a list that has no room for more.
+    pub fn summary(&self) -> String {
+        if !self.enabled {
+            return "off".to_string();
+        }
+        if self.triggers.is_empty() {
+            return "on demand only".to_string();
+        }
+        self.triggers
+            .iter()
+            .map(Trigger::label)
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+
+    /// The soonest a timer will start this, across every timer it carries.
+    fn next_timer_run(&self, from: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.triggers
+            .iter()
+            .filter_map(|trigger| trigger.next_run(from))
+            .min()
     }
 
     pub fn json(&self, running: bool) -> Value {
         let mut value = self.job.json();
-        let at_minute = self.times_of_day().then_some(self.at_minute).flatten();
 
         value["enabled"] = json!(self.enabled);
-        value["intervalMinutes"] = json!(self.interval_minutes);
-        value["atMinute"] = json!(at_minute);
-        value["frequencyLabel"] = json!(frequency_label(self.interval_minutes));
-        value["scheduleLabel"] = json!(schedule_label(self.enabled, self.interval_minutes, at_minute));
-        /* What it would do if it were on, so a paused task's card can say so
-           rather than only saying "off". */
-        value["cadenceLabel"] = json!(schedule_label(true, self.interval_minutes, at_minute));
+        value["triggers"] = json!(self.triggers.iter().map(Trigger::json).collect::<Vec<_>>());
+        value["summary"] = json!(self.summary());
         value["nextRunAt"] = json!(self.next_run_at);
         value["running"] = json!(running);
         value["lastRunAt"] = json!(self.last_run_at);
@@ -96,74 +88,98 @@ impl Task {
     }
 }
 
-/// "every 6 hours", "every day" — the phrase the screen puts next to a task.
-pub fn frequency_label(minutes: i64) -> String {
-    let plural = |count: i64, unit: &str| match count {
-        1 => format!("every {unit}"),
-        n => format!("every {n} {unit}s"),
-    };
+/// What started a run. Recorded with each one, so a log line says whether the
+/// clock, the server, another task, an event or an operator was behind it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Reason {
+    Timer(String),
+    Startup,
+    After(String),
+    Event(String),
+    Condition(String),
+    Manual,
+}
 
-    match minutes {
-        m if m % (7 * MINUTES_PER_DAY) == 0 => plural(m / (7 * MINUTES_PER_DAY), "week"),
-        m if m % MINUTES_PER_DAY == 0 => plural(m / MINUTES_PER_DAY, "day"),
-        m if m % 60 == 0 => plural(m / 60, "hour"),
-        m => plural(m, "minute"),
+impl Reason {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Reason::Timer(_) => "timer",
+            Reason::Startup => "startup",
+            Reason::After(_) => "after",
+            Reason::Event(_) => "event",
+            Reason::Condition(_) => "condition",
+            Reason::Manual => "manual",
+        }
+    }
+
+    /// What the trigger actually saw, in the words the log prints.
+    pub fn detail(&self) -> String {
+        match self {
+            Reason::Timer(label) => label.clone(),
+            Reason::Startup => "the server started".to_string(),
+            Reason::After(label) => label.clone(),
+            Reason::Event(label) => label.clone(),
+            Reason::Condition(label) => label.clone(),
+            Reason::Manual => "an operator asked for it".to_string(),
+        }
     }
 }
 
-/// The whole schedule in one line: "every day at 03:00 UTC", "off".
-pub fn schedule_label(enabled: bool, minutes: i64, at_minute: Option<i64>) -> String {
-    if !enabled {
-        return "off".to_string();
-    }
-    match at_minute {
-        Some(at) => format!("{} at {} UTC", frequency_label(minutes), clock(at)),
-        None => frequency_label(minutes),
-    }
-}
-
-/// A minute of the day as `HH:MM`.
-pub fn clock(at_minute: i64) -> String {
-    let at = at_minute.rem_euclid(MINUTES_PER_DAY);
-    format!("{:02}:{:02}", at / 60, at % 60)
-}
-
-/// When a task with this cadence next comes due after `from`.
-///
-/// With a time of day, runs land on that minute and the interval steps whole
-/// days from it, so "every day at 03:00" is 03:00 every day rather than 24
-/// hours after whenever the last run happened to finish. Without one, the
-/// interval simply runs from now.
-pub fn next_run(from: DateTime<Utc>, interval_minutes: i64, at_minute: Option<i64>) -> DateTime<Utc> {
-    let interval = interval_minutes.clamp(MIN_INTERVAL_MINUTES, MAX_INTERVAL_MINUTES);
-
-    let Some(at) = at_minute.filter(|_| interval % MINUTES_PER_DAY == 0) else {
-        return from + Duration::minutes(interval);
-    };
-
-    let midnight = from.date_naive().and_hms_opt(0, 0, 0).expect("midnight exists").and_utc();
-    let mut candidate = midnight + Duration::minutes(at.rem_euclid(MINUTES_PER_DAY));
-    while candidate <= from {
-        candidate += Duration::minutes(interval);
-    }
-    candidate
-}
+// ---------------------------------------------------------------- storage
 
 fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Option<Task> {
     let id: String = row.get("id");
     Some(Task {
-        /* A row whose job no longer exists — an id removed in an upgrade —
-           is skipped rather than rendered: nothing can run it. */
+        /* A row whose job no longer exists — an id removed in an upgrade — is
+           skipped rather than rendered: nothing can run it. */
         job: jobs::find(&id)?,
         enabled: row.get::<i64, _>("enabled") != 0,
-        interval_minutes: row.get("interval_minutes"),
-        at_minute: row.get("at_minute"),
+        triggers: parse_triggers(&id, row.get::<String, _>("triggers")),
         next_run_at: row.get("next_run_at"),
         last_run_at: row.get("last_run_at"),
         last_status: row.get("last_status"),
         last_summary: row.get("last_summary"),
         last_duration_ms: row.get("last_duration_ms"),
     })
+}
+
+/// Triggers this build understands. One it doesn't — a schedule written by a
+/// newer version — is dropped with a warning rather than failing the load, so
+/// a downgrade costs a trigger and not the whole screen.
+fn parse_triggers(id: &str, stored: String) -> Vec<Trigger> {
+    let Ok(values) = serde_json::from_str::<Vec<Value>>(&stored) else {
+        tracing::warn!("task {id} has unreadable triggers, treating it as on-demand");
+        return Vec::new();
+    };
+
+    values
+        .into_iter()
+        .filter_map(|value| match serde_json::from_value::<Trigger>(value.clone()) {
+            Ok(trigger) => Some(trigger),
+            Err(err) => {
+                tracing::warn!("task {id} has a trigger this build can't read ({err}): {value}");
+                None
+            }
+        })
+        .collect()
+}
+
+fn encode(triggers: &[Trigger]) -> String {
+    serde_json::to_string(triggers).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn default_task(job: &'static Job, config: &crate::config::Config) -> Task {
+    let (enabled, triggers) = job.default_schedule(config);
+    Task {
+        job,
+        enabled,
+        triggers,
+        next_run_at: None,
+        last_run_at: None,
+        last_status: None,
+        last_summary: None,
+        last_duration_ms: None,
+    }
 }
 
 /// Creates the row for every schedulable job that hasn't got one, with the
@@ -173,19 +189,18 @@ pub async fn ensure_rows(state: &AppState) -> Result<(), sqlx::Error> {
     let now = Utc::now();
 
     for job in jobs::JOBS.iter().filter(|job| job.schedulable) {
-        let (enabled, interval, at_minute) = job.default_schedule(&state.config);
-        let first_run = enabled.then(|| (now + Duration::minutes(FIRST_RUN_DELAY_MINUTES)).to_rfc3339());
+        let (enabled, triggers) = job.default_schedule(&state.config);
+        let first_run =
+            enabled.then(|| (now + Duration::minutes(FIRST_RUN_DELAY_MINUTES)).to_rfc3339());
 
         sqlx::query(
-            "INSERT INTO scheduled_tasks
-               (id, enabled, interval_minutes, at_minute, next_run_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?)
+            "INSERT INTO scheduled_tasks (id, enabled, triggers, next_run_at, updated_at)
+             VALUES (?, ?, ?, ?, ?)
              ON CONFLICT(id) DO NOTHING",
         )
         .bind(job.id)
         .bind(enabled as i64)
-        .bind(interval)
-        .bind(at_minute)
+        .bind(encode(&triggers))
         .bind(&first_run)
         .bind(now.to_rfc3339())
         .execute(&state.pool)
@@ -196,8 +211,8 @@ pub async fn ensure_rows(state: &AppState) -> Result<(), sqlx::Error> {
 }
 
 /// Every schedulable job, in catalogue order, whether or not it has a row
-/// yet — a panel that hides a task until the next restart would be lying
-/// about what this server does.
+/// yet — a panel that hides a task until the next restart would be lying about
+/// what this server does.
 pub async fn list(state: &AppState) -> Result<Vec<Task>, sqlx::Error> {
     let rows = sqlx::query("SELECT * FROM scheduled_tasks")
         .fetch_all(&state.pool)
@@ -220,21 +235,6 @@ pub async fn list(state: &AppState) -> Result<Vec<Task>, sqlx::Error> {
         .collect())
 }
 
-fn default_task(job: &'static Job, config: &crate::config::Config) -> Task {
-    let (enabled, interval_minutes, at_minute) = job.default_schedule(config);
-    Task {
-        job,
-        enabled,
-        interval_minutes,
-        at_minute,
-        next_run_at: None,
-        last_run_at: None,
-        last_status: None,
-        last_summary: None,
-        last_duration_ms: None,
-    }
-}
-
 pub async fn get(state: &AppState, id: &str) -> ApiResult<Task> {
     let job = jobs::find(id)
         .filter(|job| job.schedulable)
@@ -251,55 +251,58 @@ pub async fn get(state: &AppState, id: &str) -> ApiResult<Task> {
         .unwrap_or_else(|| default_task(job, &state.config)))
 }
 
-/// Applies an operator's edit and recomputes when the task next comes due.
+/// Applies an operator's edit and recomputes when a timer next comes due.
 ///
-/// Every change re-anchors the next run to now, so moving a daily job from
-/// 03:00 to 04:00 takes effect tonight rather than after one more run at the
-/// old time.
+/// Every change re-anchors the timers to now, so moving a daily job from 03:00
+/// to 04:00 takes effect tonight rather than after one more run at the old
+/// time.
 pub async fn update(
     state: &AppState,
     id: &str,
     enabled: Option<bool>,
-    interval_minutes: Option<i64>,
-    at_minute: Option<Option<i64>>,
+    triggers: Option<Vec<Trigger>>,
 ) -> ApiResult<Task> {
     let current = get(state, id).await?;
 
     let enabled = enabled.unwrap_or(current.enabled);
-    let interval = interval_minutes.unwrap_or(current.interval_minutes);
-    let at = at_minute.unwrap_or(current.at_minute);
+    let triggers = triggers.unwrap_or(current.triggers);
 
-    if !(MIN_INTERVAL_MINUTES..=MAX_INTERVAL_MINUTES).contains(&interval) {
+    if triggers.len() > MAX_TRIGGERS {
         return Err(ApiError::bad_request(format!(
-            "the interval must be between {MIN_INTERVAL_MINUTES} minutes and {} days",
-            MAX_INTERVAL_MINUTES / MINUTES_PER_DAY
+            "a task can carry at most {MAX_TRIGGERS} triggers"
         )));
     }
-
-    if let Some(minute) = at {
-        if !(0..MINUTES_PER_DAY).contains(&minute) {
-            return Err(ApiError::bad_request("the run time must be a minute of the day"));
-        }
+    for trigger in &triggers {
+        trigger.validate(id).map_err(ApiError::bad_request)?;
     }
 
     let now = Utc::now();
-    let next = enabled.then(|| next_run(now, interval, at).to_rfc3339());
+    let pending = Task {
+        job: current.job,
+        enabled,
+        triggers,
+        next_run_at: None,
+        last_run_at: current.last_run_at,
+        last_status: current.last_status,
+        last_summary: current.last_summary,
+        last_duration_ms: current.last_duration_ms,
+    };
+    let next = enabled
+        .then(|| pending.next_timer_run(now).map(|at| at.to_rfc3339()))
+        .flatten();
 
     sqlx::query(
-        "INSERT INTO scheduled_tasks
-           (id, enabled, interval_minutes, at_minute, next_run_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)
+        "INSERT INTO scheduled_tasks (id, enabled, triggers, next_run_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            enabled = excluded.enabled,
-           interval_minutes = excluded.interval_minutes,
-           at_minute = excluded.at_minute,
+           triggers = excluded.triggers,
            next_run_at = excluded.next_run_at,
            updated_at = excluded.updated_at",
     )
     .bind(id)
     .bind(enabled as i64)
-    .bind(interval)
-    .bind(at)
+    .bind(encode(&pending.triggers))
     .bind(&next)
     .bind(now.to_rfc3339())
     .execute(&state.pool)
@@ -308,28 +311,14 @@ pub async fn update(
     get(state, id).await
 }
 
-/// Where a run came from. Only two things start one.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Trigger {
-    Schedule,
-    Manual,
-}
+// -------------------------------------------------------------- running
 
-impl Trigger {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Trigger::Schedule => "schedule",
-            Trigger::Manual => "manual",
-        }
-    }
-}
-
-/// Runs a task now, records the run, and re-arms the timer.
+/// Runs a task now, records the run, and re-arms its timers.
 ///
-/// One run of a job at a time, whichever trigger asks: the timer coming due
-/// while an operator's "run now" is still going would have two VACUUMs, or
-/// two backups a second apart, competing over the same database.
-pub async fn run(state: &AppState, id: &str, trigger: Trigger) -> ApiResult<Value> {
+/// One run of a job at a time, whichever trigger asks: a timer coming due
+/// while an operator's "run now" is still going would have two VACUUMs, or two
+/// backups a second apart, competing over the same database.
+pub async fn run(state: &AppState, id: &str, reason: Reason) -> ApiResult<Value> {
     let task = get(state, id).await?;
 
     /* The claim is held by a guard rather than released by the line after the
@@ -343,7 +332,7 @@ pub async fn run(state: &AppState, id: &str, trigger: Trigger) -> ApiResult<Valu
     };
 
     let started = Utc::now();
-    let outcome = jobs::run(state, id, trigger.as_str()).await;
+    let outcome = jobs::run(state, id, reason.kind()).await;
     let finished = Utc::now();
 
     let (status, summary, detail) = match &outcome {
@@ -360,7 +349,7 @@ pub async fn run(state: &AppState, id: &str, trigger: Trigger) -> ApiResult<Valu
     };
 
     let recorded = Recorded {
-        trigger,
+        reason,
         started,
         finished,
         status,
@@ -369,21 +358,22 @@ pub async fn run(state: &AppState, id: &str, trigger: Trigger) -> ApiResult<Valu
     };
     record_run(state, id, &recorded).await;
 
-    /* The next run is measured from the end of this one whichever trigger
-       started it: an operator who runs a daily job by hand at noon should not
-       then get the scheduled one an hour later. */
+    /* The next timer run is measured from the end of this one whichever
+       trigger started it: an operator who runs a daily job by hand at noon
+       should not then get the scheduled one an hour later. */
     let next = task
         .enabled
-        .then(|| next_run(finished, task.interval_minutes, task.at_minute).to_rfc3339());
+        .then(|| task.next_timer_run(finished).map(|at| at.to_rfc3339()))
+        .flatten();
 
     /* Upserted rather than updated: the first thing a fresh server does may
        well be an operator pressing "Run now", and the outcome of that run
        still has to land somewhere. */
     let update = sqlx::query(
         "INSERT INTO scheduled_tasks
-           (id, enabled, interval_minutes, at_minute, next_run_at, updated_at,
+           (id, enabled, triggers, next_run_at, updated_at,
             last_run_at, last_status, last_summary, last_duration_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            next_run_at = excluded.next_run_at,
            last_run_at = excluded.last_run_at,
@@ -393,8 +383,7 @@ pub async fn run(state: &AppState, id: &str, trigger: Trigger) -> ApiResult<Valu
     )
     .bind(id)
     .bind(task.enabled as i64)
-    .bind(task.interval_minutes)
-    .bind(task.at_minute)
+    .bind(encode(&task.triggers))
     .bind(&next)
     .bind(finished.to_rfc3339())
     .bind(started.to_rfc3339())
@@ -410,11 +399,11 @@ pub async fn run(state: &AppState, id: &str, trigger: Trigger) -> ApiResult<Valu
 
     let title = task.job.title;
     let summary = &recorded.summary;
-    let event = match (trigger, recorded.status) {
+    let event = match (&recorded.reason, recorded.status) {
         (_, "error") => {
             Event::system("system.task.failed", format!("{title} failed: {summary}")).warning()
         }
-        (Trigger::Manual, _) => Event::admin(
+        (Reason::Manual, _) => Event::admin(
             "admin.task.run",
             format!("Ran {title} by hand — {summary}"),
         ),
@@ -425,7 +414,8 @@ pub async fn run(state: &AppState, id: &str, trigger: Trigger) -> ApiResult<Valu
         state,
         event.detail(json!({
             "task": id,
-            "trigger": trigger.as_str(),
+            "trigger": recorded.reason.kind(),
+            "reason": recorded.reason.detail(),
             "durationMs": recorded.duration_ms(),
             "result": recorded.detail,
         })),
@@ -436,8 +426,8 @@ pub async fn run(state: &AppState, id: &str, trigger: Trigger) -> ApiResult<Valu
 }
 
 /// The set of running jobs. A poisoned lock is recovered rather than
-/// propagated: it holds nothing but ids, and refusing every future run
-/// because one job panicked would be the worse failure.
+/// propagated: it holds nothing but ids, and refusing every future run because
+/// one job panicked would be the worse failure.
 fn running(state: &AppState) -> std::sync::MutexGuard<'_, std::collections::HashSet<String>> {
     state
         .running_tasks
@@ -474,7 +464,7 @@ impl Drop for Claim {
 
 /// One run, as it goes into the log and onto the task's row.
 struct Recorded {
-    trigger: Trigger,
+    reason: Reason,
     started: DateTime<Utc>,
     finished: DateTime<Utc>,
     /// "ok" | "error"
@@ -492,11 +482,12 @@ impl Recorded {
 async fn record_run(state: &AppState, id: &str, run: &Recorded) {
     let insert = sqlx::query(
         "INSERT INTO scheduled_task_runs
-           (task_id, trigger, started_at, finished_at, duration_ms, status, summary, detail)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+           (task_id, trigger, reason, started_at, finished_at, duration_ms, status, summary, detail)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id)
-    .bind(run.trigger.as_str())
+    .bind(run.reason.kind())
+    .bind(run.reason.detail())
     .bind(run.started.to_rfc3339())
     .bind(run.finished.to_rfc3339())
     .bind(run.duration_ms())
@@ -512,8 +503,8 @@ async fn record_run(state: &AppState, id: &str, run: &Recorded) {
     }
 
     /* Trimmed here rather than by a job of its own: the log of a task that
-       runs every fifteen minutes is the one that would grow, and it trims
-       itself every time it does. */
+       runs every five minutes is the one that would grow, and it trims itself
+       every time it does. */
     let trimmed = sqlx::query(
         "DELETE FROM scheduled_task_runs
           WHERE task_id = ?
@@ -549,6 +540,7 @@ pub async fn runs(state: &AppState, id: &str, limit: i64) -> ApiResult<Vec<Value
             json!({
                 "id": row.get::<i64, _>("id"),
                 "trigger": row.get::<String, _>("trigger"),
+                "reason": row.get::<Option<String>, _>("reason"),
                 "startedAt": row.get::<String, _>("started_at"),
                 "finishedAt": row.get::<String, _>("finished_at"),
                 "durationMs": row.get::<i64, _>("duration_ms"),
@@ -562,32 +554,192 @@ pub async fn runs(state: &AppState, id: &str, limit: i64) -> ApiResult<Vec<Value
         .collect())
 }
 
-/// The tasks the timer would start right now.
-async fn due(state: &AppState, now: DateTime<Utc>) -> Result<Vec<String>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT id FROM scheduled_tasks
-          WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
-          ORDER BY next_run_at",
-    )
-    .bind(now.to_rfc3339())
-    .fetch_all(&state.pool)
-    .await?;
+// ------------------------------------------------------------ the timer
 
-    /* Only ids this build knows how to run: a row left behind by a job that
-       was removed must not be picked up every tick forever. */
-    Ok(rows
-        .iter()
-        .map(|row| row.get::<String, _>("id"))
-        .filter(|id| jobs::find(id).is_some_and(|job| job.schedulable))
-        .collect())
+/// Whether any of a task's triggers is asking for a run right now, and which.
+///
+/// The timer is a stored timestamp; the rest are questions asked of the
+/// database each tick — "has that task finished since I last ran", "has one of
+/// these events been recorded", "is that number over the line". Polling them
+/// rather than hooking into the write path keeps every trigger the same shape
+/// and costs one small query each, only for the tasks that declare one.
+async fn asking_to_run(state: &AppState, task: &Task, now: DateTime<Utc>) -> Option<Reason> {
+    if !task.enabled {
+        return None;
+    }
+
+    let last_run = task.last_run_at.as_deref().and_then(parse_time);
+
+    for trigger in &task.triggers {
+        let fired = match trigger {
+            Trigger::Every { .. } => task
+                .next_run_at
+                .as_deref()
+                .and_then(parse_time)
+                .is_some_and(|next| next <= now)
+                .then(|| Reason::Timer(trigger.label())),
+
+            Trigger::Startup { delay_minutes } => {
+                let due = state.started_at + Duration::minutes(*delay_minutes);
+                /* Once per boot: a run recorded after this process started is
+                   this boot's run. */
+                (now >= due && last_run.is_none_or(|last| last < state.started_at))
+                    .then_some(Reason::Startup)
+            }
+
+            Trigger::AfterTask {
+                task: parent,
+                delay_minutes,
+            } => after_task(state, parent, *delay_minutes, last_run, now).await,
+
+            Trigger::OnEvent {
+                kinds,
+                min_gap_minutes,
+            } => {
+                if !gap_elapsed(last_run, *min_gap_minutes, now) {
+                    None
+                } else {
+                    recent_event(state, kinds, last_run, now).await.map(Reason::Event)
+                }
+            }
+
+            Trigger::Condition {
+                metric,
+                comparison,
+                value,
+                min_gap_minutes,
+            } => {
+                if !gap_elapsed(last_run, *min_gap_minutes, now) {
+                    None
+                } else {
+                    triggers::condition_holds(state, *metric, *comparison, *value)
+                        .await
+                        .map(|measured| {
+                            Reason::Condition(format!(
+                                "{} — {measured} now",
+                                trigger.label()
+                            ))
+                        })
+                }
+            }
+        };
+
+        if fired.is_some() {
+            return fired;
+        }
+    }
+
+    None
 }
 
-/// The timer. One tick every [`TICK_SECONDS`], running whatever is due, in
-/// sequence — two heavy jobs coming due in the same minute should queue
-/// rather than fight over the database.
+/// Has `parent` finished successfully since this task last ran?
+async fn after_task(
+    state: &AppState,
+    parent: &str,
+    delay_minutes: i64,
+    last_run: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Option<Reason> {
+    let row = sqlx::query("SELECT last_run_at, last_status FROM scheduled_tasks WHERE id = ?")
+        .bind(parent)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten()?;
+
+    if row.get::<Option<String>, _>("last_status").as_deref() != Some("ok") {
+        return None;
+    }
+
+    let finished = row
+        .get::<Option<String>, _>("last_run_at")
+        .as_deref()
+        .and_then(parse_time)?;
+
+    let fresh = last_run.is_none_or(|last| finished > last);
+    let waited = now >= finished + Duration::minutes(delay_minutes);
+
+    (fresh && waited).then(|| {
+        let title = jobs::find(parent).map_or(parent, |job| job.title);
+        Reason::After(format!("{title} finished"))
+    })
+}
+
+/// The most recent event matching any of these kind prefixes, if one landed
+/// since this task last ran.
+async fn recent_event(
+    state: &AppState,
+    kinds: &[String],
+    last_run: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    /* Without a previous run, look back over the tick rather than over all of
+       history: a task added today should not fire for something that happened
+       last month. */
+    let since = last_run.unwrap_or(now - Duration::seconds(TICK_SECONDS as i64 * 2));
+
+    let mut sql = String::from("SELECT kind, summary FROM events WHERE at > ?");
+    if !kinds.is_empty() {
+        let clauses = kinds
+            .iter()
+            .map(|_| "kind LIKE ? ESCAPE '\\'")
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        sql.push_str(&format!(" AND ({clauses})"));
+    }
+    sql.push_str(" ORDER BY at DESC LIMIT 1");
+
+    let mut query = sqlx::query(&sql).bind(since.to_rfc3339());
+    for kind in kinds {
+        /* Prefix match: "cloud_save." keeps matching a kind added later. The
+           operator's own wildcards are escaped so they stay literal. */
+        query = query.bind(format!("{}%", escape_like(kind.trim())));
+    }
+
+    let row = query.fetch_optional(&state.pool).await.ok().flatten()?;
+    Some(format!(
+        "{} — {}",
+        row.get::<String, _>("kind"),
+        row.get::<String, _>("summary")
+    ))
+}
+
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+fn gap_elapsed(last_run: Option<DateTime<Utc>>, min_gap_minutes: i64, now: DateTime<Utc>) -> bool {
+    last_run.is_none_or(|last| now >= last + Duration::minutes(min_gap_minutes.max(0)))
+}
+
+fn parse_time(raw: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|time| time.with_timezone(&Utc))
+}
+
+/// Everything asking to run right now, in catalogue order.
+async fn due(state: &AppState, now: DateTime<Utc>) -> Result<Vec<(String, Reason)>, sqlx::Error> {
+    let mut pending = Vec::new();
+
+    for task in list(state).await? {
+        if let Some(reason) = asking_to_run(state, &task, now).await {
+            pending.push((task.job.id.to_string(), reason));
+        }
+    }
+
+    Ok(pending)
+}
+
+/// The timer. One tick every [`TICK_SECONDS`], running whatever is asking, in
+/// sequence — two heavy jobs coming due in the same minute should queue rather
+/// than fight over the database.
 ///
-/// A run missed while the server was down fires once on the next tick after
-/// it comes back, not once per missed period: the next time is stored, not
+/// A run missed while the server was down fires once on the next tick after it
+/// comes back, not once per missed period: the next time is stored, not
 /// derived from a count.
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
@@ -600,21 +752,24 @@ pub fn spawn(state: AppState) {
         loop {
             ticker.tick().await;
 
-            let ids = match due(&state, Utc::now()).await {
-                Ok(ids) => ids,
+            let pending = match due(&state, Utc::now()).await {
+                Ok(pending) => pending,
                 Err(err) => {
                     tracing::warn!("failed to read the schedule: {err}");
                     continue;
                 }
             };
 
-            for id in ids {
-                match run(&state, &id, Trigger::Schedule).await {
+            for (id, reason) in pending {
+                let kind = reason.kind();
+                match run(&state, &id, reason).await {
                     Ok(result) => tracing::info!(
-                        "scheduled task {id}: {}",
+                        "task {id} ran ({kind}): {}",
                         result["summary"].as_str().unwrap_or("done")
                     ),
-                    Err(error) => tracing::warn!("scheduled task {id} failed: {}", error.message),
+                    Err(error) => {
+                        tracing::warn!("task {id} ({kind}) failed: {}", error.message)
+                    }
                 }
             }
         }
@@ -624,6 +779,7 @@ pub fn spawn(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::triggers::{Comparison, Metric, Unit};
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -636,7 +792,8 @@ mod tests {
 
     impl TestServer {
         async fn start() -> Self {
-            let dir = std::env::temp_dir().join(format!("hydra-schedule-test-{}", uuid::Uuid::new_v4()));
+            let dir =
+                std::env::temp_dir().join(format!("hydra-schedule-test-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&dir).expect("scratch directory");
 
             let mut config = crate::config::Config::for_test();
@@ -673,7 +830,21 @@ mod tests {
                 presence: Default::default(),
             };
 
-            Self { state, dir }
+            let server = Self { state, dir };
+            ensure_rows(&server.state).await.expect("the schedule");
+            server
+        }
+
+        /// The reason a task would run right now, if any.
+        async fn asking(&self, id: &str) -> Option<Reason> {
+            let task = get(&self.state, id).await.expect("the task");
+            asking_to_run(&self.state, &task, Utc::now()).await
+        }
+
+        async fn set(&self, id: &str, triggers: Vec<Trigger>) {
+            update(&self.state, id, Some(true), Some(triggers))
+                .await
+                .expect("a schedule the server accepts");
         }
     }
 
@@ -683,53 +854,14 @@ mod tests {
         }
     }
 
-    fn at(time: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(time)
-            .expect("a timestamp")
-            .with_timezone(&Utc)
-    }
-
-    /// "Every day at 03:00" has to mean 03:00 — not "24 hours after whenever
-    /// the last run finished", which drifts an hour further into the morning
-    /// every time a run takes a minute.
-    #[test]
-    fn a_daily_task_lands_on_its_time_of_day() {
-        let day = MINUTES_PER_DAY;
-
-        assert_eq!(
-            next_run(at("2026-08-30T14:20:00Z"), day, Some(180)),
-            at("2026-08-31T03:00:00Z"),
-        );
-        /* Before today's slot: today, not tomorrow. */
-        assert_eq!(
-            next_run(at("2026-08-30T02:59:00Z"), day, Some(180)),
-            at("2026-08-30T03:00:00Z"),
-        );
-        /* Exactly on it: the next one, so a run can never re-trigger itself. */
-        assert_eq!(
-            next_run(at("2026-08-30T03:00:00Z"), day, Some(180)),
-            at("2026-08-31T03:00:00Z"),
-        );
-        /* Weekly steps whole weeks from that same time of day. */
-        assert_eq!(
-            next_run(at("2026-08-30T05:00:00Z"), 7 * day, Some(4 * 60 + 30)),
-            at("2026-09-06T04:30:00Z"),
-        );
-    }
-
-    /// A cadence shorter than a day has no time of day to land on, so it runs
-    /// an interval from now — and says so rather than pretending otherwise.
-    #[test]
-    fn a_sub_daily_task_runs_an_interval_from_now() {
-        assert_eq!(
-            next_run(at("2026-08-30T14:20:00Z"), 360, Some(180)),
-            at("2026-08-30T20:20:00Z"),
-        );
-        assert_eq!(schedule_label(true, 360, None), "every 6 hours");
-        assert_eq!(schedule_label(true, 1440, Some(180)), "every day at 03:00 UTC");
-        assert_eq!(schedule_label(true, 7 * 1440, Some(0)), "every week at 00:00 UTC");
-        assert_eq!(schedule_label(false, 1440, Some(180)), "off");
-        assert_eq!(frequency_label(30), "every 30 minutes");
+    fn every(count: i64, unit: Unit, at_minute: Option<i64>) -> Trigger {
+        Trigger::Every {
+            count,
+            unit,
+            at_minute,
+            weekday: None,
+            day: None,
+        }
     }
 
     /// Every job the schedule offers has to survive a real run against a real
@@ -737,10 +869,9 @@ mod tests {
     #[tokio::test]
     async fn every_scheduled_job_runs_against_a_real_database() {
         let server = TestServer::start().await;
-        ensure_rows(&server.state).await.expect("the schedule");
 
         for job in jobs::JOBS.iter().filter(|job| job.schedulable) {
-            let result = run(&server.state, job.id, Trigger::Manual)
+            let result = run(&server.state, job.id, Reason::Manual)
                 .await
                 .unwrap_or_else(|err| panic!("{} failed: {}", job.id, err.message));
 
@@ -752,7 +883,10 @@ mod tests {
 
             let task = get(&server.state, job.id).await.expect("the task");
             assert_eq!(task.last_status.as_deref(), Some("ok"), "{}", job.id);
-            assert_eq!(runs(&server.state, job.id, 10).await.expect("its log").len(), 1);
+
+            let log = runs(&server.state, job.id, 10).await.expect("its log");
+            assert_eq!(log.len(), 1);
+            assert_eq!(log[0]["trigger"], "manual");
         }
     }
 
@@ -761,14 +895,11 @@ mod tests {
     #[tokio::test]
     async fn a_restart_leaves_an_edited_schedule_alone() {
         let server = TestServer::start().await;
-        ensure_rows(&server.state).await.expect("the schedule");
 
-        update(&server.state, "prune-events", Some(false), None, None)
+        update(&server.state, "prune-events", Some(false), None)
             .await
             .expect("switching it off");
-        update(&server.state, "gc-blobs", None, Some(6 * 60), Some(None))
-            .await
-            .expect("retiming it");
+        server.set("gc-blobs", vec![every(6, Unit::Hour, None)]).await;
 
         ensure_rows(&server.state).await.expect("the second start");
 
@@ -777,79 +908,281 @@ mod tests {
         assert!(pruning.next_run_at.is_none(), "a disabled task has no next run");
 
         let collecting = get(&server.state, "gc-blobs").await.expect("the task");
-        assert_eq!(collecting.interval_minutes, 360);
+        assert_eq!(collecting.triggers, vec![every(6, Unit::Hour, None)]);
         assert!(collecting.next_run_at.is_some());
     }
 
-    /// What the timer picks up: enabled, due, and nothing else.
+    /// The timer picks up what is due, and nothing else.
     #[tokio::test]
     async fn only_enabled_tasks_that_are_due_come_up() {
         let server = TestServer::start().await;
-        ensure_rows(&server.state).await.expect("the schedule");
 
         /* Seeded a few minutes out, so nothing is due yet. */
         assert!(due(&server.state, Utc::now()).await.expect("the queue").is_empty());
 
-        let due_now = due(&server.state, Utc::now() + Duration::hours(1))
+        let later = due(&server.state, Utc::now() + Duration::hours(1))
             .await
             .expect("the queue");
-        assert!(due_now.contains(&"prune-events".to_string()));
+        assert!(later.iter().any(|(id, _)| id == "prune-events"));
         assert!(
-            !due_now.contains(&"vacuum".to_string()),
+            !later.iter().any(|(id, _)| id == "vacuum"),
             "compaction is off by default and must stay off"
         );
+        assert!(matches!(later[0].1, Reason::Timer(_)));
 
-        update(&server.state, "prune-events", Some(false), None, None)
+        update(&server.state, "prune-events", Some(false), None)
             .await
             .expect("switching it off");
         assert!(!due(&server.state, Utc::now() + Duration::hours(1))
             .await
             .expect("the queue")
-            .contains(&"prune-events".to_string()));
+            .iter()
+            .any(|(id, _)| id == "prune-events"));
     }
 
-    /// Two runs of the same job at once would have two VACUUMs, or two
-    /// backups a second apart, competing over one database — so the second
-    /// one is refused, and the claim is released however the first ends.
+    /// A startup trigger fires once for the boot it belongs to, not on every
+    /// tick for the rest of the process's life.
+    #[tokio::test]
+    async fn a_startup_trigger_fires_once_per_boot() {
+        let server = TestServer::start().await;
+        server
+            .set("vacuum", vec![Trigger::Startup { delay_minutes: 0 }])
+            .await;
+
+        assert!(matches!(server.asking("vacuum").await, Some(Reason::Startup)));
+
+        run(&server.state, "vacuum", Reason::Startup)
+            .await
+            .expect("the compaction");
+
+        assert!(
+            server.asking("vacuum").await.is_none(),
+            "it already ran for this boot"
+        );
+    }
+
+    /// A task can follow another one, which is how "collect the blobs the
+    /// backup just made stale" gets said.
+    #[tokio::test]
+    async fn a_task_can_follow_another() {
+        let server = TestServer::start().await;
+        server
+            .set(
+                "gc-blobs",
+                vec![Trigger::AfterTask {
+                    task: "backup".to_string(),
+                    delay_minutes: 0,
+                }],
+            )
+            .await;
+
+        assert!(server.asking("gc-blobs").await.is_none(), "the backup hasn't run");
+
+        run(&server.state, "backup", Reason::Manual)
+            .await
+            .expect("a backup");
+        assert!(matches!(server.asking("gc-blobs").await, Some(Reason::After(_))));
+
+        /* Following it once is following it: the same backup must not start
+           the collection again on every tick after that. */
+        run(&server.state, "gc-blobs", Reason::After("backup".to_string()))
+            .await
+            .expect("the collection");
+        assert!(server.asking("gc-blobs").await.is_none());
+    }
+
+    /// A measured number crossing a line is a trigger like any other — and
+    /// stops being one as soon as the job it started has fixed it.
+    #[tokio::test]
+    async fn a_condition_starts_a_task_and_then_stops_asking() {
+        let server = TestServer::start().await;
+        server
+            .set(
+                "prune-events",
+                vec![Trigger::Condition {
+                    metric: Metric::ExpiredEvents,
+                    comparison: Comparison::Above,
+                    value: 2,
+                    min_gap_minutes: 0,
+                }],
+            )
+            .await;
+
+        assert!(server.asking("prune-events").await.is_none(), "nothing has expired");
+
+        let stale = (Utc::now() - Duration::days(400)).to_rfc3339();
+        for index in 0..5 {
+            sqlx::query(
+                "INSERT INTO events (at, kind, category, severity, summary)
+                 VALUES (?, 'test.old', 'system', 'info', ?)",
+            )
+            .bind(&stale)
+            .bind(format!("an old event {index}"))
+            .execute(&server.state.pool)
+            .await
+            .expect("an event past the window");
+        }
+
+        let Some(Reason::Condition(detail)) = server.asking("prune-events").await else {
+            panic!("five events past the window is over a threshold of two");
+        };
+        assert!(detail.contains('5'), "the reason says what it saw: {detail}");
+
+        run(&server.state, "prune-events", Reason::Condition(detail))
+            .await
+            .expect("the prune");
+
+        assert!(
+            server.asking("prune-events").await.is_none(),
+            "the prune fixed what the condition was watching"
+        );
+    }
+
+    /// An event trigger fires for something recorded since the task last ran,
+    /// and respects the gap an operator set on it.
+    #[tokio::test]
+    async fn an_event_trigger_waits_for_its_kind_and_its_gap() {
+        let server = TestServer::start().await;
+        server
+            .set(
+                "sweep-pending",
+                vec![Trigger::OnEvent {
+                    kinds: vec!["cloud_save.".to_string()],
+                    min_gap_minutes: 0,
+                }],
+            )
+            .await;
+
+        crate::events::record(
+            &server.state,
+            Event::system("system.started", "Server started"),
+        )
+        .await;
+        assert!(
+            server.asking("sweep-pending").await.is_none(),
+            "a kind it isn't listening for"
+        );
+
+        crate::events::record(
+            &server.state,
+            Event::sync("cloud_save.committed", "alice", "Synced a cloud save"),
+        )
+        .await;
+        let Some(Reason::Event(detail)) = server.asking("sweep-pending").await else {
+            panic!("the kind it listens for was recorded");
+        };
+        assert!(detail.contains("cloud_save.committed"), "{detail}");
+
+        /* A gap the operator set is a floor on how often it may fire. */
+        run(&server.state, "sweep-pending", Reason::Event(detail))
+            .await
+            .expect("the sweep");
+        server
+            .set(
+                "sweep-pending",
+                vec![Trigger::OnEvent {
+                    kinds: vec!["cloud_save.".to_string()],
+                    min_gap_minutes: 120,
+                }],
+            )
+            .await;
+
+        crate::events::record(
+            &server.state,
+            Event::sync("cloud_save.committed", "alice", "Synced another"),
+        )
+        .await;
+        assert!(
+            server.asking("sweep-pending").await.is_none(),
+            "it swept two minutes ago; the gap says wait"
+        );
+    }
+
+    /// Two runs of the same job at once would have two VACUUMs, or two backups
+    /// a second apart, competing over one database — so the second one is
+    /// refused, and the claim is released however the first ends.
     #[tokio::test]
     async fn a_job_only_runs_once_at_a_time() {
         let server = TestServer::start().await;
-        ensure_rows(&server.state).await.expect("the schedule");
 
         {
             let _held = Claim::take(&server.state, "vacuum").expect("the first claim");
             assert!(is_running(&server.state, "vacuum"));
             assert!(Claim::take(&server.state, "vacuum").is_none());
 
-            let refusal = run(&server.state, "vacuum", Trigger::Manual)
+            let refusal = run(&server.state, "vacuum", Reason::Manual)
                 .await
                 .expect_err("something else is already compacting");
             assert_eq!(refusal.status, StatusCode::CONFLICT);
         }
 
-        /* The guard is gone, so the job is runnable again. */
         assert!(!is_running(&server.state, "vacuum"));
-        run(&server.state, "vacuum", Trigger::Manual)
+        run(&server.state, "vacuum", Reason::Manual)
             .await
             .expect("the claim was released");
     }
 
-    /// An interval nobody could have meant is refused rather than stored: a
-    /// one-minute VACUUM loop is a broken server, not a fast schedule.
+    /// A schedule the server can't keep is refused when it is saved, and the
+    /// refused edit changes nothing.
     #[tokio::test]
-    async fn the_cadence_has_to_be_one_a_server_can_keep() {
+    async fn a_schedule_the_server_cannot_keep_is_refused() {
         let server = TestServer::start().await;
-        ensure_rows(&server.state).await.expect("the schedule");
+        let before = get(&server.state, "vacuum").await.expect("the task").triggers;
 
-        assert!(update(&server.state, "vacuum", None, Some(1), None).await.is_err());
-        assert!(update(&server.state, "vacuum", None, Some(400 * 24 * 60), None).await.is_err());
-        assert!(update(&server.state, "vacuum", None, None, Some(Some(1500))).await.is_err());
-        assert!(update(&server.state, "delete-orphan-files", Some(true), None, None)
+        assert!(update(
+            &server.state,
+            "vacuum",
+            None,
+            Some(vec![every(1, Unit::Minute, None)])
+        )
+        .await
+        .is_err());
+
+        assert!(update(
+            &server.state,
+            "vacuum",
+            None,
+            Some(vec![every(1, Unit::Day, None); MAX_TRIGGERS + 1])
+        )
+        .await
+        .is_err());
+
+        assert!(update(&server.state, "delete-orphan-files", Some(true), None)
             .await
             .is_err(), "a job that takes arguments has no schedule to edit");
 
-        /* And the edit that was refused changed nothing. */
-        let task = get(&server.state, "vacuum").await.expect("the task");
-        assert_eq!(task.interval_minutes, 7 * MINUTES_PER_DAY);
+        assert_eq!(get(&server.state, "vacuum").await.expect("the task").triggers, before);
+    }
+
+    /// Several triggers on one task all count, and the soonest timer decides
+    /// the next run.
+    #[tokio::test]
+    async fn a_task_can_carry_several_triggers() {
+        let server = TestServer::start().await;
+        server
+            .set(
+                "gc-blobs",
+                vec![
+                    every(1, Unit::Day, Some(4 * 60)),
+                    every(6, Unit::Hour, None),
+                    Trigger::AfterTask {
+                        task: "backup".to_string(),
+                        delay_minutes: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let task = get(&server.state, "gc-blobs").await.expect("the task");
+        assert_eq!(task.triggers.len(), 3);
+        assert!(task.summary().contains(" · "), "{}", task.summary());
+
+        /* The six-hourly timer is sooner than tomorrow's four o'clock. */
+        let next = task.next_run_at.as_deref().and_then(parse_time).expect("a next run");
+        assert!(next <= Utc::now() + Duration::hours(6) + Duration::minutes(1));
+
+        /* And the trigger that waits still fires when its task finishes. */
+        run(&server.state, "backup", Reason::Manual).await.expect("a backup");
+        assert!(matches!(server.asking("gc-blobs").await, Some(Reason::After(_))));
     }
 }

@@ -318,7 +318,9 @@ function actionCard(action, ctx) {
 function scheduleLine(action) {
   if (!action.schedule) return null;
 
-  const scheduled = action.schedule !== "off";
+  /* "off" is paused; "on demand only" is a task whose triggers were all
+     removed. Neither is something that runs on its own. */
+  const scheduled = !["off", "on demand only"].includes(action.schedule);
   return h(
     "div",
     { class: "row", style: { gap: "6px" } },

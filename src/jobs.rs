@@ -11,6 +11,7 @@
 
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
+use crate::triggers::{Trigger, Unit};
 use crate::{cloud_saves, games};
 use chrono::{Duration, Utc};
 use serde_json::{json, Value};
@@ -20,9 +21,11 @@ use sqlx::Row;
 /// upload path applies on a user's next sync.
 pub const PENDING_TTL_HOURS: i64 = 24;
 
+/// Minutes in an hour, so a default time of day reads as a clock does.
 const HOUR: i64 = 60;
-const DAY: i64 = 24 * HOUR;
-const WEEK: i64 = 7 * DAY;
+
+/// Weekdays count from Monday, the way `chrono` does.
+const SUNDAY: i64 = 6;
 
 /// One thing the server knows how to do to itself.
 pub struct Job {
@@ -41,9 +44,10 @@ pub struct Job {
     pub schedulable: bool,
     /// Destroys something. The panel makes these confirm first.
     pub danger: bool,
-    /// Cadence a server gets before anyone edits it, in minutes, with the
-    /// minute of the day (UTC) a daily-or-longer run should land on.
-    pub default_interval_minutes: i64,
+    /// Cadence a server gets before anyone edits it: how many `default_unit`s
+    /// apart, and the minute of the day (UTC) a daily-or-longer run lands on.
+    pub default_every: i64,
+    pub default_unit: Unit,
     pub default_at_minute: Option<i64>,
     /// Whether the schedule starts switched on. The two that cost real work —
     /// a store lookup per game, a full rewrite of the database — start off,
@@ -64,7 +68,8 @@ pub const JOBS: &[Job] = &[
         manual: false,
         schedulable: true,
         danger: false,
-        default_interval_minutes: DAY,
+        default_every: 1,
+        default_unit: Unit::Day,
         default_at_minute: Some(3 * HOUR),
         default_enabled: true,
     },
@@ -75,7 +80,8 @@ pub const JOBS: &[Job] = &[
         manual: true,
         schedulable: true,
         danger: false,
-        default_interval_minutes: 6 * HOUR,
+        default_every: 6,
+        default_unit: Unit::Hour,
         default_at_minute: None,
         default_enabled: true,
     },
@@ -86,7 +92,8 @@ pub const JOBS: &[Job] = &[
         manual: true,
         schedulable: true,
         danger: false,
-        default_interval_minutes: DAY,
+        default_every: 1,
+        default_unit: Unit::Day,
         default_at_minute: Some(4 * HOUR),
         default_enabled: true,
     },
@@ -97,7 +104,8 @@ pub const JOBS: &[Job] = &[
         manual: true,
         schedulable: false,
         danger: true,
-        default_interval_minutes: DAY,
+        default_every: 1,
+        default_unit: Unit::Day,
         default_at_minute: None,
         default_enabled: false,
     },
@@ -108,7 +116,8 @@ pub const JOBS: &[Job] = &[
         manual: true,
         schedulable: true,
         danger: false,
-        default_interval_minutes: DAY,
+        default_every: 1,
+        default_unit: Unit::Day,
         default_at_minute: Some(5 * HOUR),
         default_enabled: false,
     },
@@ -119,7 +128,8 @@ pub const JOBS: &[Job] = &[
         manual: true,
         schedulable: false,
         danger: false,
-        default_interval_minutes: DAY,
+        default_every: 1,
+        default_unit: Unit::Day,
         default_at_minute: None,
         default_enabled: false,
     },
@@ -130,7 +140,8 @@ pub const JOBS: &[Job] = &[
         manual: true,
         schedulable: true,
         danger: false,
-        default_interval_minutes: DAY,
+        default_every: 1,
+        default_unit: Unit::Day,
         default_at_minute: Some(3 * HOUR + 30),
         default_enabled: true,
     },
@@ -141,7 +152,8 @@ pub const JOBS: &[Job] = &[
         manual: true,
         schedulable: true,
         danger: false,
-        default_interval_minutes: WEEK,
+        default_every: 1,
+        default_unit: Unit::Week,
         default_at_minute: Some(4 * HOUR + 30),
         default_enabled: false,
     },
@@ -163,30 +175,36 @@ impl Job {
         })
     }
 
-    /// Defaults for this job's first row in `scheduled_tasks`.
+    /// Whether this job starts switched on, and the triggers it starts with.
     ///
     /// The backup is the one that reads the environment: a server that set
     /// `HYDRA_BACKUP_INTERVAL_HOURS` keeps exactly the cadence it had before
     /// there was a schedule to edit, including having it switched off.
-    pub fn default_schedule(&self, config: &crate::config::Config) -> (bool, i64, Option<i64>) {
+    pub fn default_schedule(&self, config: &crate::config::Config) -> (bool, Vec<Trigger>) {
+        let timer = |count, unit, at_minute| Trigger::Every {
+            count,
+            unit,
+            at_minute,
+            weekday: (unit == Unit::Week).then_some(SUNDAY),
+            day: (unit == Unit::Month).then_some(1),
+        };
+
+        let own = timer(self.default_every, self.default_unit, self.default_at_minute);
+
         if self.id != BACKUP {
-            return (
-                self.default_enabled,
-                self.default_interval_minutes,
-                self.default_at_minute,
-            );
+            return (self.default_enabled, vec![own]);
         }
 
         match config.backup_interval_hours {
-            0 => (false, self.default_interval_minutes, self.default_at_minute),
-            hours => {
-                let interval = (hours as i64).saturating_mul(HOUR);
-                /* A time of day only means something for a cadence that is a
-                   whole number of days; "every 6 hours at 03:00" would be a
-                   lie the screen then has to explain. */
-                let at = (interval % DAY == 0).then_some(3 * HOUR);
-                (true, interval, at)
-            }
+            0 => (false, vec![own]),
+            hours if hours % 24 == 0 => (
+                true,
+                vec![timer((hours / 24) as i64, Unit::Day, Some(3 * HOUR))],
+            ),
+            /* A time of day only means something for a cadence that is a whole
+               number of days; "every 6 hours at 03:00" would be a lie the
+               screen then has to explain. */
+            hours => (true, vec![timer(hours as i64, Unit::Hour, None)]),
         }
     }
 }
@@ -397,7 +415,9 @@ async fn vacuum(state: &AppState) -> ApiResult<Value> {
     }))
 }
 
-async fn database_bytes(state: &AppState) -> u64 {
+/// The database and its write-ahead log, as they sit on disk. Read by the
+/// compaction job and by the schedule's size trigger.
+pub async fn database_bytes(state: &AppState) -> u64 {
     let db_path = state.config.database_path();
     let mut total = 0u64;
     for suffix in ["", "-wal", "-shm"] {
@@ -442,10 +462,20 @@ mod tests {
         let mut config = crate::config::Config::for_test();
 
         config.backup_interval_hours = 24;
-        assert_eq!(job.default_schedule(&config), (true, 1440, Some(180)));
+        let (enabled, triggers) = job.default_schedule(&config);
+        assert!(enabled);
+        assert_eq!(triggers[0].label(), "every day at 03:00 UTC");
 
+        /* Not a whole number of days, so it keeps the hours and drops the
+           time of day rather than inventing one. */
         config.backup_interval_hours = 6;
-        assert_eq!(job.default_schedule(&config), (true, 360, None));
+        assert_eq!(job.default_schedule(&config).1[0].label(), "every 6 hours");
+
+        config.backup_interval_hours = 48;
+        assert_eq!(
+            job.default_schedule(&config).1[0].label(),
+            "every 2 days at 03:00 UTC"
+        );
 
         config.backup_interval_hours = 0;
         assert!(!job.default_schedule(&config).0, "0 hours means no scheduled backup");

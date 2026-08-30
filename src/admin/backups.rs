@@ -46,11 +46,7 @@ async fn list(State(state): State<AppState>, _admin: AdminSession) -> ApiResult<
         "directory": state.config.backup_dir().display().to_string(),
         "schedule": {
             "enabled": task.enabled,
-            "label": crate::schedule::schedule_label(
-                task.enabled,
-                task.interval_minutes,
-                task.times_of_day().then_some(task.at_minute).flatten(),
-            ),
+            "label": task.summary(),
             "nextRunAt": task.next_run_at,
             "lastRunAt": task.last_run_at,
             "keep": state.config.backup_keep,

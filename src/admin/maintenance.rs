@@ -43,9 +43,7 @@ async fn catalogue(state: &AppState) -> ApiResult<Vec<Value>> {
         .map(|job| {
             let mut value = job.json();
             if let Some(task) = tasks.iter().find(|task| task.job.id == job.id) {
-                let at = task.times_of_day().then_some(task.at_minute).flatten();
-                value["schedule"] =
-                    json!(schedule::schedule_label(task.enabled, task.interval_minutes, at));
+                value["schedule"] = json!(task.summary());
                 value["nextRunAt"] = json!(task.next_run_at);
             }
             value
@@ -90,7 +88,7 @@ async fn run(
             return Ok(Json(json!({
                 "ok": true,
                 "action": action,
-                "result": schedule::run(&state, &action, schedule::Trigger::Manual).await?,
+                "result": schedule::run(&state, &action, schedule::Reason::Manual).await?,
             })));
         }
 

@@ -28,6 +28,7 @@ mod souvenirs;
 mod sources;
 mod state;
 mod storage;
+mod triggers;
 mod webhooks;
 
 use axum::extract::DefaultBodyLimit;
