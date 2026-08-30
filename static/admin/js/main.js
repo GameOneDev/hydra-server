@@ -24,6 +24,7 @@ import saves from "/assets/admin/js/views/saves.js";
 import games from "/assets/admin/js/views/games.js";
 import storage from "/assets/admin/js/views/storage.js";
 import maintenance from "/assets/admin/js/views/maintenance.js";
+import schedule from "/assets/admin/js/views/schedule.js";
 import webhooks from "/assets/admin/js/views/webhooks.js";
 import settings from "/assets/admin/js/views/settings.js";
 
@@ -36,6 +37,7 @@ register("/games", games);
 register("/games/:shop/:objectId", games.detail);
 register("/storage", storage);
 register("/maintenance", maintenance);
+register("/schedule", schedule);
 register("/webhooks", webhooks);
 register("/settings", settings);
 

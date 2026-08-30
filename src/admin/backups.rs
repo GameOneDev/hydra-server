@@ -36,11 +36,23 @@ async fn list(State(state): State<AppState>, _admin: AdminSession) -> ApiResult<
     let backups = backup::list(&state).await;
     let data_dir = &state.config.data_dir;
 
+    /* The cadence is the scheduled task's, not the environment's: the
+       environment only seeds it, and an operator who has since moved it must
+       not be shown the value they overrode. */
+    let task = crate::schedule::get(&state, crate::jobs::BACKUP).await?;
+
     Ok(Json(json!({
         "backups": backups.iter().map(backup::backup_json).collect::<Vec<_>>(),
         "directory": state.config.backup_dir().display().to_string(),
         "schedule": {
-            "intervalHours": state.config.backup_interval_hours,
+            "enabled": task.enabled,
+            "label": crate::schedule::schedule_label(
+                task.enabled,
+                task.interval_minutes,
+                task.times_of_day().then_some(task.at_minute).flatten(),
+            ),
+            "nextRunAt": task.next_run_at,
+            "lastRunAt": task.last_run_at,
             "keep": state.config.backup_keep,
         },
         "disk": {

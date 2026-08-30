@@ -14,12 +14,14 @@ mod events;
 mod games;
 mod hidden_games;
 mod images;
+mod jobs;
 mod members;
 mod metrics;
 mod playtime;
 mod portal;
 mod presence;
 mod ratelimit;
+mod schedule;
 mod settings;
 mod shares;
 mod souvenirs;
@@ -97,12 +99,14 @@ async fn main() {
         metrics: Arc::new(metrics::Counters::default()),
         uploads: Arc::new(storage::InFlightUploads::default()),
         login_guard: Arc::new(RwLock::new(Default::default())),
+        running_tasks: Arc::new(std::sync::Mutex::new(Default::default())),
         presence: Arc::new(RwLock::new(Default::default())),
     };
 
-    /* Backups and event pruning run in-process: the premise of this server is
-       that it is one binary you start, not a binary plus a cron entry. */
-    backup::spawn_scheduler(app_state.clone());
+    /* Backups, sweeps and pruning run in-process: the premise of this server
+       is that it is one binary you start, not a binary plus a cron entry.
+       What runs, how often and at what time is the Schedule screen's. */
+    schedule::spawn(app_state.clone());
 
     events::record(
         &app_state,

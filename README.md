@@ -94,9 +94,9 @@ subscription needed.
 | `HYDRA_OFFICIAL_LOGIN_PATH` | `/auth/login` | Path on the official API the portal posts its sign-in form to |
 | `HYDRA_METRICS_ENABLED` | `true` | Serve Prometheus metrics at `/metrics` |
 | `HYDRA_METRICS_TOKEN` | *(empty = open)* | Bearer token required to scrape `/metrics` |
-| `HYDRA_BACKUP_INTERVAL_HOURS` | `24` | Hours between automatic database backups (`0` disables them) |
+| `HYDRA_BACKUP_INTERVAL_HOURS` | `24` | Hours between automatic database backups (`0` disables them). Seeds the backup task's cadence the first time the server starts; after that the *Schedule* screen owns it |
 | `HYDRA_BACKUP_KEEP` | `7` | Automatic backups kept before the oldest is pruned |
-| `HYDRA_EVENT_RETENTION_DAYS` | `90` | Days of history kept in the event log |
+| `HYDRA_EVENT_RETENTION_DAYS` | `90` | Days of history kept in the event log. How often the pruning runs is on the *Schedule* screen |
 | `HYDRA_PRESENCE_IDLE_MINUTES` | `15` | Quiet minutes after which a launcher counts as away, so its next call is logged as coming online (`0` switches these events off) |
 
 `HYDRA_MAX_BYTES_PER_USER`, `HYDRA_BACKUPS_PER_GAME_LIMIT` and
@@ -106,7 +106,7 @@ there are stored in the database and override the environment until reset.
 ### Admin panel
 
 Open `https://your-server/admin` and sign in with `HYDRA_ADMIN_PASSWORD`. The
-panel is a full operations console for the server, in nine screens.
+panel is a full operations console for the server, in ten screens.
 
 **Overview** — headline totals (users, storage, cloud saves, backups), a
 30-day activity chart, a live feed of what the server has been doing, the
@@ -161,8 +161,15 @@ elsewhere, restore from any of them — see [Backups](#backups)) plus the
 housekeeping the server otherwise only does lazily: sweep abandoned uploads,
 collect orphaned blobs, delete orphaned files, re-resolve missing game
 metadata, prune old history, clear the token cache, compact the database. Each
-reports what it actually changed. There is also a JSON export of the whole
-inventory.
+reports what it actually changed, and says when it is next due to run on its
+own. There is also a JSON export of the whole inventory.
+
+**Schedule** — the same housekeeping, unattended: one card per task with a
+switch, how often it runs, the time of day it lands on, when it is next due,
+how the last run went and the log of the runs before that. Switching a task
+on, moving it to another hour or running it out of turn takes effect
+immediately — there is no cron entry to add and no restart, because the timer
+is inside the same binary. See [The schedule](#the-schedule).
 
 **Webhooks** — send events anywhere that accepts a POST. Filter by event family
 and minimum severity, pick the payload shape (full JSON, or a rendered message
@@ -220,6 +227,32 @@ in-memory table, and the durable `last_seen_at` column is what stops a restart
 announcing everyone who was already here as newly arrived. Set the variable to
 `0` if you would rather not have these events at all.
 
+### The schedule
+
+Six jobs run unattended, each on its own timetable: the database backup, the
+sweep of abandoned uploads, the orphaned-blob collection, the history prune,
+the game-metadata refresh and the database compaction. *Schedule* is where
+they live — a switch, a cadence (every 30 minutes up to every 30 days), a run
+time for anything daily or longer, and each task's own log.
+
+- **Times are UTC**, so a schedule doesn't move under a daylight-saving
+  change. The screen shows what each time is in your own clock beside it.
+- **A cadence of a day or more lands on the run time you set**; anything
+  shorter simply runs that often, from the end of the last run.
+- **A missed run happens once.** The next time is stored, not derived from a
+  count, so a server that was off for a week runs each task once when it comes
+  back rather than replaying every period it slept through.
+- **A job never runs twice at once.** *Run now* and the timer take the same
+  lock, whether the run was started here, from *Maintenance*, or by the clock.
+- **Every run is recorded** — in the task's log, and in the event history as
+  `system.task.ran`, `system.task.failed` or `admin.task.run`, so a webhook
+  can carry a failure somewhere you will actually see it.
+
+The metadata refresh and the compaction start switched off: one costs a
+network round trip per game, the other rewrites the whole database. Everything
+else starts on, and the backup keeps whatever cadence
+`HYDRA_BACKUP_INTERVAL_HOURS` already asked for.
+
 ### Backups
 
 The stored save files are content-addressed and easy to copy with any tool; the
@@ -227,7 +260,8 @@ database is the part that maps them back to games and users, so it is backed up
 on its own schedule with SQLite's `VACUUM INTO` (a consistent copy of a live
 database, no writer blocking). Backups land in `<data dir>/backups`, the oldest
 beyond `HYDRA_BACKUP_KEEP` are pruned, and the panel can take one on demand or
-hand you the file.
+hand you the file. When it runs unattended is set on
+[the Schedule screen](#the-schedule).
 
 **Restoring** happens from the panel too — *Maintenance → Database backups →
 Restore*, which asks you to type `restore` first. The server does not swap the

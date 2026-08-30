@@ -81,13 +81,19 @@ function backupsCard(data, ctx, report) {
 
   return card({
     title: "Database backups",
-    subtitle: data.schedule.intervalHours
-      ? `every ${data.schedule.intervalHours}h, keeping ${data.schedule.keep}`
+    subtitle: data.schedule.enabled
+      ? `${data.schedule.label}, keeping ${data.schedule.keep}`
       : "automatic backups are off",
     actions: h(
       "div",
       { class: "row wrap", style: { gap: "8px" } },
       picker,
+      h("button", {
+        class: "btn",
+        text: "Schedule",
+        title: "When this runs on its own",
+        onclick: () => navigate("/schedule"),
+      }),
       h("button", {
         class: "btn",
         text: "Upload backup",
@@ -119,6 +125,13 @@ function backupsCard(data, ctx, report) {
         { class: "card-body tight row wrap", style: { gap: "18px" } },
         h("span", { class: "muted small mono", text: data.directory }),
         disk ? h("span", { class: "muted small", text: disk }) : null,
+        data.schedule.nextRunAt
+          ? h("span", {
+              class: "muted small",
+              title: fmt.dateTime(data.schedule.nextRunAt),
+              text: `next ${fmt.relative(data.schedule.nextRunAt)}`,
+            })
+          : null,
       ),
       data.backups.length
         ? dataTable({
@@ -290,9 +303,32 @@ function actionCard(action, ctx) {
       { class: "card-body", style: { display: "grid", gap: "12px" } },
       h("p", { class: "muted small", style: { margin: 0 }, text: action.description }),
       action.danger ? h("div", {}, pill("destructive", "critical")) : null,
+      scheduleLine(action),
       output,
     ),
   });
+}
+
+/**
+ * What the same job does when nobody is watching.
+ *
+ * Every button here is also a task on the Schedule screen, and an operator
+ * about to run one by hand deserves to know it is due in an hour anyway.
+ */
+function scheduleLine(action) {
+  if (!action.schedule) return null;
+
+  const scheduled = action.schedule !== "off";
+  return h(
+    "div",
+    { class: "row", style: { gap: "6px" } },
+    icon("calendar", 13),
+    h("span", {
+      class: "muted small",
+      text: scheduled ? `Also runs ${action.schedule}` : "Not scheduled",
+    }),
+    h("a", { class: "small", href: "#/schedule", text: scheduled ? "Change" : "Schedule it" }),
+  );
 }
 
 /** Whatever the action reports, rendered generically: every tool returns a
