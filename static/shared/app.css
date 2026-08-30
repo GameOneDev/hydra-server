@@ -748,6 +748,7 @@ table.sub td { padding: 7px 14px; border-top: 1px solid var(--border); }
   background: rgba(4, 4, 8, 0.55);
   z-index: 60;
   display: grid;
+  overflow: auto;
   animation: fade 0.12s ease-out;
 }
 
@@ -763,10 +764,25 @@ table.sub td { padding: 7px 14px; border-top: 1px solid var(--border); }
   padding: 20px;
   display: grid;
   gap: 14px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
 }
 
 .modal h2 { margin: 0; font-size: 15px; }
-.modal .body { color: var(--text-2); font-size: 13px; display: grid; gap: 10px; }
+.modal .body {
+  color: var(--text-2);
+  font-size: 13px;
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+  margin: -4px;
+  padding: 4px;
+}
 .modal .actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 .drawer {
