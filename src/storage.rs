@@ -358,8 +358,6 @@ impl QuotaGate {
     /// `None` when there is nothing to enforce: no quota configured, or a key
     /// no account is charged for.
     async fn open(state: &AppState, key: &str, declared: u64) -> ApiResult<Option<Self>> {
-        /* Who is charged decides the quota, so the row comes first: the
-           account may carry an override of the server's own figure. */
         let Some(target) = quota_target(state, key).await? else {
             return Ok(None);
         };

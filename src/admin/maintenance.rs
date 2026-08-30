@@ -196,8 +196,6 @@ async fn delete_retained_versions(state: &AppState) -> ApiResult<Value> {
         storage::delete_object(state, &format!("emulation-saves/{id}.bin")).await;
     }
 
-    /* The snapshots are gone, so the blobs only they referenced are now
-       orphans — this is what actually frees the bytes. */
     for user_id in &owners {
         cloud_saves::collect_orphan_blobs(state, user_id).await?;
     }

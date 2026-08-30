@@ -104,9 +104,6 @@ export function meter(ratio) {
 export function stateLabel(state) {
   if (state === "pending") return pill("pending", "warning");
   if (state === "committed" || state === "uploaded") return pill("stored", "good");
-  /* A version the server kept instead of deleting, because automatic save
-     deletion is off. The launcher never sees it; it is here to download or
-     delete. */
   if (state === "superseded") return pill("older version", "accent");
   return pill(state ?? "unknown");
 }

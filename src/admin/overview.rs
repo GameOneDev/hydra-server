@@ -209,12 +209,7 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
        quota and no declared size is ever less than a byte, so an account
        sitting exactly on its quota is one whose next upload is already
        refused. That is what the alert below says, and
-       `storage::exceeds_quota` is the same boundary asked of one byte.
-
-       The quota is the account's own where it has one, so a user given
-       room of their own is not counted full on the server-wide figure —
-       and a per-user zero means unlimited for them however full that
-       figure would call them. */
+       `storage::exceeds_quota` is the same boundary asked of one byte. */
     let quota = crate::limits::quota_expr("u", "?1");
     let over_quota: i64 = sqlx::query_scalar(&format!(
         "SELECT COUNT(*) FROM users u

@@ -102,8 +102,6 @@ pub async fn list(
         "SELECT * FROM emulation_saves
          WHERE user_id = ?
            AND is_uploaded = 1
-           /* One save per slot, as the launcher expects: versions kept
-              because automatic deletion is off are not offered back to it. */
            AND superseded_at IS NULL
            AND (? IS NULL OR platform = ?)
            AND (? IS NULL OR emulator = ?)
@@ -243,11 +241,6 @@ pub async fn commit(
     .fetch_all(&state.pool)
     .await?;
 
-    /* With automatic deletion off the slot's older saves are stamped rather
-       than deleted: out of the launcher's list, still on disk, and still
-       counted against the owner's quota until someone deletes them. The
-       query above picks up ones stamped earlier too, so switching deletion
-       back on clears what it left behind. */
     let auto_delete = crate::limits::for_user(&state, &user.0.id)
         .await?
         .auto_delete_saves;
@@ -258,8 +251,6 @@ pub async fn commit(
     for old in &old_rows {
         let old_id: String = old.get("id");
 
-        /* A reservation whose upload never arrived holds no save to keep —
-           only a declared size charged to its owner — so it goes either way. */
         if auto_delete || old.get::<i64, _>("is_uploaded") == 0 {
             sqlx::query("DELETE FROM emulation_saves WHERE id = ?")
                 .bind(&old_id)
@@ -521,7 +512,6 @@ mod tests {
         );
         assert_eq!(listed(&server).await, vec!["new".to_string()]);
 
-        /* And the bytes are still the owner's to pay for. */
         assert_eq!(storage::used_bytes(&server.state, "alice").await.unwrap(), 128);
     }
 

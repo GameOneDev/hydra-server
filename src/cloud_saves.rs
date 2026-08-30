@@ -514,18 +514,12 @@ pub async fn commit_snapshot(
         .await?;
     }
 
-    /* Whether this account's older version goes or stays. Kept, it holds on
-       to its blobs and so to that much of the owner's quota, which is the
-       trade an operator makes by switching automatic deletion off. */
     let auto_delete = crate::limits::for_user(&state, user_id)
         .await?
         .auto_delete_saves;
 
     let mut tx = state.pool.begin().await?;
 
-    /* The game's committed snapshot has to stop being committed before this
-       one is promoted: the one-committed-snapshot-per-game index allows
-       exactly one. */
     let superseded: Vec<String> = sqlx::query_scalar(
         "SELECT id FROM cloud_save_snapshots
          WHERE user_id = ? AND shop = ? AND object_id = ? AND status = 'committed'",
@@ -539,8 +533,6 @@ pub async fn commit_snapshot(
     let mut retained = 0usize;
 
     if auto_delete {
-        /* Versions kept while deletion was off go with it, so switching it
-           back on isn't a setting that leaves data stranded. */
         let kept: Vec<String> = sqlx::query_scalar(
             "SELECT id FROM cloud_save_snapshots
              WHERE user_id = ? AND shop = ? AND object_id = ? AND status = 'superseded'",
@@ -1128,10 +1120,6 @@ mod tests {
         assert!(!is_sha256(&"g".repeat(64)));
     }
 
-    // -----------------------------------------------------------------------
-    // What a commit does to the version it replaces
-    // -----------------------------------------------------------------------
-
     use crate::limits::Overrides;
     use crate::testing::TestServer;
 
@@ -1179,8 +1167,6 @@ mod tests {
             std::fs::write(&path, vec![7u8; size as usize]).expect("the blob");
         }
 
-        /* Only the committed snapshot's blob is registered; the pending one's
-           is registered by the commit itself, as an upload would leave it. */
         sqlx::query(
             "INSERT INTO cloud_save_blobs (user_id, hash, size_in_bytes, created_at)
              VALUES ('alice', ?, 100, '2026-01-01T00:00:00Z')",
@@ -1220,7 +1206,6 @@ mod tests {
 
         assert_eq!(status_of(&server, "new").await.as_deref(), Some("committed"));
         assert_eq!(status_of(&server, "old").await, None);
-        /* Its blob is nobody's now, so the garbage collector took it. */
         assert_eq!(storage::used_bytes(&server.state, "alice").await.unwrap(), 200);
         assert!(!storage::storage_path(
             &server.state,
@@ -1252,8 +1237,6 @@ mod tests {
         assert_eq!(status_of(&server, "old").await.as_deref(), Some("superseded"));
         assert_eq!(storage::used_bytes(&server.state, "alice").await.unwrap(), 300);
 
-        /* One committed snapshot per game is what the launcher restores from,
-           and that has to stay true however many versions are kept. */
         let Json(listed) = list_snapshots(
             State(server.state.clone()),
             server.user("alice"),

@@ -43,8 +43,6 @@ export default {
               "div",
               { class: "row wrap", style: { gap: "6px" } },
               row.isBlocked ? pill("blocked", "critical") : pill("active", "good"),
-              /* Worth seeing from the directory: this account is not on the
-                 server's limits, so the Settings screen doesn't explain it. */
               row.limits?.customised ? pill("custom limits", "accent") : null,
             ),
         },
