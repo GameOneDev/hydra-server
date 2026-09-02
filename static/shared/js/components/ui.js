@@ -187,6 +187,92 @@ export function cover(game, size = "") {
   return image;
 }
 
+// ----------------------------------------------------------------- details
+
+/**
+ * The detail blob of a recorded thing, flattened into one cell.
+ *
+ * A few pairs only — this is a glance, and the whole of it is one click away
+ * in the expanded row. Rendering it inline is what makes a column of it
+ * useful: "which of these failed, and why" without opening twenty rows.
+ */
+export function detailSummary(detail, limit = 4) {
+  if (!detail || typeof detail !== "object") return h("span", { class: "muted", text: "—" });
+
+  const entries = Object.entries(detail).filter(([, value]) => value !== null && value !== "");
+  if (!entries.length) return h("span", { class: "muted", text: "—" });
+
+  return h(
+    "div",
+    { class: "row wrap", style: { gap: "4px 8px" } },
+    ...entries.slice(0, limit).map(([key, value]) =>
+      h(
+        "span",
+        { class: "small", style: { whiteSpace: "nowrap" } },
+        h("span", { class: "muted", text: `${fmt.label(key)} ` }),
+        h("span", { class: "mono", text: brief(value) }),
+      ),
+    ),
+    entries.length > limit
+      ? h("span", { class: "muted small", text: `+${entries.length - limit}` })
+      : null,
+  );
+}
+
+function brief(value) {
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  if (typeof value === "number") return fmt.number(value);
+  if (Array.isArray(value)) return `${value.length} item(s)`;
+  if (typeof value === "object") return "{…}";
+
+  const text = String(value);
+  /* A timestamp is the one string worth re-rendering: nothing is read off the
+     nanoseconds of an ISO date at a glance. */
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(text)) return fmt.relative(text);
+  return text.length > 28 ? `${text.slice(0, 27)}…` : text;
+}
+
+/**
+ * What an expanded row shows: the facts worth naming, then the raw blob.
+ *
+ * `facts` are `[label, value]` pairs, with an optional third element marking
+ * the value as an identifier to render in the mono face. The blob is printed
+ * rather than hovered, so it can be read at length and selected to copy.
+ */
+export function detailPanel(facts, detail) {
+  const pairs = (facts ?? []).filter(Boolean);
+
+  return h(
+    "div",
+    { class: "card-body", style: { display: "grid", gap: "12px", minWidth: 0 } },
+    pairs.length
+      ? h(
+          "dl",
+          { class: "kv" },
+          ...pairs.flatMap(([label, value, mono]) => [
+            h("dt", { text: label }),
+            h("dd", { class: mono ? "mono" : "", text: String(value) }),
+          ]),
+        )
+      : null,
+    detail
+      ? h("pre", {
+          class: "mono",
+          style: {
+            margin: 0,
+            padding: "10px 12px",
+            background: "var(--surface-1)",
+            borderRadius: "8px",
+            overflowX: "auto",
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+          },
+          text: JSON.stringify(detail, null, 2),
+        })
+      : null,
+  );
+}
+
 // ----------------------------------------------------------------- alerts
 
 const ALERT_ICONS = { critical: "critical", warning: "warning", info: "info" };

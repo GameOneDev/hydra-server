@@ -9,6 +9,7 @@ import {
   openDrawer,
   confirm,
   toast,
+  detailPanel,
 } from "/assets/shared/js/components/ui.js";
 import { dataTable } from "/assets/shared/js/components/table.js";
 import { navigate } from "/assets/shared/js/router.js";
@@ -216,9 +217,9 @@ function openTask(initial, data, ctx) {
   let log = null;
 
   const body = h("div", { class: "stack", style: { gap: "18px" } });
-  const statusHost = h("div", {});
-  const triggerHost = h("div", {});
-  const logHost = h("div", {});
+  const statusHost = h("div", { style: { minWidth: 0 } });
+  const triggerHost = h("div", { style: { minWidth: 0 } });
+  const logHost = h("div", { style: { minWidth: 0 } });
   body.append(statusHost, triggerHost, logHost);
 
   const dirty = () => canonical(draft) !== canonical(task.triggers);
@@ -917,49 +918,80 @@ const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Satur
 function logSection(task, runs, reload) {
   const body = !runs
     ? h("span", { class: "muted small", text: "Loading…" })
-    : runs.length
-      ? h("div", { class: "stack", style: { gap: "12px" } }, ...runs.map(logRow))
-      : emptyState("Nothing has run yet", "The log fills in as this task runs.", "clock");
+    : h(
+        "div",
+        { style: { minWidth: 0 } },
+        dataTable({
+          columns: [
+            {
+              key: "at",
+              label: "When",
+              render: (run) =>
+                h(
+                  "div",
+                  { class: "stack" },
+                  h("span", { style: { whiteSpace: "nowrap" }, text: fmt.relative(run.startedAt) }),
+                  h("span", {
+                    class: "muted small",
+                    style: { whiteSpace: "nowrap" },
+                    text: `${utcStamp(run.startedAt)} UTC`,
+                  }),
+                ),
+            },
+            {
+              key: "status",
+              label: "Outcome",
+              render: (run) =>
+                run.status === "error" ? pill("failed", "critical") : pill("ok", "good"),
+            },
+            {
+              key: "trigger",
+              label: "Started by",
+              render: (run) => pill(STARTED_BY[run.trigger] ?? run.trigger),
+            },
+            { key: "took", label: "Took", align: "right", render: (run) => took(run.durationMs) },
+            {
+              key: "summary",
+              label: "What happened",
+              render: (run) => h("span", { class: "small", text: run.summary }),
+            },
+          ],
+          rows: runs,
+          expand: (run) =>
+            detailPanel(
+              [
+                ["Started", fmt.dateTime(run.startedAt)],
+                ["Finished", fmt.dateTime(run.finishedAt)],
+                ["Took", took(run.durationMs)],
+                ["Outcome", run.status],
+                ["Started by", STARTED_BY[run.trigger] ?? run.trigger],
+                run.reason ? ["Why", run.reason] : null,
+                ["Summary", run.summary],
+              ],
+              run.detail,
+            ),
+          empty: emptyState(
+            "Nothing has run yet",
+            "The log fills in as this task runs.",
+            "clock",
+          ),
+        }),
+      );
 
   return section(
     "Run log",
     h(
       "div",
-      { class: "stack", style: { gap: "12px" } },
+      { class: "stack", style: { gap: "12px", minWidth: 0 } },
       h(
         "div",
         { class: "row", style: { gap: "8px" } },
-        h("span", { class: "muted small", text: "Most recent first." }),
+        h("span", { class: "muted small", text: "Most recent first — open a run for what it changed." }),
         h("span", { class: "spacer", style: { flex: 1 } }),
         h("button", { class: "btn small", text: "Refresh", onclick: (event) => reload(event.target) }),
       ),
       body,
     ),
-  );
-}
-
-function logRow(run) {
-  return h(
-    "div",
-    { class: "stack", style: { gap: "3px" } },
-    h(
-      "div",
-      { class: "row wrap", style: { gap: "8px" } },
-      run.status === "error" ? pill("failed", "critical") : pill("ok", "good"),
-      h("span", {
-        class: "muted small",
-        title: `${fmt.dateTime(run.startedAt)} · ${utcStamp(run.startedAt)} UTC`,
-        text: fmt.relative(run.startedAt),
-      }),
-      pill(STARTED_BY[run.trigger] ?? run.trigger),
-      h("span", { class: "muted small num", text: took(run.durationMs) }),
-    ),
-    h("span", {
-      class: "small",
-      title: run.detail ? JSON.stringify(run.detail, null, 2) : "",
-      text: run.summary,
-    }),
-    run.reason ? h("span", { class: "muted small", text: run.reason }) : null,
   );
 }
 
@@ -978,7 +1010,7 @@ function section(title, body) {
   if (typeof title === "string") heading.textContent = title;
   else heading.append(title);
 
-  return h("section", { class: "stack", style: { gap: "10px" } }, heading, body);
+  return h("section", { class: "stack", style: { gap: "10px", minWidth: 0 } }, heading, body);
 }
 
 function clock(minutes) {

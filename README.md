@@ -269,7 +269,9 @@ Everything else about how it behaves:
 - **Every run is recorded** — in the task's log, with what started it and what
   that trigger saw, and in the event history as `system.task.ran`,
   `system.task.failed` or `admin.task.run`, so a webhook can carry a failure
-  somewhere you will actually see it.
+  somewhere you will actually see it. A run in that log opens the same way a
+  row on *History* does: the timings, what started it, and the counters the
+  job reported, printed rather than hovered so they can be read and copied.
 
 The metadata refresh, the token-cache clear and the compaction start switched
 off: one costs a network round trip per game, one only makes sense as a
