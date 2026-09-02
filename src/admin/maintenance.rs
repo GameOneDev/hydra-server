@@ -1,17 +1,16 @@
-//! One-shot operations an operator runs by hand.
+//! The operations that are nobody's schedule: deleting the files the
+//! integrity scan flagged, and the inventory export.
 //!
-//! Everything here is something the server would otherwise only do lazily —
-//! on the next upload, on the next lookup, on the next restart. Exposing them
-//! as buttons turns "wait and hope" into "run it and read the result", and
-//! every one reports what it actually changed rather than just succeeding.
+//! Everything that can run unattended lives in [`crate::jobs`] and is run from
+//! the Schedule screen, by a trigger or by hand. What is left here takes an
+//! argument only an operator can supply.
 
 use super::AdminSession;
 use crate::error::{ApiError, ApiResult};
 use crate::events::Event;
-use crate::jobs;
 use crate::state::AppState;
-use crate::{schedule, storage};
-use axum::extract::{Path, State};
+use crate::storage;
+use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
@@ -21,80 +20,46 @@ use sqlx::Row;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/admin/api/maintenance", get(list))
-        .route("/admin/api/maintenance/{action}", post(run))
+        .route(
+            "/admin/api/maintenance/delete-orphan-files",
+            post(delete_orphans),
+        )
         .route("/admin/api/maintenance/export", get(export))
-}
-
-async fn catalogue(state: &AppState) -> ApiResult<Vec<Value>> {
-    let tasks = schedule::list(state).await?;
-
-    Ok(jobs::JOBS
-        .iter()
-        .filter(|job| job.manual)
-        .map(|job| {
-            let mut value = job.json();
-            if let Some(task) = tasks.iter().find(|task| task.job.id == job.id) {
-                value["schedule"] = json!(task.summary());
-                value["nextRunAt"] = json!(task.next_run_at);
-            }
-            value
-        })
-        .collect())
-}
-
-async fn list(State(state): State<AppState>, _admin: AdminSession) -> ApiResult<Json<Value>> {
-    Ok(Json(json!({ "actions": catalogue(&state).await? })))
 }
 
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-struct RunRequest {
-    /// Restricts `delete-orphan-files` to keys the operator actually saw.
+struct DeleteRequest {
     #[serde(default)]
     keys: Option<Vec<String>>,
 }
 
-/// POST /admin/api/maintenance/{action}
-async fn run(
+/// POST /admin/api/maintenance/delete-orphan-files
+async fn delete_orphans(
     State(state): State<AppState>,
     _admin: AdminSession,
-    Path(action): Path<String>,
-    body: Option<Json<RunRequest>>,
+    body: Option<Json<DeleteRequest>>,
 ) -> ApiResult<Json<Value>> {
-    let request = body.map(|Json(body)| body).unwrap_or_default();
+    let keys = body.map(|Json(body)| body).unwrap_or_default().keys;
+    let result = delete_orphan_files(&state, keys).await?;
 
-    let result = if action == "delete-orphan-files" {
-        delete_orphan_files(&state, request.keys).await?
-    } else {
-        let job = jobs::find(&action)
-            .filter(|job| job.manual)
-            .ok_or_else(|| ApiError::bad_request(format!("unknown maintenance action: {action}")))?;
-
-        if job.schedulable {
-            return Ok(Json(json!({
-                "ok": true,
-                "action": action,
-                "result": schedule::run(&state, &action, schedule::Reason::Manual).await?,
-            })));
-        }
-
-        jobs::run(&state, &action, "manual").await?
-    };
-
-    tracing::info!("admin: ran maintenance action {action}");
+    tracing::info!("admin: deleted orphaned files");
 
     crate::events::record(
         &state,
         Event::admin(
             "admin.maintenance",
-            result["summary"].as_str().unwrap_or("Maintenance action run").to_string(),
+            result["summary"].as_str().unwrap_or("Deleted orphaned files").to_string(),
         )
-        .detail(json!({ "action": action, "result": result })),
+        .detail(json!({ "action": "delete-orphan-files", "result": result })),
     )
     .await;
 
-    Ok(Json(json!({ "ok": true, "action": action, "result": result })))
+    Ok(Json(json!({
+        "ok": true,
+        "action": "delete-orphan-files",
+        "result": result,
+    })))
 }
 
 /// Deletes files the integrity scan flagged as unreferenced.

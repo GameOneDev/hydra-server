@@ -318,9 +318,18 @@ export function confirm({ title, body, confirmLabel = "Confirm", danger = false,
   });
 }
 
-export function openDrawer({ title, subtitle, body }) {
+export function openDrawer({ title, subtitle, body, beforeClose }) {
   const scrim = h("div", { class: "scrim" });
-  const close = () => {
+
+  let closing = false;
+  const close = async () => {
+    if (closing) return;
+    closing = true;
+    try {
+      if (beforeClose && !(await beforeClose())) return;
+    } finally {
+      closing = false;
+    }
     scrim.remove();
     removeEventListener("keydown", onKey);
   };

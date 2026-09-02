@@ -156,23 +156,23 @@ reconciles both directions: rows whose bytes are gone (a restore would come
 back short) and files no row points at (space nothing will reclaim). It only
 reports — deleting is a separate, explicit step.
 
-**Maintenance** — database backups (take one, download it, upload one taken
-elsewhere, restore from any of them — see [Backups](#backups)) plus the
-housekeeping the server otherwise only does lazily: sweep abandoned uploads,
-collect orphaned blobs, delete orphaned files, re-resolve missing game
-metadata, prune old history, clear the token cache, compact the database. Each
-reports what it actually changed, and says when it is next due to run on its
-own. There is also a JSON export of the whole inventory.
+**Maintenance** — database backups: take one, download it, upload one taken
+elsewhere, restore from any of them (see [Backups](#backups)). Also a JSON
+export of the whole inventory — every user, snapshot, backup and emulation
+save as the server understands them. The housekeeping itself lives on
+*Schedule*, which is where it is run by hand as well.
 
-**Schedule** — the same housekeeping, unattended: every task in one list with
-what starts it, how the last run went and when it next comes due. Open one and
-a drawer holds the rest — a switch, *Run now*, the triggers that start it and
+**Schedule** — the housekeeping, unattended: every task in one list with what
+starts it, how the last run went and when it next comes due. Open one and a
+drawer holds the rest — a switch, *Run now*, the triggers that start it and
 that task's own run log. A trigger is a timer (*every 2 days at 04:30*, *every
 30 minutes*, *every month on the 1st*), the server starting, another task
 finishing, an event being recorded, or a measured number crossing a line; a
-task can carry several, and any one of them starts it. Edits take effect
-immediately — there is no cron entry to add and no restart, because the timer
-is inside the same binary. See [The schedule](#the-schedule).
+task can carry several, and any one of them starts it. Trigger edits are
+staged until you press *Save changes*, and closing the drawer with unsaved
+ones asks first. A saved change takes effect at once — there is no cron entry
+to add and no restart, because the timer is inside the same binary. See
+[The schedule](#the-schedule).
 
 **Webhooks** — send events anywhere that accepts a POST. Filter by event family
 and minimum severity, pick the payload shape (full JSON, or a rendered message
@@ -232,10 +232,13 @@ announcing everyone who was already here as newly arrived. Set the variable to
 
 ### The schedule
 
-Six jobs run unattended, each on its own terms: the database backup, the sweep
-of abandoned uploads, the orphaned-blob collection, the history prune, the
-game-metadata refresh and the database compaction. *Schedule* lists them all;
-opening one shows what starts it, lets you change it, and holds its log.
+Seven jobs run unattended, each on its own terms: the database backup, the
+sweep of abandoned uploads, the orphaned-blob collection, the history prune,
+the game-metadata refresh, the token-cache clear and the database compaction.
+*Schedule* lists them all; opening one shows what starts it, lets you change
+it, and holds its log. Editing triggers is a form rather than a live control:
+changes are staged until *Save changes*, and leaving with unsaved ones asks
+first.
 
 **What can start a task.** Each one carries a list of triggers, and any one
 firing runs it:
@@ -268,9 +271,10 @@ Everything else about how it behaves:
   `system.task.failed` or `admin.task.run`, so a webhook can carry a failure
   somewhere you will actually see it.
 
-The metadata refresh and the compaction start switched off: one costs a
-network round trip per game, the other rewrites the whole database. Everything
-else starts on, with a timer, and the backup keeps whatever cadence
+The metadata refresh, the token-cache clear and the compaction start switched
+off: one costs a network round trip per game, one only makes sense as a
+deliberate act, and the last rewrites the whole database. Everything else
+starts on, with a timer, and the backup keeps whatever cadence
 `HYDRA_BACKUP_INTERVAL_HOURS` already asked for.
 
 ### Backups

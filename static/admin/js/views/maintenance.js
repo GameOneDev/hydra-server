@@ -3,7 +3,7 @@
 import { h, icon } from "/assets/shared/js/dom.js";
 import * as fmt from "/assets/shared/js/format.js";
 import { api, download, upload } from "/assets/shared/js/api.js";
-import { card, pill, confirm, toast, emptyState } from "/assets/shared/js/components/ui.js";
+import { card, confirm, toast, emptyState } from "/assets/shared/js/components/ui.js";
 import { dataTable } from "/assets/shared/js/components/table.js";
 import { navigate } from "/assets/shared/js/router.js";
 
@@ -18,13 +18,10 @@ let restoreReport = null;
 
 export default {
   title: "Maintenance",
-  subtitle: "Run the housekeeping this server normally does on its own",
+  subtitle: "Database backups, and what this server believes it holds",
 
   async render(ctx) {
-    const [{ actions }, backups] = await Promise.all([
-      api.get("/admin/api/maintenance"),
-      api.get("/admin/api/backups"),
-    ]);
+    const backups = await api.get("/admin/api/backups");
 
     const report = restoreReport;
     restoreReport = null;
@@ -33,12 +30,7 @@ export default {
       "div",
       { class: "grid" },
       backupsCard(backups, ctx, report),
-      h(
-        "div",
-        { class: "grid cols-2" },
-        ...actions.map((action) => actionCard(action, ctx)),
-        exportCard(),
-      ),
+      h("div", { class: "grid cols-2" }, exportCard()),
     );
   },
 };
@@ -257,109 +249,6 @@ function restoreResult(report) {
       onclick: () => navigate("/storage"),
     }),
   );
-}
-
-function actionCard(action, ctx) {
-  const output = h("div", {});
-
-  const run = async (event) => {
-    if (action.danger) {
-      const ok = await confirm({
-        title: action.title,
-        body: action.description,
-        confirmLabel: "Run it",
-        danger: true,
-      });
-      if (!ok) return;
-    }
-
-    const button = event.target;
-    button.disabled = true;
-    const label = button.textContent;
-    button.textContent = "Running…";
-
-    try {
-      const response = await api.post(`/admin/api/maintenance/${action.id}`, {});
-      /* The report *is* the outcome — refresh only the chrome, or a
-         re-render would wipe what the operator just asked for. */
-      output.replaceChildren(result(response.result));
-      toast(response.result.summary, "good");
-      ctx.refreshChrome?.();
-    } catch (error) {
-      output.replaceChildren(
-        h("div", { class: "alert critical" }, icon("critical", 16), h("div", { class: "detail", text: error.message })),
-      );
-    } finally {
-      button.disabled = false;
-      button.textContent = label;
-    }
-  };
-
-  return card({
-    title: action.title,
-    actions: h("button", { class: `btn ${action.danger ? "danger" : ""}`, text: "Run", onclick: run }),
-    body: h(
-      "div",
-      { class: "card-body", style: { display: "grid", gap: "12px" } },
-      h("p", { class: "muted small", style: { margin: 0 }, text: action.description }),
-      action.danger ? h("div", {}, pill("destructive", "critical")) : null,
-      scheduleLine(action),
-      output,
-    ),
-  });
-}
-
-function scheduleLine(action) {
-  if (!action.schedule) return null;
-
-  const scheduled = !["off", "on demand only"].includes(action.schedule);
-  return h(
-    "div",
-    { class: "row", style: { gap: "6px" } },
-    icon("calendar", 13),
-    h("span", {
-      class: "muted small",
-      text: scheduled ? `Also runs ${action.schedule}` : "Not scheduled",
-    }),
-    h("a", { class: "small", href: "#/schedule", text: scheduled ? "Change" : "Schedule it" }),
-  );
-}
-
-/** Whatever the action reports, rendered generically: every tool returns a
- *  summary plus its own counters, and all of them are worth showing. */
-function result(payload) {
-  const rows = Object.entries(payload)
-    .filter(([key]) => key !== "summary")
-    .map(([key, value]) =>
-      h(
-        "div",
-        { class: "row" },
-        h("span", { class: "muted small", text: fmt.label(key) }),
-        h("span", { class: "spacer", style: { flex: 1 } }),
-        h("span", {
-          class: "small num",
-          text: key.toLowerCase().endsWith("bytes") ? fmt.bytes(value) : formatValue(value),
-        }),
-      ),
-    );
-
-  return h(
-    "div",
-    { class: "alert info" },
-    icon("good", 16),
-    h(
-      "div",
-      { class: "stack", style: { flex: 1 } },
-      h("div", { class: "title", text: payload.summary }),
-      ...rows,
-    ),
-  );
-}
-
-function formatValue(value) {
-  if (Array.isArray(value)) return value.length ? `${value.length}` : "none";
-  if (typeof value === "number") return fmt.number(value);
-  return String(value);
 }
 
 function exportCard() {

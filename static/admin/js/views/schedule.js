@@ -7,6 +7,7 @@ import {
   statTile,
   emptyState,
   openDrawer,
+  confirm,
   toast,
 } from "/assets/shared/js/components/ui.js";
 import { dataTable } from "/assets/shared/js/components/table.js";
@@ -24,7 +25,6 @@ export default {
       { class: "grid" },
       summaryCard(data),
       tasksCard(data, ctx),
-      explainerCard(),
     );
   },
 };
@@ -212,75 +212,151 @@ function nextRun(task) {
 
 function openTask(initial, data, ctx) {
   let task = initial;
+  let draft = clone(task.triggers);
   let log = null;
-  const body = h("div", { class: "stack", style: { gap: "18px" } });
 
-  const apply = (updated) => {
+  const body = h("div", { class: "stack", style: { gap: "18px" } });
+  const statusHost = h("div", {});
+  const triggerHost = h("div", {});
+  const logHost = h("div", {});
+  body.append(statusHost, triggerHost, logHost);
+
+  const dirty = () => canonical(draft) !== canonical(task.triggers);
+
+  const adopt = (updated) => {
     task = updated;
-    paint();
-    refreshLog();
-    ctx.refresh();
+    draft = clone(task.triggers);
   };
 
-  const refreshLog = () =>
-    loadLog(task.id)
-      .then((runs) => {
-        log = runs;
-        paint();
-      })
-      .catch(() => {});
+  const paintStatus = painter(statusHost, () => statusSection(task, runNow, toggle));
+  const paintTriggers = painter(triggerHost, () =>
+    triggerSection(draft, data.vocabulary, {
+      dirty: dirty(),
+      onChange: (index, trigger) => {
+        draft = draft.map((existing, at) => (at === index ? trigger : existing));
+        paintTriggers();
+      },
+      onAdd: (kind) => {
+        draft = [...draft, blankTrigger(kind, task, data.vocabulary)];
+        paintTriggers();
+      },
+      onRemove: (index) => {
+        draft = draft.filter((_, at) => at !== index);
+        paintTriggers();
+      },
+      onSave: save,
+      onDiscard: () => {
+        draft = clone(task.triggers);
+        paintTriggers();
+      },
+    }),
+  );
+  const paintLog = painter(logHost, () =>
+    logSection(task, log, async (button) => {
+      button.disabled = true;
+      try {
+        log = await loadLog(task.id);
+        paintLog();
+      } catch (error) {
+        toast(error.message, "critical");
+        button.disabled = false;
+      }
+    }),
+  );
 
-  const save = async (patch, control, { quiet = false } = {}) => {
-    if (control) control.disabled = true;
+  const paint = () => {
+    paintStatus();
+    paintTriggers();
+    paintLog();
+  };
+
+  async function save(button) {
+    button.disabled = true;
+    button.textContent = "Saving…";
     try {
-      const response = await api.put(`/admin/api/schedule/${encodeURIComponent(task.id)}`, patch);
-      if (!quiet) toast(response.summary, "good");
-      apply(response.task);
+      const response = await api.put(`/admin/api/schedule/${encodeURIComponent(task.id)}`, {
+        triggers: draft,
+      });
+      toast(response.summary, "good");
+      adopt(response.task);
+      paint();
+      ctx.refresh();
+    } catch (error) {
+      toast(error.message, "critical");
+      paintTriggers();
+    }
+  }
+
+  async function toggle(value, control) {
+    control.disabled = true;
+    try {
+      const response = await api.put(`/admin/api/schedule/${encodeURIComponent(task.id)}`, {
+        enabled: value,
+      });
+      toast(response.summary, "good");
+      task = response.task;
+      paint();
+      ctx.refresh();
     } catch (error) {
       toast(error.message, "critical");
       paint();
     }
-  };
+  }
 
-  const saveTriggers = (triggers, control, options) => save({ triggers }, control, options);
-
-  const runNow = async (button) => {
+  async function runNow(button) {
     button.disabled = true;
     button.textContent = "Running…";
     try {
       const response = await api.post(`/admin/api/schedule/${encodeURIComponent(task.id)}/run`);
       toast(response.result.summary, "good");
-      apply(response.task);
+      task = response.task;
     } catch (error) {
       toast(error.message, "critical");
       const { task: refreshed } = await api
         .get(`/admin/api/schedule/${encodeURIComponent(task.id)}`)
         .catch(() => ({ task }));
-      apply(refreshed);
+      task = refreshed;
     }
-  };
+    log = await loadLog(task.id).catch(() => log);
+    paintStatus();
+    paintLog();
+    ctx.refresh();
+  }
 
-  const paint = () => {
-    body.replaceChildren(
-      statusSection(task, runNow, save),
-      triggerSection(task, data.vocabulary, saveTriggers),
-      logSection(task, log, async (button) => {
-        button.disabled = true;
-        try {
-          log = await loadLog(task.id);
-          paint();
-        } catch (error) {
-          toast(error.message, "critical");
-          button.disabled = false;
-        }
-      }),
-    );
+  const warnOnUnload = (event) => {
+    if (!dirty()) return;
+    event.preventDefault();
+    event.returnValue = "";
   };
+  addEventListener("beforeunload", warnOnUnload);
 
   paint();
-  refreshLog();
+  loadLog(task.id)
+    .then((runs) => {
+      log = runs;
+      paintLog();
+    })
+    .catch(() => {});
 
-  openDrawer({ title: initial.title, subtitle: initial.description, body });
+  openDrawer({
+    title: initial.title,
+    subtitle: initial.description,
+    body,
+    beforeClose: async () => {
+      if (!dirty()) {
+        removeEventListener("beforeunload", warnOnUnload);
+        return true;
+      }
+      const leave = await confirm({
+        title: "Leave without saving?",
+        body: `The triggers for ${task.title} have been changed but not saved. Closing this now throws those changes away.`,
+        confirmLabel: "Discard changes",
+        danger: true,
+      });
+      if (leave) removeEventListener("beforeunload", warnOnUnload);
+      return leave;
+    },
+  });
 }
 
 async function loadLog(id) {
@@ -288,12 +364,40 @@ async function loadLog(id) {
   return runs;
 }
 
-function statusSection(task, runNow, save) {
+function painter(host, build) {
+  let queued = false;
+  return () => {
+    if (queued) return;
+    queued = true;
+    queueMicrotask(() => {
+      queued = false;
+      host.replaceChildren(build());
+    });
+  };
+}
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value ?? []));
+}
+
+function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .filter((key) => key !== "label" && value[key] !== undefined)
+      .sort()
+      .map((key) => `${key}:${canonical(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+function statusSection(task, runNow, toggle) {
   const enabled = h("input", {
     type: "checkbox",
     checked: task.enabled,
     "aria-label": `Run ${task.title} automatically`,
-    onchange: (event) => save({ enabled: event.target.checked }, event.target),
+    onchange: (event) => toggle(event.target.checked, event.target),
   });
 
   return section(
@@ -379,60 +483,75 @@ const TRIGGER_KINDS = [
   { type: "condition", label: "When a number crosses a line" },
 ];
 
-function triggerSection(task, vocabulary, saveTriggers) {
-  const list = task.triggers;
-
+function triggerSection(draft, vocabulary, handlers) {
   const add = h(
     "select",
     {
       class: "input",
       style: { maxWidth: "230px" },
-      disabled: list.length >= vocabulary.limits.maxTriggers,
+      disabled: draft.length >= vocabulary.limits.maxTriggers,
       onchange: (event) => {
         const kind = event.target.value;
         event.target.value = "";
-        if (!kind) return;
-        saveTriggers([...list, blankTrigger(kind, task, vocabulary)], event.target);
+        if (kind) handlers.onAdd(kind);
       },
     },
     h("option", { value: "", selected: true, text: "Add a trigger…" }),
     ...TRIGGER_KINDS.map((kind) => h("option", { value: kind.type, text: kind.label })),
   );
 
-  const replace = (index, trigger, control) =>
-    saveTriggers(
-      list.map((existing, at) => (at === index ? trigger : existing)),
-      control,
-      { quiet: true },
-    );
-  const remove = (index, control) =>
-    saveTriggers(list.filter((_, at) => at !== index), control);
+  const save = h("button", {
+    class: "btn primary",
+    text: "Save changes",
+    disabled: !handlers.dirty,
+    onclick: (event) => handlers.onSave(event.target),
+  });
 
   return section(
-    "Runs when",
+    h(
+      "div",
+      { class: "row", style: { gap: "8px" } },
+      h("span", { text: "Runs when" }),
+      handlers.dirty ? pill("unsaved", "warning") : null,
+    ),
     h(
       "div",
       { class: "stack", style: { gap: "12px" } },
       h("span", {
         class: "muted small",
-        text: "Any one of these starts the task. Times are UTC.",
+        text: "Any one of these starts the task. Times are UTC. Changes apply when you save.",
       }),
-      list.length
+      draft.length
         ? h(
             "div",
             { class: "stack", style: { gap: "10px" } },
-            ...list.map((trigger, index) =>
+            ...draft.map((trigger, index) =>
               triggerRow(trigger, vocabulary, {
-                onChange: (updated, control) => replace(index, updated, control),
-                onRemove: (control) => remove(index, control),
+                onChange: (updated) => handlers.onChange(index, updated),
+                onRemove: () => handlers.onRemove(index),
               }),
             ),
           )
-        : h("span", { class: "muted small", text: "Nothing starts this on its own — Run now is the only way it happens." }),
+        : h("span", {
+            class: "muted small",
+            text: "Nothing starts this on its own — Run now is the only way it happens.",
+          }),
       add,
+      h(
+        "div",
+        { class: "row wrap", style: { gap: "8px" } },
+        save,
+        h("button", {
+          class: "btn",
+          text: "Discard",
+          disabled: !handlers.dirty,
+          onclick: () => handlers.onDiscard(),
+        }),
+      ),
     ),
   );
 }
+
 
 function blankTrigger(type, task, vocabulary) {
   if (type === "every") return { type, count: 1, unit: "day", atMinute: 180 };
@@ -477,7 +596,10 @@ function triggerRow(trigger, vocabulary, { onChange, onRemove }) {
     h(
       "div",
       { class: "row", style: { gap: "8px" } },
-      h("span", { class: "small strong", text: trigger.label }),
+      h("span", {
+        class: "small strong",
+        text: TRIGGER_KINDS.find((kind) => kind.type === trigger.type)?.label ?? trigger.type,
+      }),
       h("span", { class: "spacer", style: { flex: 1 } }),
       h(
         "button",
@@ -485,7 +607,7 @@ function triggerRow(trigger, vocabulary, { onChange, onRemove }) {
           class: "btn small ghost icon-only",
           "aria-label": "Remove this trigger",
           title: "Remove this trigger",
-          onclick: (event) => onRemove(event.target),
+          onclick: () => onRemove(),
         },
         icon("trash", 14),
       ),
@@ -498,11 +620,11 @@ function triggerRow(trigger, vocabulary, { onChange, onRemove }) {
 
 function everyFields(trigger, vocabulary, onChange) {
   const unit = vocabulary.units.find((entry) => entry.unit === trigger.unit) ?? { timeOfDay: false };
-  const edit = (patch, control) => onChange({ ...trigger, ...patch }, control);
+  const edit = (patch) => onChange({ ...trigger, ...patch });
 
   const parts = [
     h("span", { class: "muted small", text: "Every" }),
-    number(trigger.count, 1, 999, (value, control) => edit({ count: value }, control)),
+    number(trigger.count, 1, 999, (value) => edit({ count: value })),
     h(
       "select",
       {
@@ -554,7 +676,7 @@ function everyFields(trigger, vocabulary, onChange) {
   if (trigger.unit === "month") {
     parts.push(
       h("span", { class: "muted small", text: "on day" }),
-      number(trigger.day ?? 1, 1, 31, (value, control) => edit({ day: value }, control)),
+      number(trigger.day ?? 1, 1, 31, (value) => edit({ day: value })),
     );
   }
 
@@ -587,8 +709,8 @@ function startupFields(trigger, _vocabulary, onChange) {
   return h(
     "div",
     { class: "row wrap", style: { gap: "8px" } },
-    number(trigger.delayMinutes ?? 0, 0, 10080, (value, control) =>
-      onChange({ ...trigger, delayMinutes: value }, control),
+    number(trigger.delayMinutes ?? 0, 0, 10080, (value) =>
+      onChange({ ...trigger, delayMinutes: value }),
     ),
     h("span", { class: "muted small", text: "minutes after the server starts" }),
   );
@@ -605,15 +727,15 @@ function afterFields(trigger, vocabulary, onChange) {
         class: "input",
         style: { width: "auto" },
         "aria-label": "Task to follow",
-        onchange: (event) => onChange({ ...trigger, task: event.target.value }, event.target),
+        onchange: (event) => onChange({ ...trigger, task: event.target.value }),
       },
       ...vocabulary.tasks.map((entry) =>
         h("option", { value: entry.id, selected: entry.id === trigger.task, text: entry.title }),
       ),
     ),
     h("span", { class: "muted small", text: "finishes, wait" }),
-    number(trigger.delayMinutes ?? 0, 0, 10080, (value, control) =>
-      onChange({ ...trigger, delayMinutes: value }, control),
+    number(trigger.delayMinutes ?? 0, 0, 10080, (value) =>
+      onChange({ ...trigger, delayMinutes: value }),
     ),
     h("span", { class: "muted small", text: "min" }),
   );
@@ -660,15 +782,15 @@ function eventFields(trigger, vocabulary, onChange) {
             const kind = event.target.value;
             event.target.value = "";
             if (!kind || kinds.includes(kind)) return;
-            onChange({ ...trigger, kinds: [...kinds, kind] }, event.target);
+            onChange({ ...trigger, kinds: [...kinds, kind] });
           },
         },
         h("option", { value: "", selected: true, text: "Listen for…" }),
         ...vocabulary.eventKinds.map((kind) => h("option", { value: kind, text: kind })),
       ),
       h("span", { class: "muted small", text: "at most once every" }),
-      number(trigger.minGapMinutes ?? 0, 0, 10080, (value, control) =>
-        onChange({ ...trigger, minGapMinutes: value }, control),
+      number(trigger.minGapMinutes ?? 0, 0, 10080, (value) =>
+        onChange({ ...trigger, minGapMinutes: value }),
       ),
       h("span", { class: "muted small", text: "min" }),
     ),
@@ -715,7 +837,7 @@ function conditionFields(trigger, vocabulary, onChange) {
           class: "input",
           style: { width: "auto" },
           "aria-label": "Above or below",
-          onchange: (event) => onChange({ ...trigger, comparison: event.target.value }, event.target),
+          onchange: (event) => onChange({ ...trigger, comparison: event.target.value }),
         },
         ...["above", "below"].map((value) =>
           h("option", { value, selected: value === trigger.comparison, text: `is ${value}` }),
@@ -723,14 +845,14 @@ function conditionFields(trigger, vocabulary, onChange) {
       ),
       ...(bytes
         ? byteValue(trigger, onChange)
-        : [number(trigger.value, 0, 1_000_000_000, (value, control) => onChange({ ...trigger, value }, control))]),
+        : [number(trigger.value, 0, 1_000_000_000, (value) => onChange({ ...trigger, value }))]),
     ),
     h(
       "div",
       { class: "row wrap", style: { gap: "8px" } },
       h("span", { class: "muted small", text: "checked at most once every" }),
-      number(trigger.minGapMinutes ?? 0, 0, 10080, (value, control) =>
-        onChange({ ...trigger, minGapMinutes: value }, control),
+      number(trigger.minGapMinutes ?? 0, 0, 10080, (value) =>
+        onChange({ ...trigger, minGapMinutes: value }),
       ),
       h("span", { class: "muted small", text: "min" }),
       metric
@@ -749,19 +871,18 @@ function byteValue(trigger, onChange) {
   const scale = inGigabytes ? gigabyte : 1024 ** 2;
   const shown = Math.round((trigger.value / scale) * 10) / 10;
 
-  const change = (value, unitScale, control) =>
-    onChange({ ...trigger, value: Math.round(value * unitScale) }, control);
+  const change = (value, unitScale) =>
+    onChange({ ...trigger, value: Math.round(value * unitScale) });
 
   return [
-    number(shown, 0, 100000, (value, control) => change(value, scale, control), { step: "0.1" }),
+    number(shown, 0, 100000, (value) => change(value, scale), { step: "0.1" }),
     h(
       "select",
       {
         class: "input",
         style: { width: "auto" },
         "aria-label": "Size unit",
-        onchange: (event) =>
-          change(shown, event.target.value === "GB" ? gigabyte : 1024 ** 2, event.target),
+        onchange: (event) => change(shown, event.target.value === "GB" ? gigabyte : 1024 ** 2),
       },
       ...["MB", "GB"].map((unit) =>
         h("option", { value: unit, selected: unit === (inGigabytes ? "GB" : "MB"), text: unit }),
@@ -786,7 +907,7 @@ function number(value, min, max, onCommit, { step } = {}) {
         event.target.value = value;
         return;
       }
-      onCommit(parsed, event.target);
+      onCommit(parsed);
     },
   });
 }
@@ -853,42 +974,11 @@ const STARTED_BY = {
 };
 
 function section(title, body) {
-  return h(
-    "section",
-    { class: "stack", style: { gap: "10px" } },
-    h("h3", { style: { margin: 0, fontSize: "13px" }, text: title }),
-    body,
-  );
-}
+  const heading = h("h3", { style: { margin: 0, fontSize: "13px" } });
+  if (typeof title === "string") heading.textContent = title;
+  else heading.append(title);
 
-function explainerCard() {
-  return card({
-    title: "How the schedule works",
-    actions: h("button", {
-      class: "btn",
-      text: "Run something now",
-      onclick: () => navigate("/maintenance"),
-    }),
-    body: h(
-      "div",
-      { class: "card-body", style: { display: "grid", gap: "10px" } },
-      h("p", {
-        class: "muted small",
-        style: { margin: 0 },
-        text: "A task runs when any of its triggers fires — a timer, the server starting, another task finishing, an event being recorded, or a number crossing a line. The server does this itself; there is no cron entry to add.",
-      }),
-      h("p", {
-        class: "muted small",
-        style: { margin: 0 },
-        text: "A run missed while the server was down happens once on the next check, not once per period it slept through, and a job never runs twice at the same time however it was started. Times are UTC so they don't move under a daylight-saving change.",
-      }),
-      h("p", {
-        class: "muted small",
-        style: { margin: 0 },
-        text: "Every run — whatever started it — is also recorded in History, so a webhook can carry it somewhere you'll see it.",
-      }),
-    ),
-  });
+  return h("section", { class: "stack", style: { gap: "10px" } }, heading, body);
 }
 
 function clock(minutes) {
