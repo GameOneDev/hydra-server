@@ -1,9 +1,5 @@
-//! The operations that are nobody's schedule: deleting the files the
-//! integrity scan flagged, and the inventory export.
-//!
-//! Everything that can run unattended lives in [`crate::jobs`] and is run from
-//! the Schedule screen, by a trigger or by hand. What is left here takes an
-//! argument only an operator can supply.
+//! Deleting the files the integrity scan flagged, and the inventory export.
+//! Everything that runs unattended is a [`crate::jobs`] job instead.
 
 use super::AdminSession;
 use crate::error::{ApiError, ApiResult};
@@ -34,7 +30,6 @@ struct DeleteRequest {
     keys: Option<Vec<String>>,
 }
 
-/// POST /admin/api/maintenance/delete-orphan-files
 async fn delete_orphans(
     State(state): State<AppState>,
     _admin: AdminSession,

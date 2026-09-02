@@ -156,23 +156,14 @@ reconciles both directions: rows whose bytes are gone (a restore would come
 back short) and files no row points at (space nothing will reclaim). It only
 reports — deleting is a separate, explicit step.
 
-**Maintenance** — database backups: take one, download it, upload one taken
-elsewhere, restore from any of them (see [Backups](#backups)). Also a JSON
-export of the whole inventory — every user, snapshot, backup and emulation
-save as the server understands them. The housekeeping itself lives on
-*Schedule*, which is where it is run by hand as well.
+**Maintenance** — database backups (take one, download it, upload one taken
+elsewhere, restore from any of them — see [Backups](#backups)), and a JSON
+export of the whole inventory. The housekeeping itself lives on *Schedule*.
 
-**Schedule** — the housekeeping, unattended: every task in one list with what
-starts it, how the last run went and when it next comes due. Open one and a
-drawer holds the rest — a switch, *Run now*, the triggers that start it and
-that task's own run log. A trigger is a timer (*every 2 days at 04:30*, *every
-30 minutes*, *every month on the 1st*), the server starting, another task
-finishing, an event being recorded, or a measured number crossing a line; a
-task can carry several, and any one of them starts it. Trigger edits are
-staged until you press *Save changes*, and closing the drawer with unsaved
-ones asks first. A saved change takes effect at once — there is no cron entry
-to add and no restart, because the timer is inside the same binary. See
-[The schedule](#the-schedule).
+**Schedule** — the housekeeping, unattended: every task with what starts it,
+how the last run went and when it is next due. Open one for its switch, *Run
+now*, its triggers and its log; a run expands the way a *History* row does.
+See [The schedule](#the-schedule).
 
 **Webhooks** — send events anywhere that accepts a POST. Filter by event family
 and minimum severity, pick the payload shape (full JSON, or a rendered message
@@ -232,52 +223,34 @@ announcing everyone who was already here as newly arrived. Set the variable to
 
 ### The schedule
 
-Seven jobs run unattended, each on its own terms: the database backup, the
-sweep of abandoned uploads, the orphaned-blob collection, the history prune,
-the game-metadata refresh, the token-cache clear and the database compaction.
-*Schedule* lists them all; opening one shows what starts it, lets you change
-it, and holds its log. Editing triggers is a form rather than a live control:
-changes are staged until *Save changes*, and leaving with unsaved ones asks
-first.
+Seven jobs run unattended: the database backup, the sweep of abandoned
+uploads, the orphaned-blob collection, the history prune, the game-metadata
+refresh, the token-cache clear and the database compaction. *Schedule* lists
+them; opening one shows what starts it, runs it now, and holds its log.
 
-**What can start a task.** Each one carries a list of triggers, and any one
-firing runs it:
+Each carries a list of triggers, and any one firing runs it:
 
-| Trigger | Reads as | For |
-| --- | --- | --- |
-| Timer | *every 2 days at 04:30 UTC*, *every 30 minutes*, *every week on Sunday*, *every month on the 1st* | the ordinary case: a count, a unit (minutes to months) and, for anything daily or longer, the time of day it lands on |
-| Server start | *5 min after the server starts* | catching up on whatever was missed while it was off — fires once per boot |
-| After another task | *after Back up the database* | chaining: collect the blobs the backup just made stale, compact after the prune |
-| An event | *when cloud_save. happens* | reacting to what launchers do, with a floor on how often it may fire |
-| A threshold | *when abandoned uploads is above 20*, *when free disk space is below 5 GB* | running the job when the server needs it rather than when a clock comes round |
+| Trigger | Reads as |
+| --- | --- |
+| Timer | *every 2 days at 04:30 UTC*, *every 30 minutes*, *every month on the 1st* |
+| Server start | *5 min after the server starts* — once per boot |
+| After another task | *after Back up the database* |
+| An event | *when cloud_save. happens*, with a floor on how often |
+| A threshold | *when free disk space is below 5 GB* |
 
-The numbers a threshold can watch are the ones each job exists to fix —
-abandoned uploads, games nothing could name, events past the retention window,
-the database's size on disk, and free space on the volume — and the editor
-shows what each reads right now, so a threshold is set against this server
-rather than a guess.
+A threshold watches one of the numbers a job exists to fix — abandoned
+uploads, games with no name, events past the retention window, database size,
+free disk — and the editor shows what each reads right now.
 
-Everything else about how it behaves:
+Times are UTC. A run missed while the server was down happens once, not once
+per period it slept through, and a job never runs twice at the same time.
+Every run is recorded in the task's log and in *History*
+(`system.task.ran`, `system.task.failed`, `admin.task.run`), so a webhook can
+carry a failure somewhere you will see it.
 
-- **Times are UTC**, so a schedule doesn't move under a daylight-saving
-  change. The editor shows what a run time is in your own clock beside it.
-- **A missed run happens once.** The next time is stored, not derived from a
-  count, so a server that was off for a week runs each task once when it comes
-  back rather than replaying every period it slept through.
-- **A job never runs twice at once.** *Run now* and the triggers take the same
-  lock, whether the run was started here, from *Maintenance*, or by the clock.
-- **Every run is recorded** — in the task's log, with what started it and what
-  that trigger saw, and in the event history as `system.task.ran`,
-  `system.task.failed` or `admin.task.run`, so a webhook can carry a failure
-  somewhere you will actually see it. A run in that log opens the same way a
-  row on *History* does: the timings, what started it, and the counters the
-  job reported, printed rather than hovered so they can be read and copied.
-
-The metadata refresh, the token-cache clear and the compaction start switched
-off: one costs a network round trip per game, one only makes sense as a
-deliberate act, and the last rewrites the whole database. Everything else
-starts on, with a timer, and the backup keeps whatever cadence
-`HYDRA_BACKUP_INTERVAL_HOURS` already asked for.
+Trigger edits are staged until *Save changes*. The metadata refresh, the
+token-cache clear and the compaction start switched off; the rest start on,
+and the backup keeps whatever `HYDRA_BACKUP_INTERVAL_HOURS` already asked for.
 
 ### Backups
 

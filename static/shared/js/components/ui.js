@@ -189,13 +189,6 @@ export function cover(game, size = "") {
 
 // ----------------------------------------------------------------- details
 
-/**
- * The detail blob of a recorded thing, flattened into one cell.
- *
- * A few pairs only — this is a glance, and the whole of it is one click away
- * in the expanded row. Rendering it inline is what makes a column of it
- * useful: "which of these failed, and why" without opening twenty rows.
- */
 export function detailSummary(detail, limit = 4) {
   if (!detail || typeof detail !== "object") return h("span", { class: "muted", text: "—" });
 
@@ -226,19 +219,10 @@ function brief(value) {
   if (typeof value === "object") return "{…}";
 
   const text = String(value);
-  /* A timestamp is the one string worth re-rendering: nothing is read off the
-     nanoseconds of an ISO date at a glance. */
   if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(text)) return fmt.relative(text);
   return text.length > 28 ? `${text.slice(0, 27)}…` : text;
 }
 
-/**
- * What an expanded row shows: the facts worth naming, then the raw blob.
- *
- * `facts` are `[label, value]` pairs, with an optional third element marking
- * the value as an identifier to render in the mono face. The blob is printed
- * rather than hovered, so it can be read at length and selected to copy.
- */
 export function detailPanel(facts, detail) {
   const pairs = (facts ?? []).filter(Boolean);
 
