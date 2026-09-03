@@ -163,6 +163,36 @@ pub struct RemoteSnapshotSummary {
     pub aggregate_hash: String,
 }
 
+/// A snapshot as the launcher's Cloud Save Manager needs it: the per-game
+/// summary plus enough identity to group it without asking per game.
+///
+/// Deliberately a separate shape from `RemoteSnapshotSummary`: the sync path
+/// validates that one key by key and rejects extras, so the manager fields
+/// only ever ride on this endpoint.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibrarySnapshotSummary {
+    pub id: String,
+    pub version: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub file_count: i64,
+    pub total_size_bytes: i64,
+    pub aggregate_hash: String,
+    pub shop: String,
+    pub object_id: String,
+    pub hostname: Option<String>,
+    pub platform: Option<String>,
+    pub game_name: Option<String>,
+    pub game_cover_url: Option<String>,
+    /// Older versions of this game's save that a commit replaced but kept,
+    /// because the owner turned automatic deletion off. They are invisible to
+    /// the sync path and still cost the owner quota, so the manager reports
+    /// what deleting the save would actually free.
+    pub retained_version_count: i64,
+    pub retained_size_bytes: i64,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManifestSnapshot {
@@ -587,6 +617,64 @@ pub async fn commit_snapshot(
 }
 
 // ---------------------------------------------------------------------------
+// GET /profile/cloud-saves/all-snapshots
+// ---------------------------------------------------------------------------
+
+/// Every committed snapshot this user has, across every game.
+///
+/// The launcher's Cloud Save Manager lists what is stored in the cloud, and
+/// the per-game endpoint would mean one request per library game — and would
+/// still miss saves of games no longer in the library. Mirrors the no-filter
+/// legacy artifacts listing, game metadata join included, so the manager can
+/// render both generations the same way.
+pub async fn list_all_snapshots(
+    State(state): State<AppState>,
+    user: CurrentUser,
+) -> ApiResult<Json<Vec<LibrarySnapshotSummary>>> {
+    let rows = sqlx::query(
+        "SELECT s.*, g.name AS game_name, g.cover_url AS game_cover_url,
+                (SELECT COUNT(*) FROM cloud_save_snapshots r
+                  WHERE r.user_id = s.user_id AND r.shop = s.shop
+                    AND r.object_id = s.object_id AND r.status = 'superseded')
+                  AS retained_version_count,
+                (SELECT COALESCE(SUM(r.total_size_in_bytes), 0)
+                   FROM cloud_save_snapshots r
+                  WHERE r.user_id = s.user_id AND r.shop = s.shop
+                    AND r.object_id = s.object_id AND r.status = 'superseded')
+                  AS retained_size_bytes
+         FROM cloud_save_snapshots s
+         LEFT JOIN game_metadata g ON g.shop = s.shop AND g.object_id = s.object_id
+         WHERE s.user_id = ? AND s.status = 'committed'
+         ORDER BY s.updated_at DESC",
+    )
+    .bind(&user.0.id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    Ok(Json(
+        rows.iter()
+            .map(|row| LibrarySnapshotSummary {
+                id: row.get("id"),
+                version: row.get("version"),
+                created_at: row.get("created_at"),
+                updated_at: row.get("updated_at"),
+                file_count: row.get("file_count"),
+                total_size_bytes: row.get("total_size_in_bytes"),
+                aggregate_hash: row.get("aggregate_hash"),
+                shop: row.get("shop"),
+                object_id: row.get("object_id"),
+                hostname: row.get("hostname"),
+                platform: row.get("platform"),
+                game_name: row.try_get("game_name").unwrap_or(None),
+                game_cover_url: row.try_get("game_cover_url").unwrap_or(None),
+                retained_version_count: row.get("retained_version_count"),
+                retained_size_bytes: row.get("retained_size_bytes"),
+            })
+            .collect(),
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // GET / DELETE /profile/cloud-saves/snapshots
 // ---------------------------------------------------------------------------
 
@@ -1001,6 +1089,49 @@ mod tests {
                 "createdAt",
                 "fileCount",
                 "id",
+                "totalSizeBytes",
+                "updatedAt",
+                "version"
+            ]
+        );
+    }
+
+    #[test]
+    fn library_snapshot_summary_extends_the_launcher_shape() {
+        let value = serde_json::to_value(LibrarySnapshotSummary {
+            id: "id".into(),
+            version: 1,
+            created_at: "2026-08-01T10:00:00Z".into(),
+            updated_at: "2026-08-01T10:00:00Z".into(),
+            file_count: 3,
+            total_size_bytes: 42,
+            aggregate_hash: "b".repeat(64),
+            shop: "steam".into(),
+            object_id: "440".into(),
+            hostname: Some("desktop".into()),
+            platform: Some("windows".into()),
+            game_name: None,
+            game_cover_url: None,
+            retained_version_count: 0,
+            retained_size_bytes: 0,
+        })
+        .unwrap();
+
+        assert_eq!(
+            keys(&value),
+            vec![
+                "aggregateHash",
+                "createdAt",
+                "fileCount",
+                "gameCoverUrl",
+                "gameName",
+                "hostname",
+                "id",
+                "objectId",
+                "platform",
+                "retainedSizeBytes",
+                "retainedVersionCount",
+                "shop",
                 "totalSizeBytes",
                 "updatedAt",
                 "version"
