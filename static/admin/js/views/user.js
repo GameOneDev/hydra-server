@@ -142,7 +142,6 @@ export default {
             : emptyState("No uploads yet", "Devices appear once this user syncs something.", "device"),
         }),
       ),
-      limitsCard(user, ctx),
       detail.games.length
         ? card({
             title: "Top games",
@@ -183,6 +182,7 @@ export default {
         subtitle: fmt.duration(user.playtimeSeconds),
         body: h("div", { class: "card-body" }, heatmap(playtime)),
       }),
+      limitsCard(user, ctx),
       dangerZone(user, ctx),
     );
   },
@@ -295,9 +295,9 @@ function limitsCard(user, ctx) {
       "select",
       { class: "select" },
       h("option", { value: "delete", text: "Delete the version being replaced" }),
-      h("option", { value: "keep", text: "Keep it — delete only by hand" }),
+      h("option", { value: "keep", text: "Keep it - delete only by hand" }),
     ),
-    hint: "Kept versions stay out of the launcher's way but still count against this user's quota. They are listed under Saves as “older version”, and the user sees them in their portal. Uploads that never finished are swept either way.",
+    hint: "Kept versions stay out of the launcher's way. They are listed under Saves as “older version”, and the user sees them in their portal.",
   });
   autoDelete.input.value = effective.autoDeleteSaves ? "delete" : "keep";
 

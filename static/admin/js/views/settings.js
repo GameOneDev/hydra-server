@@ -89,7 +89,7 @@ export default {
           checkField(
             "Delete a save the launcher replaces",
             autoDelete,
-            `Off, the previous cloud save version of a game and the previous save in an emulator slot are kept instead of deleted — still on the owner's quota, and theirs to delete from the portal or yours from Saves. Never-finished uploads are swept either way. Environment default: ${data.defaults.autoDeleteSaves ? "on" : "off"}. Per-user exceptions live on each user's page.`,
+            `When Off - the previous cloud save version of a game are kept instead of being deleted. Environment default: ${data.defaults.autoDeleteSaves ? "on" : "off"}.`,
           ),
           field(
             "Allowed users",

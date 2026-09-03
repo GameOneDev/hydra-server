@@ -63,7 +63,7 @@ pub const JOBS: &[Job] = &[
     Job {
         id: "delete-retained-versions",
         title: "Delete retained older versions",
-        description: "Delete every save kept because automatic save deletion is off — the previous cloud save version of a game, the previous save in an emulator slot. The current one is never touched.",
+        description: "Delete old game saves except the latest one.",
         schedulable: true,
         danger: true,
         default_every: 1,
