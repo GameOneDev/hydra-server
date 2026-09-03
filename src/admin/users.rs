@@ -34,6 +34,11 @@ pub(crate) fn used_bytes_expr() -> String {
 const USER_COUNTS: &str = "
     (SELECT COUNT(*) FROM cloud_save_snapshots s
       WHERE s.user_id = u.id AND s.status = 'committed') AS cloud_save_count,
+    /* Versions a sync replaced and the server kept. They are no game's
+       current save, so they sit outside the count above while still filling
+       the account — which is the question this screen exists to answer. */
+    (SELECT COUNT(*) FROM cloud_save_snapshots s
+      WHERE s.user_id = u.id AND s.status = 'superseded') AS retained_save_count,
     (SELECT COUNT(*) FROM artifacts a WHERE a.user_id = u.id) AS backup_count,
     (SELECT COUNT(*) FROM emulation_saves e WHERE e.user_id = u.id) AS emulation_save_count,
     (SELECT COUNT(*) FROM game_achievements g WHERE g.user_id = u.id) AS achievement_game_count,
@@ -71,6 +76,7 @@ fn user_json(state: &AppState, row: &sqlx::sqlite::SqliteRow, quota: u64) -> Val
         "quotaRatio": if quota > 0 { used as f64 / quota as f64 } else { 0.0 },
         "counts": {
             "cloudSaves": row.get::<i64, _>("cloud_save_count"),
+            "retainedCloudSaves": row.get::<i64, _>("retained_save_count"),
             "backups": row.get::<i64, _>("backup_count"),
             "emulationSaves": row.get::<i64, _>("emulation_save_count"),
             "achievementGames": row.get::<i64, _>("achievement_game_count"),

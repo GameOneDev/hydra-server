@@ -76,7 +76,17 @@ export default {
         statTile({
           label: "Cloud saves (v2)",
           value: fmt.number(user.counts.cloudSaves),
-          sub: `${fmt.plural(user.counts.backups, "legacy backup")}`,
+          sub: [
+            fmt.plural(user.counts.backups, "legacy backup"),
+            /* Kept versions are no game's current save, so the number above
+               leaves them out — but they are why an account can be far larger
+               than its save count suggests. */
+            user.counts.retainedCloudSaves
+              ? `+ ${fmt.plural(user.counts.retainedCloudSaves, "older version")} kept`
+              : null,
+          ]
+            .filter(Boolean)
+            .join(" · "),
         }),
         statTile({
           label: "Emulation saves",
