@@ -48,9 +48,8 @@ fn valid_shop(shop: &str) -> bool {
     matches!(shop, "steam" | "launchbox")
 }
 
-/// A version a commit replaced and the server kept. The by-id routes act on
-/// these and only these: no sync reads one, so deleting or promoting it
-/// cannot pull the ground out from under a launcher mid-sync.
+/// A version a commit replaced and the server kept. No sync reads one, which
+/// is why the by-id routes act on these and only these.
 fn is_retained(status: &str) -> bool {
     status == "superseded"
 }
@@ -170,12 +169,8 @@ pub struct RemoteSnapshotSummary {
     pub aggregate_hash: String,
 }
 
-/// A snapshot as the launcher's Cloud Save Manager needs it: the per-game
-/// summary plus enough identity to group it without asking per game.
-///
-/// Deliberately a separate shape from `RemoteSnapshotSummary`: the sync path
-/// validates that one key by key and rejects extras, so the manager fields
-/// only ever ride on this endpoint.
+/// A snapshot for the launcher's Cloud Save Manager. Separate from
+/// `RemoteSnapshotSummary`, which the sync path validates key by key.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibrarySnapshotSummary {
@@ -192,11 +187,7 @@ pub struct LibrarySnapshotSummary {
     pub platform: Option<String>,
     pub game_name: Option<String>,
     pub game_cover_url: Option<String>,
-    /// `current` for the save the launcher syncs, `retained` for a version a
-    /// commit replaced and the server kept, because the owner turned automatic
-    /// deletion off. A retained version never takes part in a sync and still
-    /// costs its owner quota, so the manager lists it to be restored or
-    /// deleted.
+    /// `current` for the save being synced, `retained` for a kept older one.
     pub status: &'static str,
 }
 
@@ -656,17 +647,8 @@ pub async fn commit_snapshot(
 // GET /profile/cloud-saves/all-snapshots
 // ---------------------------------------------------------------------------
 
-/// Every stored snapshot this user has, across every game: the current save
-/// of each game and any version a commit replaced but kept.
-///
-/// The launcher's Cloud Save Manager lists what is stored in the cloud, and
-/// the per-game endpoint would mean one request per library game — and would
-/// still miss saves of games no longer in the library. Mirrors the no-filter
-/// legacy artifacts listing, game metadata join included, so the manager can
-/// render both generations the same way.
-///
-/// Uploads that never committed are left out: they are not storage the user
-/// chose to keep, and the sweeper collects them on its own.
+/// Every stored snapshot of this user, current and retained, so the manager
+/// needs one request instead of one per game. Pending uploads are left out.
 pub async fn list_all_snapshots(
     State(state): State<AppState>,
     user: CurrentUser,
@@ -806,10 +788,6 @@ pub async fn delete_snapshots(
 // ---------------------------------------------------------------------------
 
 /// Removes one retained version and frees any blob it alone referenced.
-///
-/// This is how the launcher's Cloud Save Manager clears the versions a commit
-/// replaced but kept: they are storage the owner pays for and nothing else can
-/// reach them, since no sync ever reads a version that is not current.
 pub async fn delete_snapshot(
     State(state): State<AppState>,
     user: CurrentUser,
@@ -827,10 +805,9 @@ pub async fn delete_snapshot(
     .await?
     .ok_or_else(|| ApiError::not_found("snapshot not found"))?;
 
-    /* Never the save in use: every machine syncing it holds an anchor
-       describing those bytes, and a merge that still trusts the anchor reads a
-       local file as remotely deleted. That one goes through the per-game
-       delete, which the launcher pairs with clearing its local state. */
+    /* Never the save in use: launchers hold a sync anchor for it, and would
+       read its files as remotely deleted. That goes through the per-game
+       delete, which clears the launcher's local state too. */
     if !is_retained(&snapshot.get::<String, _>("status")) {
         return Err(ApiError::bad_request(
             "only a retained version can be deleted on its own",
@@ -875,11 +852,8 @@ pub async fn delete_snapshot(
 
 /// Puts a retained version back in use as the game's current save.
 ///
-/// The rollback happens here rather than in the launcher: promoting the old
-/// manifest to a new version leaves every machine to notice on its next sync
-/// that the remote moved, and restore through the same path it already uses
-/// for a save another machine uploaded. Nothing is copied and no blob moves —
-/// the two versions swap places, so this is reversible until one is deleted.
+/// The two versions swap places — no bytes move, so it is reversible — and
+/// every launcher restores it on its next sync like any other remote change.
 pub async fn restore_snapshot(
     State(state): State<AppState>,
     user: CurrentUser,
@@ -909,8 +883,7 @@ pub async fn restore_snapshot(
 
     let mut tx = state.pool.begin().await?;
 
-    /* One more than anything this game has ever held, so a launcher holding
-       the version it started from still sees the remote as moved on. */
+    /* Past every version this game has held, so launchers see it as newer. */
     let next_version: i64 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(version), 0) + 1 FROM cloud_save_snapshots
          WHERE user_id = ? AND shop = ? AND object_id = ?",
@@ -921,9 +894,8 @@ pub async fn restore_snapshot(
     .fetch_one(&mut *tx)
     .await?;
 
-    /* Demote before promoting: only one snapshot per game may be committed,
-       and the one stepping aside is worth keeping — the user restoring an
-       older save is the one who asked for versions to be kept. */
+    /* Demote first: only one snapshot per game may be committed. The one
+       stepping aside is kept, so the restore can be undone. */
     sqlx::query(
         "UPDATE cloud_save_snapshots SET status = 'superseded', updated_at = ?
          WHERE user_id = ? AND shop = ? AND object_id = ? AND status = 'committed'",

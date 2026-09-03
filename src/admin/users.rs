@@ -36,9 +36,7 @@ pub(crate) fn used_bytes_expr() -> String {
 const USER_COUNTS: &str = "
     (SELECT COUNT(*) FROM cloud_save_snapshots s
       WHERE s.user_id = u.id AND s.status = 'committed') AS cloud_save_count,
-    /* Versions a sync replaced and the server kept. They are no game's
-       current save, so they sit outside the count above while still filling
-       the account — which is the question this screen exists to answer. */
+    /* Kept older versions: no game's current save, but still stored. */
     (SELECT COUNT(*) FROM cloud_save_snapshots s
       WHERE s.user_id = u.id AND s.status = 'superseded') AS retained_save_count,
     (SELECT COUNT(*) FROM artifacts a WHERE a.user_id = u.id) AS backup_count,

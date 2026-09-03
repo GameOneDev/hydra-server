@@ -432,17 +432,12 @@ Steam games. A save is a manifest of files, each content-addressed by SHA-256:
 - `POST /profile/cloud-saves/commit-snapshot` — verifies the bytes landed and
   promotes the snapshot to the game's current save
 - `GET|DELETE /profile/cloud-saves/snapshots?shop=&objectId=`
-- `GET /profile/cloud-saves/all-snapshots` — every stored snapshot of the
-  user, each tagged with its game (and cached game name/cover) and marked
-  `current` or `retained`, for the launcher's Cloud Save Manager
-- `DELETE /profile/cloud-saves/snapshots/{id}` — removes one retained
-  version. A game's current save is refused here: every machine holding a
-  sync anchor for it would be left pointing at bytes that are gone, so that
-  one goes through the per-game delete above
+- `GET /profile/cloud-saves/all-snapshots` — every snapshot of the user,
+  tagged with its game and marked `current` or `retained`
+- `DELETE /profile/cloud-saves/snapshots/{id}` — deletes one retained
+  version (the current save goes through the per-game delete above)
 - `POST /profile/cloud-saves/snapshots/{id}/restore` — puts a retained
-  version back in use, as a new version, and keeps the one it replaced. No
-  bytes move: the two swap places, so the rollback is itself reversible, and
-  every machine picks it up as an ordinary remote change on its next sync
+  version back in use; the two swap places, so it can be undone
 - `GET /profile/cloud-saves/snapshot-restore-manifest?snapshotId=`
 - `GET /profile/cloud-saves/snapshot-download-urls?snapshotId=`
 

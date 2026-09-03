@@ -80,9 +80,7 @@ export default {
           value: fmt.number(user.counts.cloudSaves),
           sub: [
             fmt.plural(user.counts.backups, "legacy backup"),
-            /* Kept versions are no game's current save, so the number above
-               leaves them out — but they are why an account can be far larger
-               than its save count suggests. */
+            /* Not counted above, but they still fill the account. */
             user.counts.retainedCloudSaves
               ? `+ ${fmt.plural(user.counts.retainedCloudSaves, "older version")} kept`
               : null,
