@@ -188,6 +188,76 @@ export function cover(game, size = "") {
   return image;
 }
 
+// ----------------------------------------------------------------- details
+
+export function detailSummary(detail, limit = 4) {
+  if (!detail || typeof detail !== "object") return h("span", { class: "muted", text: "—" });
+
+  const entries = Object.entries(detail).filter(([, value]) => value !== null && value !== "");
+  if (!entries.length) return h("span", { class: "muted", text: "—" });
+
+  return h(
+    "div",
+    { class: "row wrap", style: { gap: "4px 8px" } },
+    ...entries.slice(0, limit).map(([key, value]) =>
+      h(
+        "span",
+        { class: "small", style: { whiteSpace: "nowrap" } },
+        h("span", { class: "muted", text: `${fmt.label(key)} ` }),
+        h("span", { class: "mono", text: brief(value) }),
+      ),
+    ),
+    entries.length > limit
+      ? h("span", { class: "muted small", text: `+${entries.length - limit}` })
+      : null,
+  );
+}
+
+function brief(value) {
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  if (typeof value === "number") return fmt.number(value);
+  if (Array.isArray(value)) return `${value.length} item(s)`;
+  if (typeof value === "object") return "{…}";
+
+  const text = String(value);
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(text)) return fmt.relative(text);
+  return text.length > 28 ? `${text.slice(0, 27)}…` : text;
+}
+
+export function detailPanel(facts, detail) {
+  const pairs = (facts ?? []).filter(Boolean);
+
+  return h(
+    "div",
+    { class: "card-body", style: { display: "grid", gap: "12px", minWidth: 0 } },
+    pairs.length
+      ? h(
+          "dl",
+          { class: "kv" },
+          ...pairs.flatMap(([label, value, mono]) => [
+            h("dt", { text: label }),
+            h("dd", { class: mono ? "mono" : "", text: String(value) }),
+          ]),
+        )
+      : null,
+    detail
+      ? h("pre", {
+          class: "mono",
+          style: {
+            margin: 0,
+            padding: "10px 12px",
+            background: "var(--surface-1)",
+            borderRadius: "8px",
+            overflowX: "auto",
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+          },
+          text: JSON.stringify(detail, null, 2),
+        })
+      : null,
+  );
+}
+
 // ----------------------------------------------------------------- alerts
 
 const ALERT_ICONS = { critical: "critical", warning: "warning", info: "info" };
@@ -319,9 +389,18 @@ export function confirm({ title, body, confirmLabel = "Confirm", danger = false,
   });
 }
 
-export function openDrawer({ title, subtitle, body }) {
+export function openDrawer({ title, subtitle, body, beforeClose }) {
   const scrim = h("div", { class: "scrim" });
-  const close = () => {
+
+  let closing = false;
+  const close = async () => {
+    if (closing) return;
+    closing = true;
+    try {
+      if (beforeClose && !(await beforeClose())) return;
+    } finally {
+      closing = false;
+    }
     scrim.remove();
     removeEventListener("keydown", onKey);
   };

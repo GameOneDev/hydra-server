@@ -23,6 +23,7 @@
 //! | [`games`] | the same data pivoted by game rather than by user |
 //! | [`storage`] | what occupies disk, and whether disk and database agree |
 //! | [`maintenance`] | one-shot operations: sweeps, garbage collection, metadata refresh, export |
+//! | [`schedule`] | the timetable those same operations run on unattended, and each one's log |
 //! | [`backups`] | database backups: take one, download it, prune the rest |
 //! | [`webhooks`] | outbound notifications for anything in the event log |
 //! | [`settings`] | the runtime settings the panel may change |
@@ -41,6 +42,7 @@ mod games;
 mod maintenance;
 mod overview;
 mod saves;
+mod schedule;
 mod session;
 mod settings;
 mod storage;
@@ -60,6 +62,7 @@ pub fn router() -> Router<AppState> {
         .merge(games::router())
         .merge(storage::router())
         .merge(maintenance::router())
+        .merge(schedule::router())
         .merge(backups::router())
         .merge(webhooks::router())
         .merge(settings::router())

@@ -228,9 +228,27 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
     )
     .await?;
 
+    let failed_tasks: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM scheduled_tasks WHERE last_status = 'error' ORDER BY id",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+
     /* Alerts are the panel's reason to be checked at all: each is a condition
        an operator would want to act on, with the screen that acts on it. */
     let mut alerts: Vec<Value> = Vec::new();
+    if !failed_tasks.is_empty() {
+        let titles: Vec<&str> = failed_tasks
+            .iter()
+            .filter_map(|id| crate::jobs::find(id).map(|job| job.title))
+            .collect();
+        alerts.push(json!({
+            "level": "warning",
+            "title": format!("{} scheduled task(s) failed on their last run", failed_tasks.len()),
+            "detail": format!("{}. The task's own log says what went wrong.", titles.join(", ")),
+            "action": { "label": "Open the schedule", "route": "#/schedule" },
+        }));
+    }
     if stuck_snapshots > 0 {
         alerts.push(json!({
             "level": "warning",

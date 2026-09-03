@@ -17,6 +17,8 @@ import {
   gameCell,
   pill,
   emptyState,
+  detailSummary,
+  detailPanel,
 } from "/assets/shared/js/components/ui.js";
 import {
   dataTable,
@@ -120,7 +122,7 @@ const COLUMNS = [
     /* Everything an event kept that no column is shaped for: file counts,
        failure reasons, how many rows a restore moved. Different keys per
        kind, which is exactly why they share one column. */
-    render: (row) => otherCell(row.detail),
+    render: (row) => detailSummary(row.detail),
   },
   {
     key: "severity",
@@ -261,85 +263,19 @@ export default {
   },
 };
 
-/**
- * The detail blob, flattened into one cell.
- *
- * A few pairs only — this is a glance, and the full JSON is one click away in
- * the expanded row. Rendering it inline is what makes a column of it useful:
- * "which of these failed, and why" without opening twenty rows.
- */
-function otherCell(detail, limit = 4) {
-  if (!detail || typeof detail !== "object") return h("span", { class: "muted", text: "—" });
-
-  const entries = Object.entries(detail).filter(([, value]) => value !== null && value !== "");
-  if (!entries.length) return h("span", { class: "muted", text: "—" });
-
-  return h(
-    "div",
-    { class: "row wrap", style: { gap: "4px 8px" } },
-    ...entries.slice(0, limit).map(([key, value]) =>
-      h(
-        "span",
-        { class: "small", style: { whiteSpace: "nowrap" } },
-        h("span", { class: "muted", text: `${fmt.label(key)} ` }),
-        h("span", { class: "mono", text: brief(value) }),
-      ),
-    ),
-    entries.length > limit
-      ? h("span", { class: "muted small", text: `+${entries.length - limit}` })
-      : null,
-  );
-}
-
-function brief(value) {
-  if (typeof value === "boolean") return value ? "yes" : "no";
-  if (typeof value === "number") return fmt.number(value);
-  if (Array.isArray(value)) return `${value.length} item(s)`;
-  if (typeof value === "object") return "{…}";
-
-  const text = String(value);
-  /* A timestamp is the one string worth re-rendering: nothing is read off the
-     nanoseconds of an ISO date at a glance. */
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(text)) return fmt.relative(text);
-  return text.length > 28 ? `${text.slice(0, 27)}…` : text;
-}
-
 function details(row) {
-  const facts = [
-    ["Recorded", fmt.dateTime(row.at)],
-    ["Kind", row.kind],
-    ["Category", row.category],
-    ["Severity", row.severity],
-    ["Actor", row.actor ?? "—"],
-    row.ip ? ["Address", row.ip] : null,
-    row.user?.id ? ["Subject", row.user.displayName || row.user.id] : null,
-    row.game?.objectId ? ["Game", fmt.gameName(row.game)] : null,
-    row.sizeBytes ? ["Size", fmt.bytes(row.sizeBytes)] : null,
-  ].filter(Boolean);
-
-  return h(
-    "div",
-    { class: "card-body", style: { display: "grid", gap: "12px" } },
-    h(
-      "dl",
-      { class: "kv" },
-      ...facts.flatMap(([key, value]) => [
-        h("dt", { text: key }),
-        h("dd", { class: key === "Kind" ? "mono" : "", text: String(value) }),
-      ]),
-    ),
-    row.detail
-      ? h("pre", {
-          class: "mono",
-          style: {
-            margin: 0,
-            padding: "10px 12px",
-            background: "var(--surface-1)",
-            borderRadius: "8px",
-            overflowX: "auto",
-          },
-          text: JSON.stringify(row.detail, null, 2),
-        })
-      : null,
+  return detailPanel(
+    [
+      ["Recorded", fmt.dateTime(row.at)],
+      ["Kind", row.kind, true],
+      ["Category", row.category],
+      ["Severity", row.severity],
+      ["Actor", row.actor ?? "—"],
+      row.ip ? ["Address", row.ip] : null,
+      row.user?.id ? ["Subject", row.user.displayName || row.user.id] : null,
+      row.game?.objectId ? ["Game", fmt.gameName(row.game)] : null,
+      row.sizeBytes ? ["Size", fmt.bytes(row.sizeBytes)] : null,
+    ],
+    row.detail,
   );
 }
