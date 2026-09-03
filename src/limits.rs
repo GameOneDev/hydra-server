@@ -136,6 +136,12 @@ pub async fn save(
     user_id: &str,
     overrides: Overrides,
 ) -> Result<bool, sqlx::Error> {
+    let max_bytes_override: Option<i64> = overrides
+        .max_bytes_per_user
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+
     let result = sqlx::query(
         "UPDATE users SET
             max_bytes_override = ?,
@@ -143,7 +149,7 @@ pub async fn save(
             auto_delete_saves_override = ?
          WHERE id = ?",
     )
-    .bind(overrides.max_bytes_per_user.map(|bytes| bytes as i64))
+    .bind(max_bytes_override)
     .bind(overrides.backups_per_game_limit.map(|limit| limit as i64))
     .bind(overrides.auto_delete_saves.map(i64::from))
     .bind(user_id)

@@ -89,7 +89,7 @@ export default {
           checkField(
             "Delete a save the launcher replaces",
             autoDelete,
-            `When Off - the previous cloud save version of a game are kept instead of being deleted. Environment default: ${data.defaults.autoDeleteSaves ? "on" : "off"}.`,
+            `When Off, the previous cloud save version of a game is kept instead of being deleted. Environment default: ${data.defaults.autoDeleteSaves ? "on" : "off"}.`,
           ),
           field(
             "Allowed users",

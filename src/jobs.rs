@@ -290,18 +290,20 @@ async fn delete_retained_versions(state: &AppState) -> ApiResult<Value> {
 
     let mut owners: std::collections::HashSet<String> = Default::default();
     for row in &snapshots {
-        let id: String = row.get("id");
         owners.insert(row.get("user_id"));
-
-        sqlx::query("DELETE FROM cloud_save_snapshot_files WHERE snapshot_id = ?")
-            .bind(&id)
-            .execute(&state.pool)
-            .await?;
-        sqlx::query("DELETE FROM cloud_save_snapshots WHERE id = ?")
-            .bind(&id)
-            .execute(&state.pool)
-            .await?;
     }
+
+    sqlx::query(
+        "DELETE FROM cloud_save_snapshot_files
+         WHERE snapshot_id IN (
+           SELECT id FROM cloud_save_snapshots WHERE status = 'superseded'
+         )",
+    )
+    .execute(&state.pool)
+    .await?;
+    sqlx::query("DELETE FROM cloud_save_snapshots WHERE status = 'superseded'")
+        .execute(&state.pool)
+        .await?;
 
     let saves: Vec<String> =
         sqlx::query_scalar("SELECT id FROM emulation_saves WHERE superseded_at IS NOT NULL")
