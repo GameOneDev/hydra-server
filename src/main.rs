@@ -211,6 +211,10 @@ fn router(_state: AppState) -> Router<AppState> {
             get(cloud_saves::list_snapshots).delete(cloud_saves::delete_snapshots),
         )
         .route(
+            "/profile/cloud-saves/snapshots/{id}",
+            delete(cloud_saves::delete_snapshot),
+        )
+        .route(
             "/profile/cloud-saves/all-snapshots",
             get(cloud_saves::list_all_snapshots),
         )

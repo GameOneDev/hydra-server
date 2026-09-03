@@ -22,7 +22,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::events::Event;
 use crate::state::AppState;
 use crate::storage;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -46,6 +46,17 @@ fn is_sha256(value: &str) -> bool {
 /// validator rejects anything else outright.
 fn valid_shop(shop: &str) -> bool {
     matches!(shop, "steam" | "launchbox")
+}
+
+/// Which snapshots `DELETE /profile/cloud-saves/snapshots/{id}` may remove.
+///
+/// Only a version the launcher no longer syncs. Deleting a game's current
+/// save leaves every machine holding a sync anchor that points at bytes which
+/// are gone, and a merge that trusts it reads a local file as remotely
+/// deleted — so that one goes through the per-game delete, which the launcher
+/// pairs with clearing its local state.
+fn is_deletable_by_id(status: &str) -> bool {
+    status == "superseded"
 }
 
 /// `x-amz-checksum-sha256` carries the digest base64-encoded, not hex. The
@@ -185,12 +196,11 @@ pub struct LibrarySnapshotSummary {
     pub platform: Option<String>,
     pub game_name: Option<String>,
     pub game_cover_url: Option<String>,
-    /// Older versions of this game's save that a commit replaced but kept,
-    /// because the owner turned automatic deletion off. They are invisible to
-    /// the sync path and still cost the owner quota, so the manager reports
-    /// what deleting the save would actually free.
-    pub retained_version_count: i64,
-    pub retained_size_bytes: i64,
+    /// `current` for the save the launcher syncs, `retained` for a version a
+    /// commit replaced and the server kept, because the owner turned automatic
+    /// deletion off. A retained version never takes part in a sync and still
+    /// costs its owner quota, so the manager lists it to be deleted.
+    pub status: &'static str,
 }
 
 #[derive(Serialize)]
@@ -620,31 +630,26 @@ pub async fn commit_snapshot(
 // GET /profile/cloud-saves/all-snapshots
 // ---------------------------------------------------------------------------
 
-/// Every committed snapshot this user has, across every game.
+/// Every stored snapshot this user has, across every game: the current save
+/// of each game and any version a commit replaced but kept.
 ///
 /// The launcher's Cloud Save Manager lists what is stored in the cloud, and
 /// the per-game endpoint would mean one request per library game — and would
 /// still miss saves of games no longer in the library. Mirrors the no-filter
 /// legacy artifacts listing, game metadata join included, so the manager can
 /// render both generations the same way.
+///
+/// Uploads that never committed are left out: they are not storage the user
+/// chose to keep, and the sweeper collects them on its own.
 pub async fn list_all_snapshots(
     State(state): State<AppState>,
     user: CurrentUser,
 ) -> ApiResult<Json<Vec<LibrarySnapshotSummary>>> {
     let rows = sqlx::query(
-        "SELECT s.*, g.name AS game_name, g.cover_url AS game_cover_url,
-                (SELECT COUNT(*) FROM cloud_save_snapshots r
-                  WHERE r.user_id = s.user_id AND r.shop = s.shop
-                    AND r.object_id = s.object_id AND r.status = 'superseded')
-                  AS retained_version_count,
-                (SELECT COALESCE(SUM(r.total_size_in_bytes), 0)
-                   FROM cloud_save_snapshots r
-                  WHERE r.user_id = s.user_id AND r.shop = s.shop
-                    AND r.object_id = s.object_id AND r.status = 'superseded')
-                  AS retained_size_bytes
+        "SELECT s.*, g.name AS game_name, g.cover_url AS game_cover_url
          FROM cloud_save_snapshots s
          LEFT JOIN game_metadata g ON g.shop = s.shop AND g.object_id = s.object_id
-         WHERE s.user_id = ? AND s.status = 'committed'
+         WHERE s.user_id = ? AND s.status IN ('committed', 'superseded')
          ORDER BY s.updated_at DESC",
     )
     .bind(&user.0.id)
@@ -667,8 +672,11 @@ pub async fn list_all_snapshots(
                 platform: row.get("platform"),
                 game_name: row.try_get("game_name").unwrap_or(None),
                 game_cover_url: row.try_get("game_cover_url").unwrap_or(None),
-                retained_version_count: row.get("retained_version_count"),
-                retained_size_bytes: row.get("retained_size_bytes"),
+                status: if row.get::<String, _>("status") == "committed" {
+                    "current"
+                } else {
+                    "retained"
+                },
             })
             .collect(),
     ))
@@ -761,6 +769,70 @@ pub async fn delete_snapshots(
         Event::sync("cloud_save.deleted", user_id, "Deleted a cloud save from the launcher")
             .game(&query.shop, &query.object_id)
             .detail(serde_json::json!({ "snapshots": ids.len() })),
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /profile/cloud-saves/snapshots/{id}
+// ---------------------------------------------------------------------------
+
+/// Removes one retained version and frees any blob it alone referenced.
+///
+/// This is how the launcher's Cloud Save Manager clears the versions a commit
+/// replaced but kept: they are storage the owner pays for and nothing else can
+/// reach them, since no sync ever reads a version that is not current.
+pub async fn delete_snapshot(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    let user_id = &user.0.id;
+
+    let snapshot = sqlx::query(
+        "SELECT shop, object_id, status, total_size_in_bytes
+         FROM cloud_save_snapshots WHERE id = ? AND user_id = ?",
+    )
+    .bind(&id)
+    .bind(user_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| ApiError::not_found("snapshot not found"))?;
+
+    if !is_deletable_by_id(&snapshot.get::<String, _>("status")) {
+        return Err(ApiError::bad_request(
+            "only a retained version can be deleted on its own",
+        ));
+    }
+
+    let shop: String = snapshot.get("shop");
+    let object_id: String = snapshot.get("object_id");
+
+    sqlx::query("DELETE FROM cloud_save_snapshot_files WHERE snapshot_id = ?")
+        .bind(&id)
+        .execute(&state.pool)
+        .await?;
+    sqlx::query("DELETE FROM cloud_save_snapshots WHERE id = ?")
+        .bind(&id)
+        .execute(&state.pool)
+        .await?;
+
+    collect_orphan_blobs(&state, user_id).await?;
+
+    tracing::info!("cloud save v2: deleted retained version {id} for {user_id}");
+
+    crate::events::record(
+        &state,
+        Event::sync(
+            "cloud_save.deleted",
+            user_id,
+            "Deleted a kept cloud save version from the launcher",
+        )
+        .game(&shop, &object_id)
+        .detail(serde_json::json!({ "snapshotId": id, "retained": true }))
+        .size(snapshot.get::<i64, _>("total_size_in_bytes")),
     )
     .await;
 
@@ -1097,6 +1169,13 @@ mod tests {
     }
 
     #[test]
+    fn only_a_retained_version_can_be_deleted_on_its_own() {
+        assert!(is_deletable_by_id("superseded"));
+        assert!(!is_deletable_by_id("committed"));
+        assert!(!is_deletable_by_id("pending"));
+    }
+
+    #[test]
     fn library_snapshot_summary_extends_the_launcher_shape() {
         let value = serde_json::to_value(LibrarySnapshotSummary {
             id: "id".into(),
@@ -1112,8 +1191,7 @@ mod tests {
             platform: Some("windows".into()),
             game_name: None,
             game_cover_url: None,
-            retained_version_count: 0,
-            retained_size_bytes: 0,
+            status: "current",
         })
         .unwrap();
 
@@ -1129,9 +1207,8 @@ mod tests {
                 "id",
                 "objectId",
                 "platform",
-                "retainedSizeBytes",
-                "retainedVersionCount",
                 "shop",
+                "status",
                 "totalSizeBytes",
                 "updatedAt",
                 "version"
