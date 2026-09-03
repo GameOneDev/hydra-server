@@ -406,6 +406,10 @@ Steam games. A save is a manifest of files, each content-addressed by SHA-256:
   version. A game's current save is refused here: every machine holding a
   sync anchor for it would be left pointing at bytes that are gone, so that
   one goes through the per-game delete above
+- `POST /profile/cloud-saves/snapshots/{id}/restore` — puts a retained
+  version back in use, as a new version, and keeps the one it replaced. No
+  bytes move: the two swap places, so the rollback is itself reversible, and
+  every machine picks it up as an ordinary remote change on its next sync
 - `GET /profile/cloud-saves/snapshot-restore-manifest?snapshotId=`
 - `GET /profile/cloud-saves/snapshot-download-urls?snapshotId=`
 

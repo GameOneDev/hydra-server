@@ -48,14 +48,10 @@ fn valid_shop(shop: &str) -> bool {
     matches!(shop, "steam" | "launchbox")
 }
 
-/// Which snapshots `DELETE /profile/cloud-saves/snapshots/{id}` may remove.
-///
-/// Only a version the launcher no longer syncs. Deleting a game's current
-/// save leaves every machine holding a sync anchor that points at bytes which
-/// are gone, and a merge that trusts it reads a local file as remotely
-/// deleted — so that one goes through the per-game delete, which the launcher
-/// pairs with clearing its local state.
-fn is_deletable_by_id(status: &str) -> bool {
+/// A version a commit replaced and the server kept. The by-id routes act on
+/// these and only these: no sync reads one, so deleting or promoting it
+/// cannot pull the ground out from under a launcher mid-sync.
+fn is_retained(status: &str) -> bool {
     status == "superseded"
 }
 
@@ -199,7 +195,8 @@ pub struct LibrarySnapshotSummary {
     /// `current` for the save the launcher syncs, `retained` for a version a
     /// commit replaced and the server kept, because the owner turned automatic
     /// deletion off. A retained version never takes part in a sync and still
-    /// costs its owner quota, so the manager lists it to be deleted.
+    /// costs its owner quota, so the manager lists it to be restored or
+    /// deleted.
     pub status: &'static str,
 }
 
@@ -801,7 +798,11 @@ pub async fn delete_snapshot(
     .await?
     .ok_or_else(|| ApiError::not_found("snapshot not found"))?;
 
-    if !is_deletable_by_id(&snapshot.get::<String, _>("status")) {
+    /* Never the save in use: every machine syncing it holds an anchor
+       describing those bytes, and a merge that still trusts the anchor reads a
+       local file as remotely deleted. That one goes through the per-game
+       delete, which the launcher pairs with clearing its local state. */
+    if !is_retained(&snapshot.get::<String, _>("status")) {
         return Err(ApiError::bad_request(
             "only a retained version can be deleted on its own",
         ));
@@ -837,6 +838,118 @@ pub async fn delete_snapshot(
     .await;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// POST /profile/cloud-saves/snapshots/{id}/restore
+// ---------------------------------------------------------------------------
+
+/// Puts a retained version back in use as the game's current save.
+///
+/// The rollback happens here rather than in the launcher: promoting the old
+/// manifest to a new version leaves every machine to notice on its next sync
+/// that the remote moved, and restore through the same path it already uses
+/// for a save another machine uploaded. Nothing is copied and no blob moves —
+/// the two versions swap places, so this is reversible until one is deleted.
+pub async fn restore_snapshot(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<String>,
+) -> ApiResult<Json<CommitSnapshotResponse>> {
+    let user_id = &user.0.id;
+
+    let snapshot = sqlx::query(
+        "SELECT shop, object_id, status, file_count, total_size_in_bytes, aggregate_hash
+         FROM cloud_save_snapshots WHERE id = ? AND user_id = ?",
+    )
+    .bind(&id)
+    .bind(user_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| ApiError::not_found("snapshot not found"))?;
+
+    if !is_retained(&snapshot.get::<String, _>("status")) {
+        return Err(ApiError::bad_request(
+            "only a retained version can be restored",
+        ));
+    }
+
+    let shop: String = snapshot.get("shop");
+    let object_id: String = snapshot.get("object_id");
+    let now = Utc::now().to_rfc3339();
+
+    let mut tx = state.pool.begin().await?;
+
+    /* One more than anything this game has ever held, so a launcher holding
+       the version it started from still sees the remote as moved on. */
+    let next_version: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(version), 0) + 1 FROM cloud_save_snapshots
+         WHERE user_id = ? AND shop = ? AND object_id = ?",
+    )
+    .bind(user_id)
+    .bind(&shop)
+    .bind(&object_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    /* Demote before promoting: only one snapshot per game may be committed,
+       and the one stepping aside is worth keeping — the user restoring an
+       older save is the one who asked for versions to be kept. */
+    sqlx::query(
+        "UPDATE cloud_save_snapshots SET status = 'superseded', updated_at = ?
+         WHERE user_id = ? AND shop = ? AND object_id = ? AND status = 'committed'",
+    )
+    .bind(&now)
+    .bind(user_id)
+    .bind(&shop)
+    .bind(&object_id)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "UPDATE cloud_save_snapshots SET status = 'committed', version = ?, updated_at = ?
+         WHERE id = ?",
+    )
+    .bind(next_version)
+    .bind(&now)
+    .bind(&id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    let file_count: i64 = snapshot.get("file_count");
+    let total_size: i64 = snapshot.get("total_size_in_bytes");
+    let aggregate_hash: String = snapshot.get("aggregate_hash");
+
+    tracing::info!(
+        "cloud save v2: restored {shop}:{object_id} to v{next_version} ({file_count} files) for {user_id}"
+    );
+
+    crate::events::record(
+        &state,
+        Event::sync(
+            "cloud_save.restored",
+            user_id,
+            format!("Restored a kept cloud save version (now v{next_version}, {file_count} files)"),
+        )
+        .game(&shop, &object_id)
+        .detail(serde_json::json!({
+            "snapshotId": id,
+            "version": next_version,
+            "fileCount": file_count,
+        }))
+        .size(total_size),
+    )
+    .await;
+
+    Ok(Json(CommitSnapshotResponse {
+        snapshot_id: id,
+        version: next_version,
+        file_count,
+        total_size_bytes: total_size,
+        aggregate_hash,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1169,10 +1282,10 @@ mod tests {
     }
 
     #[test]
-    fn only_a_retained_version_can_be_deleted_on_its_own() {
-        assert!(is_deletable_by_id("superseded"));
-        assert!(!is_deletable_by_id("committed"));
-        assert!(!is_deletable_by_id("pending"));
+    fn only_a_retained_version_answers_to_the_by_id_routes() {
+        assert!(is_retained("superseded"));
+        assert!(!is_retained("committed"));
+        assert!(!is_retained("pending"));
     }
 
     #[test]
