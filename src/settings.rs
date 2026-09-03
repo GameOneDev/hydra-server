@@ -5,6 +5,7 @@ use sqlx::SqlitePool;
 
 pub const MAX_BYTES_PER_USER: &str = "max_bytes_per_user";
 pub const BACKUPS_PER_GAME_LIMIT: &str = "backups_per_game_limit";
+pub const AUTO_DELETE_SAVES: &str = "auto_delete_saves";
 pub const ALLOWED_USERS: &str = "allowed_users";
 
 /// Effective settings: environment defaults overlaid with any overrides
@@ -31,6 +32,7 @@ pub async fn load(pool: &SqlitePool, config: &Config) -> RuntimeSettings {
                     }
                 }
             }
+            AUTO_DELETE_SAVES => settings.auto_delete_saves = value == "true",
             ALLOWED_USERS => settings.allowed_users = parse_allowed_users(&value),
             _ => {}
         }

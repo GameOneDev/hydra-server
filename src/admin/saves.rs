@@ -59,7 +59,8 @@ const SAVES_UNION: &str = "
     SELECT 'emulation', e.id, e.user_id, e.shop, e.object_id,
            e.artifact_length_in_bytes, e.updated_at, e.created_at,
            e.hostname, e.platform,
-           CASE WHEN e.is_uploaded = 1 THEN 'uploaded' ELSE 'pending' END,
+           CASE WHEN e.superseded_at IS NOT NULL THEN 'superseded'
+                WHEN e.is_uploaded = 1 THEN 'uploaded' ELSE 'pending' END,
            NULL, NULL, COALESCE(e.label, e.file_name), e.emulator, 0, 0, 0
       FROM emulation_saves e
 ";

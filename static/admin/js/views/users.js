@@ -39,7 +39,12 @@ export default {
           key: "status",
           label: "Status",
           render: (row) =>
-            row.isBlocked ? pill("blocked", "critical") : pill("active", "good"),
+            h(
+              "div",
+              { class: "row wrap", style: { gap: "6px" } },
+              row.isBlocked ? pill("blocked", "critical") : pill("active", "good"),
+              row.limits?.customised ? pill("custom limits", "accent") : null,
+            ),
         },
         {
           key: "storage",

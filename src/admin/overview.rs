@@ -210,17 +210,15 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
        sitting exactly on its quota is one whose next upload is already
        refused. That is what the alert below says, and
        `storage::exceeds_quota` is the same boundary asked of one byte. */
-    let over_quota: i64 = if current.max_bytes_per_user > 0 {
-        sqlx::query_scalar(&format!(
-            "SELECT COUNT(*) FROM users u WHERE ({}) >= ?",
-            super::users::used_bytes_expr()
-        ))
-        .bind(current.max_bytes_per_user as i64)
-        .fetch_one(&state.pool)
-        .await?
-    } else {
-        0
-    };
+    let quota = crate::limits::quota_expr("u", "?1");
+    let over_quota: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM users u
+          WHERE {quota} > 0 AND ({}) >= {quota}",
+        super::users::used_bytes_expr()
+    ))
+    .bind(current.max_bytes_per_user as i64)
+    .fetch_one(&state.pool)
+    .await?;
 
     /* Summed from the metered-table list rather than from the per-category
        figures above, which are shaped for display and drifted once already. */
@@ -321,6 +319,7 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
         "settings": {
             "maxBytesPerUser": current.max_bytes_per_user,
             "backupsPerGameLimit": current.backups_per_game_limit,
+            "autoDeleteSaves": current.auto_delete_saves,
             "allowedUsers": current.allowed_users,
         },
         "users": {

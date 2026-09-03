@@ -232,6 +232,7 @@ async fn export(State(state): State<AppState>, _admin: AdminSession) -> ApiResul
         "settings": {
             "maxBytesPerUser": settings.max_bytes_per_user,
             "backupsPerGameLimit": settings.backups_per_game_limit,
+            "autoDeleteSaves": settings.auto_delete_saves,
             "allowedUsers": settings.allowed_users,
         },
         "users": users.iter().map(|row| json!({

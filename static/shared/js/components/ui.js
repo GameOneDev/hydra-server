@@ -104,6 +104,7 @@ export function meter(ratio) {
 export function stateLabel(state) {
   if (state === "pending") return pill("pending", "warning");
   if (state === "committed" || state === "uploaded") return pill("stored", "good");
+  if (state === "superseded") return pill("older version", "accent");
   return pill(state ?? "unknown");
 }
 

@@ -3,10 +3,11 @@
 use super::{banner_url, AdminSession, Paging};
 use crate::error::{ApiError, ApiResult};
 use crate::events::Event;
-use crate::state::AppState;
+use crate::limits::{self, Overrides};
+use crate::state::{AppState, RuntimeSettings};
 use crate::{cloud_saves, storage};
 use axum::extract::{Path, Query, State};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -18,6 +19,7 @@ pub fn router() -> Router<AppState> {
         .route("/admin/api/users/{id}", get(detail).delete(delete_user))
         .route("/admin/api/users/{id}/library", get(library))
         .route("/admin/api/users/{id}/block", post(set_blocked))
+        .route("/admin/api/users/{id}/limits", put(set_limits))
         .route("/admin/api/users/{id}/purge", post(purge))
         .route("/admin/api/users/{id}/portal-link", post(portal_link))
 }
@@ -54,8 +56,16 @@ const USER_COUNTS: &str = "
     (SELECT COALESCE(SUM(size_in_bytes), 0) FROM souvenirs v WHERE v.user_id = u.id)
       AS souvenir_bytes";
 
-fn user_json(state: &AppState, row: &sqlx::sqlite::SqliteRow, quota: u64) -> Value {
+/// One user, with the limits that actually apply to them.
+///
+/// `defaults` is what the server says; the row carries whatever this account
+/// overrides, so the quota shown here is the one their next upload is
+/// measured against rather than the server-wide figure.
+fn user_json(state: &AppState, row: &sqlx::sqlite::SqliteRow, defaults: &RuntimeSettings) -> Value {
     let used: i64 = row.get("used_bytes");
+    let overrides = Overrides::from_row(row);
+    let effective = overrides.resolve(defaults);
+    let quota = effective.max_bytes_per_user;
 
     json!({
         "id": row.get::<String, _>("id"),
@@ -69,6 +79,12 @@ fn user_json(state: &AppState, row: &sqlx::sqlite::SqliteRow, quota: u64) -> Val
         "usedBytes": used,
         "quotaBytes": quota,
         "quotaRatio": if quota > 0 { used as f64 / quota as f64 } else { 0.0 },
+        "limits": {
+            "effective": effective.json(),
+            "overrides": overrides.json(),
+            "defaults": limits::Limits::from(defaults).json(),
+            "customised": overrides.any(),
+        },
         "counts": {
             "cloudSaves": row.get::<i64, _>("cloud_save_count"),
             "backups": row.get::<i64, _>("backup_count"),
@@ -112,7 +128,7 @@ async fn list(
     _admin: AdminSession,
     Query(query): Query<ListQuery>,
 ) -> ApiResult<Json<Value>> {
-    let quota = state.settings.read().await.max_bytes_per_user;
+    let defaults = state.settings.read().await.clone();
     let paging = Paging::new(query.page, query.per_page);
 
     let search = super::like_pattern(query.q.as_deref());
@@ -177,7 +193,7 @@ async fn list(
 
     let users: Vec<Value> = rows
         .iter()
-        .map(|row| user_json(&state, row, quota))
+        .map(|row| user_json(&state, row, &defaults))
         .collect();
 
     Ok(Json(paging.envelope(users, total)))
@@ -190,7 +206,7 @@ async fn detail(
     _admin: AdminSession,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let quota = state.settings.read().await.max_bytes_per_user;
+    let defaults = state.settings.read().await.clone();
     let used_bytes = used_bytes_expr();
 
     let row = sqlx::query(&format!(
@@ -246,7 +262,7 @@ async fn detail(
     .await?;
 
     Ok(Json(json!({
-        "user": user_json(&state, &row, quota),
+        "user": user_json(&state, &row, &defaults),
         "devices": devices.iter().map(|row| json!({
             "hostname": row.get::<Option<String>, _>("hostname"),
             "platform": row.get::<Option<String>, _>("platform"),
@@ -421,6 +437,60 @@ async fn set_blocked(
     .await;
 
     Ok(Json(json!({ "ok": true, "isBlocked": payload.blocked })))
+}
+
+/// PUT /admin/api/users/{id}/limits — this account's exceptions to the
+/// server's settings.
+///
+/// The body carries the whole set, and a field left out (or null) means "use
+/// the server's value" — so clearing an override is the same request as
+/// setting one, and the panel never has to send a delete.
+async fn set_limits(
+    State(state): State<AppState>,
+    _admin: AdminSession,
+    Path(id): Path<String>,
+    Json(overrides): Json<Overrides>,
+) -> ApiResult<Json<Value>> {
+    if overrides.backups_per_game_limit == Some(0) {
+        return Err(ApiError::bad_request("backups per game must be at least 1"));
+    }
+
+    if !limits::save(&state, &id, overrides).await? {
+        return Err(ApiError::not_found("user not found"));
+    }
+
+    let defaults = state.settings.read().await.clone();
+    let effective = overrides.resolve(&defaults);
+
+    tracing::info!("admin: set per-user limits for {id}");
+
+    crate::events::record(
+        &state,
+        Event::admin(
+            "admin.user.limits",
+            if overrides.any() {
+                "Changed a user's limits"
+            } else {
+                "Put a user back on the server's limits"
+            },
+        )
+        .about(&id)
+        .detail(json!({
+            "overrides": overrides.json(),
+            "effective": effective.json(),
+        })),
+    )
+    .await;
+
+    Ok(Json(json!({
+        "ok": true,
+        "limits": {
+            "effective": effective.json(),
+            "overrides": overrides.json(),
+            "defaults": limits::Limits::from(&defaults).json(),
+            "customised": overrides.any(),
+        },
+    })))
 }
 
 #[derive(Deserialize)]

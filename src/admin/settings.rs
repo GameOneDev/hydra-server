@@ -69,11 +69,13 @@ async fn payload(
         "current": {
             "maxBytesPerUser": current.max_bytes_per_user,
             "backupsPerGameLimit": current.backups_per_game_limit,
+            "autoDeleteSaves": current.auto_delete_saves,
             "allowedUsers": current.allowed_users,
         },
         "defaults": {
             "maxBytesPerUser": defaults.max_bytes_per_user,
             "backupsPerGameLimit": defaults.backups_per_game_limit,
+            "autoDeleteSaves": defaults.auto_delete_saves,
             "allowedUsers": defaults.allowed_users,
         },
         "overrides": overrides.iter().map(|(key, value, updated_at)| json!({
@@ -105,6 +107,7 @@ async fn get_settings(
 struct UpdateRequest {
     max_bytes_per_user: Option<u64>,
     backups_per_game_limit: Option<u32>,
+    auto_delete_saves: Option<bool>,
     allowed_users: Option<Vec<String>>,
 }
 
@@ -133,6 +136,15 @@ async fn update_settings(
         .await?;
     }
 
+    if let Some(auto_delete) = request.auto_delete_saves {
+        store::set(
+            &state.pool,
+            store::AUTO_DELETE_SAVES,
+            if auto_delete { "true" } else { "false" },
+        )
+        .await?;
+    }
+
     if let Some(users) = request.allowed_users {
         let normalized = store::parse_allowed_users(&users.join(","));
         store::set(&state.pool, store::ALLOWED_USERS, &normalized.join(",")).await?;
@@ -147,6 +159,7 @@ async fn update_settings(
             .detail(json!({
                 "maxBytesPerUser": current.max_bytes_per_user,
                 "backupsPerGameLimit": current.backups_per_game_limit,
+                "autoDeleteSaves": current.auto_delete_saves,
                 "allowedUsers": current.allowed_users,
             })),
     )

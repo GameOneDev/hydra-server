@@ -34,6 +34,7 @@ export default {
       placeholder: "ids or usernames, comma separated",
       value: data.current.allowedUsers.join(", "),
     });
+    const autoDelete = h("input", { type: "checkbox", checked: data.current.autoDeleteSaves });
 
     const save = async (event) => {
       const button = event.target;
@@ -42,6 +43,7 @@ export default {
         await api.put("/admin/api/settings", {
           maxBytesPerUser: Math.max(0, Math.round(Number(quota.value || 0) * GIB)),
           backupsPerGameLimit: Number(backups.value || 1),
+          autoDeleteSaves: autoDelete.checked,
           allowedUsers: allowed.value.split(",").map((entry) => entry.trim()).filter(Boolean),
         });
         toast("Settings saved — in force now", "good");
@@ -84,6 +86,11 @@ export default {
             backups,
             `Frozen backups are exempt. Environment default: ${data.defaults.backupsPerGameLimit}. Cloud Save V2 keeps one snapshot per game regardless.`,
           ),
+          checkField(
+            "Delete a save the launcher replaces",
+            autoDelete,
+            `When Off, the previous cloud save version of a game is kept instead of being deleted. Environment default: ${data.defaults.autoDeleteSaves ? "on" : "off"}.`,
+          ),
           field(
             "Allowed users",
             allowed,
@@ -114,6 +121,13 @@ export default {
               h("dd", {}, fmt.quota(data.current.maxBytesPerUser), source(data, "max_bytes_per_user")),
               h("dt", { text: "Backups per game" }),
               h("dd", {}, String(data.current.backupsPerGameLimit), source(data, "backups_per_game_limit")),
+              h("dt", { text: "Delete replaced saves" }),
+              h(
+                "dd",
+                {},
+                data.current.autoDeleteSaves ? "yes" : "no — older versions are kept",
+                source(data, "auto_delete_saves"),
+              ),
               h("dt", { text: "Allowed users" }),
               h(
                 "dd",
@@ -232,6 +246,16 @@ function proxyCard(proxy) {
           }),
     ),
   });
+}
+
+/** A field whose control is a checkbox, so the label sits beside it. */
+function checkField(label, input, hint) {
+  return h(
+    "div",
+    { class: "field" },
+    h("label", { class: "checkline" }, input, h("span", { text: label })),
+    h("span", { class: "hint", text: hint }),
+  );
 }
 
 function field(label, input, hint) {
