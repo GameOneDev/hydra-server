@@ -27,6 +27,9 @@ pub struct RuntimeSettings {
     pub max_bytes_per_user: u64,
     /// Max save backups kept per game per user.
     pub backups_per_game_limit: u32,
+    /// Whether the server deletes a save it has replaced. Off keeps the older
+    /// version instead; see [`crate::limits`].
+    pub auto_delete_saves: bool,
     /// Official user ids or usernames allowed on this server, lowercased.
     /// Empty = everyone with a valid official login.
     pub allowed_users: Vec<String>,
@@ -37,6 +40,7 @@ impl RuntimeSettings {
         Self {
             max_bytes_per_user: config.max_bytes_per_user,
             backups_per_game_limit: config.backups_per_game_limit,
+            auto_delete_saves: config.auto_delete_saves,
             allowed_users: config.allowed_users.clone(),
         }
     }

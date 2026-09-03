@@ -45,7 +45,9 @@ pub fn router() -> Router<AppState> {
 /// GET /portal/api/overview — "what have I got here, and how much room is
 /// left".
 async fn overview(State(state): State<AppState>, portal: PortalSession) -> ApiResult<Json<Value>> {
-    let quota = state.settings.read().await.max_bytes_per_user;
+    let quota = crate::limits::for_user(&state, &portal.user_id)
+        .await?
+        .max_bytes_per_user;
     let used = storage::used_bytes(&state, &portal.user_id).await?;
 
     let row = sqlx::query(
@@ -147,7 +149,8 @@ const SAVES: &str = "
     UNION ALL
     SELECT 'emulation', e.id, e.shop, e.object_id, e.artifact_length_in_bytes, e.updated_at,
            e.hostname, e.platform,
-           CASE WHEN e.is_uploaded = 1 THEN 'uploaded' ELSE 'pending' END,
+           CASE WHEN e.superseded_at IS NOT NULL THEN 'superseded'
+                WHEN e.is_uploaded = 1 THEN 'uploaded' ELSE 'pending' END,
            NULL, NULL, COALESCE(e.label, e.file_name), e.emulator, 0
       FROM emulation_saves e WHERE e.user_id = ?1";
 

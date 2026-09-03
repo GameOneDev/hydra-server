@@ -175,7 +175,9 @@ async fn enforce_quotas(
     user_id: &str,
     payload: &CreateArtifact,
 ) -> ApiResult<()> {
-    let backups_per_game_limit = state.settings.read().await.backups_per_game_limit;
+    let backups_per_game_limit = crate::limits::for_user(state, user_id)
+        .await?
+        .backups_per_game_limit;
 
     let per_game: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM artifacts WHERE user_id = ? AND shop = ? AND object_id = ?",

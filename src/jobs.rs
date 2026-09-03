@@ -61,6 +61,17 @@ pub const JOBS: &[Job] = &[
         default_enabled: true,
     },
     Job {
+        id: "delete-retained-versions",
+        title: "Delete retained older versions",
+        description: "Delete old game saves except the latest one.",
+        schedulable: true,
+        danger: true,
+        default_every: 1,
+        default_unit: Unit::Week,
+        default_at_minute: Some(5 * HOUR),
+        default_enabled: false,
+    },
+    Job {
         id: "delete-orphan-files",
         title: "Delete orphaned files",
         description: "Remove files on disk that no database row points at. Review them on the Storage screen first — this cannot be undone.",
@@ -163,6 +174,7 @@ pub async fn run(state: &AppState, id: &str, trigger: &str) -> ApiResult<Value> 
         BACKUP => backup(state, trigger).await,
         "sweep-pending" => sweep_pending(state).await,
         "gc-blobs" => gc_blobs(state).await,
+        "delete-retained-versions" => delete_retained_versions(state).await,
         "refresh-metadata" => refresh_metadata(state).await,
         "clear-token-cache" => clear_token_cache(state).await,
         "prune-events" => prune_events(state).await,
@@ -261,6 +273,67 @@ async fn gc_blobs(state: &AppState) -> ApiResult<Value> {
         },
         "freed": before - after,
         "freedBytes": bytes_before - bytes_after,
+    }))
+}
+
+/// Deletes the older versions kept while automatic save deletion is off.
+///
+/// Turning the switch back on clears a game's retained versions on its next
+/// sync, which never comes for a game nobody plays any more. This is the
+/// sweep for those: the committed cloud save of each game and the current
+/// save in each emulator slot are left exactly as they are.
+async fn delete_retained_versions(state: &AppState) -> ApiResult<Value> {
+    let snapshots =
+        sqlx::query("SELECT id, user_id FROM cloud_save_snapshots WHERE status = 'superseded'")
+            .fetch_all(&state.pool)
+            .await?;
+
+    let mut owners: std::collections::HashSet<String> = Default::default();
+    for row in &snapshots {
+        owners.insert(row.get("user_id"));
+    }
+
+    sqlx::query(
+        "DELETE FROM cloud_save_snapshot_files
+         WHERE snapshot_id IN (
+           SELECT id FROM cloud_save_snapshots WHERE status = 'superseded'
+         )",
+    )
+    .execute(&state.pool)
+    .await?;
+    sqlx::query("DELETE FROM cloud_save_snapshots WHERE status = 'superseded'")
+        .execute(&state.pool)
+        .await?;
+
+    let saves: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM emulation_saves WHERE superseded_at IS NOT NULL")
+            .fetch_all(&state.pool)
+            .await?;
+
+    for id in &saves {
+        sqlx::query("DELETE FROM emulation_saves WHERE id = ?")
+            .bind(id)
+            .execute(&state.pool)
+            .await?;
+        crate::storage::delete_object(state, &format!("emulation-saves/{id}.bin")).await;
+    }
+
+    for user_id in &owners {
+        cloud_saves::collect_orphan_blobs(state, user_id).await?;
+    }
+
+    let deleted = snapshots.len() + saves.len();
+
+    Ok(json!({
+        "summary": match deleted {
+            0 => "Nothing retained — no older versions to delete.".to_string(),
+            n => format!(
+                "Deleted {n} retained version(s): {} cloud save(s), {} emulation save(s).",
+                snapshots.len(),
+                saves.len()
+            ),
+        },
+        "deleted": deleted,
     }))
 }
 

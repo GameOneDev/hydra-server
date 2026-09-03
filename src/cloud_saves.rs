@@ -551,10 +551,12 @@ pub async fn commit_snapshot(
         .await?;
     }
 
+    let auto_delete = crate::limits::for_user(&state, user_id)
+        .await?
+        .auto_delete_saves;
+
     let mut tx = state.pool.begin().await?;
 
-    /* Drop the snapshot this one supersedes, then promote. Deleting first
-       keeps the one-committed-snapshot-per-game index satisfied. */
     let superseded: Vec<String> = sqlx::query_scalar(
         "SELECT id FROM cloud_save_snapshots
          WHERE user_id = ? AND shop = ? AND object_id = ? AND status = 'committed'",
@@ -565,15 +567,41 @@ pub async fn commit_snapshot(
     .fetch_all(&mut *tx)
     .await?;
 
-    for id in &superseded {
-        sqlx::query("DELETE FROM cloud_save_snapshot_files WHERE snapshot_id = ?")
+    let mut retained = 0usize;
+
+    if auto_delete {
+        let kept: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM cloud_save_snapshots
+             WHERE user_id = ? AND shop = ? AND object_id = ? AND status = 'superseded'",
+        )
+        .bind(user_id)
+        .bind(&shop)
+        .bind(&object_id)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        for id in superseded.iter().chain(kept.iter()) {
+            sqlx::query("DELETE FROM cloud_save_snapshot_files WHERE snapshot_id = ?")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM cloud_save_snapshots WHERE id = ?")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+    } else {
+        for id in &superseded {
+            sqlx::query(
+                "UPDATE cloud_save_snapshots SET status = 'superseded', updated_at = ?
+                 WHERE id = ?",
+            )
+            .bind(&now)
             .bind(id)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM cloud_save_snapshots WHERE id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+        }
+        retained = superseded.len();
     }
 
     sqlx::query(
@@ -609,6 +637,7 @@ pub async fn commit_snapshot(
             "fileCount": file_count,
             "hostname": snapshot.get::<Option<String>, _>("hostname"),
             "platform": snapshot.get::<Option<String>, _>("platform"),
+            "retainedVersions": retained,
         }))
         .size(total_size),
     )
@@ -1076,7 +1105,9 @@ async fn enforce_quota(
     user_id: &str,
     incoming_bytes: i64,
 ) -> ApiResult<()> {
-    let max_bytes_per_user = state.settings.read().await.max_bytes_per_user;
+    let max_bytes_per_user = crate::limits::for_user(state, user_id)
+        .await?
+        .max_bytes_per_user;
     if max_bytes_per_user == 0 {
         return Ok(());
     }
@@ -1408,5 +1439,185 @@ mod tests {
         assert!(is_sha256(&"a".repeat(64)));
         assert!(!is_sha256(&"a".repeat(63)));
         assert!(!is_sha256(&"g".repeat(64)));
+    }
+
+    use crate::limits::Overrides;
+    use crate::testing::TestServer;
+
+    /// A game with a committed snapshot holding one blob, and a pending one
+    /// holding a different blob — so what survives the commit says exactly
+    /// which version's bytes were kept.
+    async fn a_game_mid_sync(server: &TestServer) {
+        for (id, hash, size, status, version) in [
+            ("old", &"a".repeat(64), 100, "committed", 1),
+            ("new", &"b".repeat(64), 200, "pending", 2),
+        ] {
+            sqlx::query(
+                "INSERT INTO cloud_save_snapshots
+                   (id, user_id, shop, object_id, version, aggregate_hash,
+                    file_count, total_size_in_bytes, status, created_at, updated_at)
+                 VALUES (?, 'alice', 'steam', '440', ?, ?, 1, ?, ?,
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            )
+            .bind(id)
+            .bind(version)
+            .bind(hash)
+            .bind(size)
+            .bind(status)
+            .execute(&server.state.pool)
+            .await
+            .expect("a snapshot");
+
+            sqlx::query(
+                "INSERT INTO cloud_save_snapshot_files
+                   (snapshot_id, variant_id, raw_path, relative_path, hash,
+                    size_in_bytes, last_modified_at)
+                 VALUES (?, 'default', '<winPrefix>', 'save.dat', ?, ?,
+                         '2026-01-01T00:00:00Z')",
+            )
+            .bind(id)
+            .bind(hash)
+            .bind(size)
+            .execute(&server.state.pool)
+            .await
+            .expect("a manifest row");
+
+            let key = storage::cloud_save_blob_key("alice", hash);
+            let path = storage::storage_path(&server.state, &key);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("the blob dir");
+            std::fs::write(&path, vec![7u8; size as usize]).expect("the blob");
+        }
+
+        sqlx::query(
+            "INSERT INTO cloud_save_blobs (user_id, hash, size_in_bytes, created_at)
+             VALUES ('alice', ?, 100, '2026-01-01T00:00:00Z')",
+        )
+        .bind("a".repeat(64))
+        .execute(&server.state.pool)
+        .await
+        .expect("the committed blob");
+    }
+
+    async fn commit_the_pending_snapshot(server: &TestServer) {
+        let _ = commit_snapshot(
+            State(server.state.clone()),
+            server.user("alice"),
+            Json(CommitSnapshotRequest {
+                pending_snapshot_id: "new".to_string(),
+            }),
+        )
+        .await
+        .expect("the commit");
+    }
+
+    async fn status_of(server: &TestServer, id: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT status FROM cloud_save_snapshots WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&server.state.pool)
+            .await
+            .expect("the snapshot")
+    }
+
+    #[tokio::test]
+    async fn the_replaced_version_is_deleted_by_default() {
+        let server = TestServer::start().await;
+        a_game_mid_sync(&server).await;
+
+        commit_the_pending_snapshot(&server).await;
+
+        assert_eq!(status_of(&server, "new").await.as_deref(), Some("committed"));
+        assert_eq!(status_of(&server, "old").await, None);
+        assert_eq!(storage::used_bytes(&server.state, "alice").await.unwrap(), 200);
+        assert!(!storage::storage_path(
+            &server.state,
+            &storage::cloud_save_blob_key("alice", &"a".repeat(64))
+        )
+        .exists());
+    }
+
+    /// Off, the replaced version is kept as 'superseded': the launcher still
+    /// sees exactly one committed snapshot, and the older one's blobs stay —
+    /// on the owner's quota until someone deletes them.
+    #[tokio::test]
+    async fn the_replaced_version_is_kept_when_the_user_opts_out() {
+        let server = TestServer::start().await;
+        server
+            .limits(
+                "alice",
+                Overrides {
+                    auto_delete_saves: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await;
+        a_game_mid_sync(&server).await;
+
+        commit_the_pending_snapshot(&server).await;
+
+        assert_eq!(status_of(&server, "new").await.as_deref(), Some("committed"));
+        assert_eq!(status_of(&server, "old").await.as_deref(), Some("superseded"));
+        assert_eq!(storage::used_bytes(&server.state, "alice").await.unwrap(), 300);
+
+        let Json(listed) = list_snapshots(
+            State(server.state.clone()),
+            server.user("alice"),
+            Query(GameQuery {
+                shop: "steam".to_string(),
+                object_id: "440".to_string(),
+            }),
+        )
+        .await
+        .expect("the listing");
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "new");
+    }
+
+    /// Switching deletion back on clears the versions it kept, on the game's
+    /// next sync.
+    #[tokio::test]
+    async fn turning_deletion_back_on_clears_what_was_kept() {
+        let server = TestServer::start().await;
+        server
+            .limits(
+                "alice",
+                Overrides {
+                    auto_delete_saves: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await;
+        a_game_mid_sync(&server).await;
+        commit_the_pending_snapshot(&server).await;
+
+        server.limits("alice", Overrides::default()).await;
+        server
+            .execute(
+                "INSERT INTO cloud_save_snapshots
+                   (id, user_id, shop, object_id, version, aggregate_hash,
+                    file_count, total_size_in_bytes, status, created_at, updated_at)
+                 VALUES ('newer', 'alice', 'steam', '440', 3, 'ccc', 0, 0, 'pending',
+                         '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z')",
+            )
+            .await;
+
+        let _ = commit_snapshot(
+            State(server.state.clone()),
+            server.user("alice"),
+            Json(CommitSnapshotRequest {
+                pending_snapshot_id: "newer".to_string(),
+            }),
+        )
+        .await
+        .expect("the commit");
+
+        assert_eq!(
+            server
+                .scalar::<i64>("SELECT COUNT(*) FROM cloud_save_snapshots")
+                .await,
+            1,
+            "the kept version went with the one it was kept beside"
+        );
+        assert_eq!(storage::used_bytes(&server.state, "alice").await.unwrap(), 0);
     }
 }

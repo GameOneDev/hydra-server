@@ -20,6 +20,8 @@ import {
 import { stackedBar, heatmap, barList } from "/assets/shared/js/components/charts.js";
 import { savesTable } from "/assets/admin/js/views/saves.js";
 
+const GIB = 2 ** 30;
+
 const TABS = [
   { id: "saves", label: "Saves" },
   { id: "achievements", label: "Achievements" },
@@ -190,6 +192,7 @@ export default {
         subtitle: fmt.duration(user.playtimeSeconds),
         body: h("div", { class: "card-body" }, heatmap(playtime)),
       }),
+      limitsCard(user, ctx),
       dangerZone(user, ctx),
     );
   },
@@ -253,6 +256,143 @@ function identityCard(user, ctx) {
       ),
     ),
   });
+}
+
+/**
+ * This account's exceptions to the server's settings.
+ *
+ * Everything here has a server-wide value already; the only question the card
+ * asks per control is whether this user follows it. So each row is a
+ * "use the server's value" checkbox — showing what that value currently is —
+ * over the figure that applies when it is unticked.
+ */
+function limitsCard(user, ctx) {
+  const { effective, overrides, defaults } = user.limits;
+
+  const quota = overrideField({
+    label: "Storage quota (GiB)",
+    serverValue: fmt.quota(defaults.maxBytesPerUser),
+    inherited: overrides.maxBytesPerUser === null,
+    input: h("input", {
+      class: "input",
+      type: "number",
+      min: "0",
+      step: "0.1",
+      value: effective.maxBytesPerUser ? +(effective.maxBytesPerUser / GIB).toFixed(2) : 0,
+    }),
+    hint: `In force: ${fmt.quota(effective.maxBytesPerUser)}. 0 means unlimited for this user, whatever the server's quota is.`,
+  });
+
+  const backups = overrideField({
+    label: "Legacy backups kept per game",
+    serverValue: String(defaults.backupsPerGameLimit),
+    inherited: overrides.backupsPerGameLimit === null,
+    input: h("input", {
+      class: "input",
+      type: "number",
+      min: "1",
+      step: "1",
+      value: effective.backupsPerGameLimit,
+    }),
+    hint: "Once a game is at this many backups, this user's next one is refused until they delete one. Cloud Save V2 keeps one snapshot per game regardless.",
+  });
+
+  const autoDelete = overrideField({
+    label: "Saves the launcher replaces",
+    serverValue: defaults.autoDeleteSaves ? "delete them" : "keep them",
+    inherited: overrides.autoDeleteSaves === null,
+    input: h(
+      "select",
+      { class: "select" },
+      h("option", { value: "delete", text: "Delete the version being replaced" }),
+      h("option", { value: "keep", text: "Keep it - delete only by hand" }),
+    ),
+    hint: "Kept versions stay out of the launcher's way. They are listed under Saves as “older version”, and the user sees them in their portal.",
+  });
+  autoDelete.input.value = effective.autoDeleteSaves ? "delete" : "keep";
+
+  const put = async (event, body, message) => {
+    const button = event.target;
+    button.disabled = true;
+    try {
+      await api.put(`/admin/api/users/${encodeURIComponent(user.id)}/limits`, body);
+      toast(message, "good");
+      ctx.refresh();
+    } catch (error) {
+      toast(error.message, "critical");
+      button.disabled = false;
+    }
+  };
+
+  return card({
+    title: "Limits",
+    subtitle: user.limits.customised ? "custom for this user" : "following the server's settings",
+    body: h(
+      "div",
+      { class: "card-body", style: { display: "grid", gap: "16px" } },
+      h("div", { class: "grid cols-3" }, quota.node, backups.node, autoDelete.node),
+      h(
+        "div",
+        { class: "row", style: { gap: "8px" } },
+        h("button", {
+          class: "btn primary",
+          text: "Save limits",
+          onclick: (event) =>
+            put(
+              event,
+              {
+                maxBytesPerUser: quota.inherited()
+                  ? null
+                  : Math.max(0, Math.round(Number(quota.input.value || 0) * GIB)),
+                backupsPerGameLimit: backups.inherited()
+                  ? null
+                  : Math.max(1, Math.round(Number(backups.input.value || 1))),
+                autoDeleteSaves: autoDelete.inherited()
+                  ? null
+                  : autoDelete.input.value === "delete",
+              },
+              "Limits saved — in force now",
+            ),
+        }),
+        user.limits.customised
+          ? h("button", {
+              class: "btn",
+              text: "Follow the server",
+              title: "Drop every exception saved for this user",
+              onclick: (event) => put(event, {}, "Back on the server's limits"),
+            })
+          : null,
+      ),
+    ),
+  });
+}
+
+/** One limit: the server's value, or this user's own. */
+function overrideField({ label, hint, input, inherited, serverValue }) {
+  const inherit = h("input", { type: "checkbox", checked: inherited });
+  const sync = () => {
+    input.disabled = inherit.checked;
+  };
+  inherit.addEventListener("change", sync);
+  sync();
+
+  return {
+    input,
+    inherited: () => inherit.checked,
+    node: h(
+      "div",
+      { class: "field" },
+      h("label", { text: label }),
+      h(
+        "label",
+        { class: "checkline" },
+        inherit,
+        h("span", { class: "muted small", text: `Use the server's value (${serverValue})` }),
+      ),
+      input,
+      h("span", { class: "hint", text: hint }),
+    ),
+  };
 }
 
 async function tabContent(tab, { id, ctx, library }) {

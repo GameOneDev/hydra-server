@@ -70,6 +70,7 @@ export default {
               options: [
                 { label: "Any state", value: "" },
                 { label: "Incomplete", value: "pending" },
+                { label: "Older versions", value: "superseded" },
               ],
             }),
           ],

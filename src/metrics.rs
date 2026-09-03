@@ -203,6 +203,18 @@ pub async fn render(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
     );
     metric(
         &mut out,
+        "hydra_saves_retained",
+        "Older save versions kept because automatic save deletion is off.",
+        "gauge",
+        scalar(
+            &state,
+            "SELECT (SELECT COUNT(*) FROM cloud_save_snapshots WHERE status = 'superseded')
+                  + (SELECT COUNT(*) FROM emulation_saves WHERE superseded_at IS NOT NULL)",
+        )
+        .await,
+    );
+    metric(
+        &mut out,
         "hydra_cloud_save_blobs",
         "Distinct content-addressed blobs held.",
         "gauge",
