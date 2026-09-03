@@ -223,7 +223,7 @@ function scanResults(report, ctx) {
       { class: "row" },
       h("span", { class: "muted small", text: `Scanned ${fmt.dateTime(report.checkedAt)}` }),
       h("span", { class: "spacer", style: { flex: 1 } }),
-      h("button", { class: "btn small", text: "Maintenance tools", onclick: () => navigate("/maintenance") }),
+      h("button", { class: "btn small", text: "Schedule", onclick: () => navigate("/schedule") }),
     ),
   );
 

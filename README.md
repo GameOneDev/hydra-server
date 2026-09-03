@@ -94,9 +94,9 @@ subscription needed.
 | `HYDRA_OFFICIAL_LOGIN_PATH` | `/auth/login` | Path on the official API the portal posts its sign-in form to |
 | `HYDRA_METRICS_ENABLED` | `true` | Serve Prometheus metrics at `/metrics` |
 | `HYDRA_METRICS_TOKEN` | *(empty = open)* | Bearer token required to scrape `/metrics` |
-| `HYDRA_BACKUP_INTERVAL_HOURS` | `24` | Hours between automatic database backups (`0` disables them) |
+| `HYDRA_BACKUP_INTERVAL_HOURS` | `24` | Hours between automatic database backups (`0` disables them). Seeds the backup task's cadence the first time the server starts; after that the *Schedule* screen owns it |
 | `HYDRA_BACKUP_KEEP` | `7` | Automatic backups kept before the oldest is pruned |
-| `HYDRA_EVENT_RETENTION_DAYS` | `90` | Days of history kept in the event log |
+| `HYDRA_EVENT_RETENTION_DAYS` | `90` | Days of history kept in the event log. How often the pruning runs is on the *Schedule* screen |
 | `HYDRA_PRESENCE_IDLE_MINUTES` | `15` | Quiet minutes after which a launcher counts as away, so its next call is logged as coming online (`0` switches these events off) |
 
 `HYDRA_MAX_BYTES_PER_USER`, `HYDRA_BACKUPS_PER_GAME_LIMIT` and
@@ -106,7 +106,7 @@ there are stored in the database and override the environment until reset.
 ### Admin panel
 
 Open `https://your-server/admin` and sign in with `HYDRA_ADMIN_PASSWORD`. The
-panel is a full operations console for the server, in nine screens.
+panel is a full operations console for the server, in ten screens.
 
 **Overview** — headline totals (users, storage, cloud saves, backups), a
 30-day activity chart, a live feed of what the server has been doing, the
@@ -157,12 +157,13 @@ back short) and files no row points at (space nothing will reclaim). It only
 reports — deleting is a separate, explicit step.
 
 **Maintenance** — database backups (take one, download it, upload one taken
-elsewhere, restore from any of them — see [Backups](#backups)) plus the
-housekeeping the server otherwise only does lazily: sweep abandoned uploads,
-collect orphaned blobs, delete orphaned files, re-resolve missing game
-metadata, prune old history, clear the token cache, compact the database. Each
-reports what it actually changed. There is also a JSON export of the whole
-inventory.
+elsewhere, restore from any of them — see [Backups](#backups)), and a JSON
+export of the whole inventory. The housekeeping itself lives on *Schedule*.
+
+**Schedule** — the housekeeping, unattended: every task with what starts it,
+how the last run went and when it is next due. Open one for its switch, *Run
+now*, its triggers and its log; a run expands the way a *History* row does.
+See [The schedule](#the-schedule).
 
 **Webhooks** — send events anywhere that accepts a POST. Filter by event family
 and minimum severity, pick the payload shape (full JSON, or a rendered message
@@ -220,6 +221,37 @@ in-memory table, and the durable `last_seen_at` column is what stops a restart
 announcing everyone who was already here as newly arrived. Set the variable to
 `0` if you would rather not have these events at all.
 
+### The schedule
+
+Seven jobs run unattended: the database backup, the sweep of abandoned
+uploads, the orphaned-blob collection, the history prune, the game-metadata
+refresh, the token-cache clear and the database compaction. *Schedule* lists
+them; opening one shows what starts it, runs it now, and holds its log.
+
+Each carries a list of triggers, and any one firing runs it:
+
+| Trigger | Reads as |
+| --- | --- |
+| Timer | *every 2 days at 04:30 UTC*, *every 30 minutes*, *every month on the 1st* |
+| Server start | *5 min after the server starts* — once per boot |
+| After another task | *after Back up the database* |
+| An event | *when cloud_save. happens*, with a floor on how often |
+| A threshold | *when free disk space is below 5 GB* |
+
+A threshold watches one of the numbers a job exists to fix — abandoned
+uploads, games with no name, events past the retention window, database size,
+free disk — and the editor shows what each reads right now.
+
+Times are UTC. A run missed while the server was down happens once, not once
+per period it slept through, and a job never runs twice at the same time.
+Every run is recorded in the task's log and in *History*
+(`system.task.ran`, `system.task.failed`, `admin.task.run`), so a webhook can
+carry a failure somewhere you will see it.
+
+Trigger edits are staged until *Save changes*. The metadata refresh, the
+token-cache clear and the compaction start switched off; the rest start on,
+and the backup keeps whatever `HYDRA_BACKUP_INTERVAL_HOURS` already asked for.
+
 ### Backups
 
 The stored save files are content-addressed and easy to copy with any tool; the
@@ -227,7 +259,8 @@ database is the part that maps them back to games and users, so it is backed up
 on its own schedule with SQLite's `VACUUM INTO` (a consistent copy of a live
 database, no writer blocking). Backups land in `<data dir>/backups`, the oldest
 beyond `HYDRA_BACKUP_KEEP` are pruned, and the panel can take one on demand or
-hand you the file.
+hand you the file. When it runs unattended is set on
+[the Schedule screen](#the-schedule).
 
 **Restoring** happens from the panel too — *Maintenance → Database backups →
 Restore*, which asks you to type `restore` first. The server does not swap the
@@ -301,6 +334,7 @@ The panel is deliberately modular, one module per screen:
 | Layer | Where |
 | --- | --- |
 | API routes | `src/admin/<area>.rs`, merged in `src/admin/mod.rs` |
+| Unattended work | a `Job` in `src/jobs.rs` (run by hand and by the schedule alike), triggered from `src/triggers.rs`, timed by `src/schedule.rs` |
 | Screen | `static/admin/js/views/<area>.js`, routed in `static/admin/js/main.js` |
 | Navigation | the `NAV` table in `static/admin/js/components/shell.js` |
 | Shared UI | `static/shared/js/` — design system, tables, charts, dialogs, toasts |

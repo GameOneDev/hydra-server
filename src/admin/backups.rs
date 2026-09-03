@@ -36,11 +36,16 @@ async fn list(State(state): State<AppState>, _admin: AdminSession) -> ApiResult<
     let backups = backup::list(&state).await;
     let data_dir = &state.config.data_dir;
 
+    let task = crate::schedule::get(&state, crate::jobs::BACKUP).await?;
+
     Ok(Json(json!({
         "backups": backups.iter().map(backup::backup_json).collect::<Vec<_>>(),
         "directory": state.config.backup_dir().display().to_string(),
         "schedule": {
-            "intervalHours": state.config.backup_interval_hours,
+            "enabled": task.enabled,
+            "label": task.summary(),
+            "nextRunAt": task.next_run_at,
+            "lastRunAt": task.last_run_at,
             "keep": state.config.backup_keep,
         },
         "disk": {

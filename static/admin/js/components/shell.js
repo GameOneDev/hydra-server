@@ -20,6 +20,7 @@ export const NAV = [
   { group: "Operate", items: [
     { route: "/storage", label: "Storage", icon: "storage" },
     { route: "/maintenance", label: "Maintenance", icon: "tools" },
+    { route: "/schedule", label: "Schedule", icon: "calendar" },
     { route: "/webhooks", label: "Webhooks", icon: "share" },
     { route: "/settings", label: "Settings", icon: "settings" },
   ] },

@@ -499,57 +499,6 @@ pub fn total_disk_bytes(_path: &Path) -> Option<u64> {
     None
 }
 
-/// Hourly housekeeping: back up when due, prune old events.
-///
-/// Runs in-process rather than asking the operator to wire up cron, because
-/// the whole premise of this server is that it is one binary you start.
-pub fn spawn_scheduler(state: AppState) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3600));
-        /* The first tick fires immediately; skip it so a restart loop can't
-           turn into a backup loop. */
-        ticker.tick().await;
-
-        loop {
-            ticker.tick().await;
-
-            let interval = state.config.backup_interval_hours;
-            if interval > 0 && backup_due(&state, interval).await {
-                match create(&state, "scheduled").await {
-                    Ok(backup) => tracing::info!("scheduled backup written: {}", backup.name),
-                    Err(error) => {
-                        tracing::warn!("scheduled backup failed: {error}");
-                        crate::events::record(
-                            &state,
-                            Event::system("system.backup_failed", format!("Backup failed: {error}"))
-                                .warning(),
-                        )
-                        .await;
-                    }
-                }
-            }
-
-            match crate::events::prune(&state, state.config.event_retention_days).await {
-                Ok(0) => {}
-                Ok(removed) => tracing::info!("pruned {removed} event(s) past retention"),
-                Err(err) => tracing::warn!("event pruning failed: {err}"),
-            }
-        }
-    });
-}
-
-async fn backup_due(state: &AppState, interval_hours: u64) -> bool {
-    let Some(latest) = list(state).await.into_iter().next() else {
-        return true;
-    };
-
-    let Ok(created) = chrono::DateTime::parse_from_rfc3339(&latest.created_at) else {
-        return true;
-    };
-
-    Utc::now() - created.with_timezone(&Utc) >= chrono::Duration::hours(interval_hours as i64)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

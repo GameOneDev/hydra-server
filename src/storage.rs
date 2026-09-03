@@ -1060,6 +1060,7 @@ mod tests {
                 metrics: Default::default(),
                 uploads: Default::default(),
                 login_guard: Default::default(),
+                running_tasks: Default::default(),
                 presence: Default::default(),
             };
 
