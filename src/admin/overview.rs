@@ -228,6 +228,22 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
     )
     .await?;
 
+    /* What the fleet is running. The version comes off the User-Agent of
+       each account's last sync (see [`crate::launcher`]), so this is the
+       users screen's own column, counted — and the answer to "is everyone on
+       the build that fixed it yet". NULL is nobody's version: it means that
+       account hasn't synced from a launcher since this server started
+       recording, and it is reported as such rather than folded into a real
+       version's tally. */
+    let launchers = sqlx::query(
+        "SELECT launcher_version AS version, COUNT(*) AS users,
+                MAX(last_seen_at) AS last_seen_at
+         FROM users GROUP BY launcher_version
+         ORDER BY users DESC, version DESC",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+
     let failed_tasks: Vec<String> = sqlx::query_scalar(
         "SELECT id FROM scheduled_tasks WHERE last_status = 'error' ORDER BY id",
     )
@@ -329,6 +345,11 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
             "active30d": active_30d,
             "new7d": new_7d,
             "overQuota": over_quota,
+            "launchers": launchers.iter().map(|row| json!({
+                "version": row.get::<Option<String>, _>("version"),
+                "users": row.get::<i64, _>("users"),
+                "lastSeenAt": row.get::<Option<String>, _>("last_seen_at"),
+            })).collect::<Vec<_>>(),
         },
         "cloudSaves": {
             "committed": cloud_saves,

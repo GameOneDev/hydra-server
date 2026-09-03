@@ -93,6 +93,18 @@ export default {
           align: "right",
           render: (row) => fmt.duration(row.playtimeSeconds),
         },
+        /* Not sortable: version strings sort as text, and text puts v10
+           before v9 — a column that lies about which build is newest is worse
+           than one read by eye. Searching a version gathers everyone on it,
+           which is the question this column raises anyway. */
+        {
+          key: "launcher",
+          label: "Launcher",
+          render: (row) =>
+            row.launcherVersion
+              ? h("span", { class: "mono small", text: `v${row.launcherVersion}` })
+              : h("span", { class: "muted", text: "—" }),
+        },
         {
           key: "lastSeen",
           label: "Last seen",
@@ -143,7 +155,7 @@ export default {
         {},
         toolbar({
           search: query.q,
-          placeholder: "Search name, username or id…",
+          placeholder: "Search name, username, id or launcher version…",
           onSearch: (value) => setQuery({ q: value, page: null }),
           children: [
             segmented({

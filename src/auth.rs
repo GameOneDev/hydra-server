@@ -68,20 +68,35 @@ impl FromRequestParts<AppState> for CurrentUser {
         /* Bump last_seen_at on every authenticated request. resolve_user only
            touches the row on token-cache misses, which would leave last_seen_at
            up to TOKEN_CACHE_TTL_SECONDS stale while the client is active. */
-        let blocked: Option<(i64,)> = sqlx::query_as(
-            "UPDATE users SET last_seen_at = ? WHERE id = ? RETURNING is_blocked",
-        )
-        .bind(Utc::now().to_rfc3339())
-        .bind(&user.id)
-        .fetch_optional(&state.pool)
-        .await?;
-
-        if matches!(blocked, Some((1,))) {
+        let launcher = crate::launcher::version(&parts.headers);
+        if touch(state, &user.id, launcher.as_deref()).await? {
             return Err(ApiError::forbidden("user is blocked on this server"));
         }
 
         Ok(CurrentUser(user))
     }
+}
+
+/// Records that this account just called: `last_seen_at`, the launcher
+/// version the request named, and — since the row is open anyway — whether
+/// the account is blocked.
+///
+/// One statement, because this runs on every authenticated request. `version`
+/// is `None` for anything holding a token that didn't name itself — curl, a
+/// script, a launcher too old to say — and `COALESCE` reads that as no news
+/// rather than as a launcher that lost its version.
+async fn touch(state: &AppState, id: &str, version: Option<&str>) -> Result<bool, ApiError> {
+    let blocked: Option<(i64,)> = sqlx::query_as(
+        "UPDATE users SET last_seen_at = ?, launcher_version = COALESCE(?, launcher_version)
+          WHERE id = ? RETURNING is_blocked",
+    )
+    .bind(Utc::now().to_rfc3339())
+    .bind(version)
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    Ok(matches!(blocked, Some((1,))))
 }
 
 async fn resolve_user(state: &AppState, token: &str) -> Result<AuthenticatedUser, ApiError> {
@@ -219,4 +234,73 @@ pub async fn upsert_user(state: &AppState, user: &AuthenticatedUser) -> Result<(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::TestServer;
+
+    async fn launcher_version(server: &TestServer) -> Option<String> {
+        sqlx::query_scalar("SELECT launcher_version FROM users WHERE id = 'alice'")
+            .fetch_one(&server.state.pool)
+            .await
+            .expect("alice")
+    }
+
+    #[tokio::test]
+    async fn a_request_records_the_launcher_version_it_named() {
+        let server = TestServer::start().await;
+        assert_eq!(launcher_version(&server).await, None);
+
+        touch(&server.state, "alice", Some("3.2.1")).await.expect("the bump");
+        assert_eq!(launcher_version(&server).await.as_deref(), Some("3.2.1"));
+
+        touch(&server.state, "alice", Some("3.3.0")).await.expect("the bump");
+        assert_eq!(launcher_version(&server).await.as_deref(), Some("3.3.0"));
+    }
+
+    /// A launcher's own requests are not the only ones that arrive with a
+    /// token: forgetting the version over one call from something else would
+    /// leave the panel blinking between "v3.2.1" and nothing.
+    #[tokio::test]
+    async fn a_caller_that_names_no_version_leaves_the_known_one_alone() {
+        let server = TestServer::start().await;
+        touch(&server.state, "alice", Some("3.2.1")).await.expect("the bump");
+
+        touch(&server.state, "alice", None).await.expect("the bump");
+
+        assert_eq!(launcher_version(&server).await.as_deref(), Some("3.2.1"));
+    }
+
+    #[tokio::test]
+    async fn the_bump_reports_a_blocked_account_and_still_moves_last_seen_at() {
+        let server = TestServer::start().await;
+        server
+            .execute("UPDATE users SET is_blocked = 1, last_seen_at = '2000-01-01T00:00:00Z'")
+            .await;
+
+        let blocked = touch(&server.state, "alice", Some("3.2.1")).await.expect("the bump");
+
+        assert!(blocked);
+        let last_seen: String = server
+            .scalar("SELECT last_seen_at FROM users WHERE id = 'alice'")
+            .await;
+        assert!(
+            last_seen.as_str() > "2000-01-01T00:00:00Z",
+            "last_seen_at was not bumped: {last_seen}"
+        );
+        assert_eq!(launcher_version(&server).await.as_deref(), Some("3.2.1"));
+    }
+
+    /// Nobody by that id: no row to bump, and no reason to refuse the caller
+    /// on the strength of a block that isn't recorded anywhere.
+    #[tokio::test]
+    async fn an_unknown_account_is_not_blocked() {
+        let server = TestServer::start().await;
+
+        let blocked = touch(&server.state, "nobody", Some("3.2.1")).await.expect("the bump");
+
+        assert!(!blocked);
+    }
 }

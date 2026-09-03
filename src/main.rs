@@ -15,6 +15,7 @@ mod games;
 mod hidden_games;
 mod images;
 mod jobs;
+mod launcher;
 mod limits;
 mod members;
 mod metrics;

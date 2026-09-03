@@ -116,9 +116,10 @@ panel is a full operations console for the server, in ten screens.
 
 **Overview** — headline totals (users, storage, cloud saves, backups), a
 30-day activity chart, a live feed of what the server has been doing, the
-biggest users and games, and a year of playtime. Anything that needs a human
-gets an alert at the top with the screen that fixes it: uploads that never
-finished, saves whose bytes are missing, users sitting at their quota.
+biggest users and games, which launcher versions are in use, and a year of
+playtime. Anything that needs a human gets an alert at the top with the screen
+that fixes it: uploads that never finished, saves whose bytes are missing,
+users sitting at their quota.
 
 **History** — the full event log, searchable and filterable by category
 (sync / admin / auth / system), severity, kind, user and date range. It records
@@ -136,12 +137,17 @@ refused, how long someone had been away) and there is no column shape that fits
 all of them, so that column renders whatever this row happened to record. The
 full blob is still one click away in the expanded row.
 
-**Users** — searchable, sortable directory with storage against quota. Each
-account opens onto its own screen: what it stores broken down by kind, the
-machines it syncs from (hostname, platform, last seen), its top games, and
-tabs for saves, achievements, custom images, shares, download sources and
-activity. Blocking, per-user limits (see below), a per-category data purge and
-full deletion live there too, with byte counts reported for whatever was freed.
+**Users** — searchable, sortable directory with storage against quota and the
+launcher version each account last called with. The launcher names itself in
+the `User-Agent` of every request, so *who is still on the old build* is
+answerable without asking anyone; accounts that haven't synced since this
+server started reading it show a dash, and *Overview* counts the fleet by
+version. Each account opens onto its own screen: what it stores broken down by
+kind, the machines it syncs from (hostname, platform, last seen), its top
+games, and tabs for saves, achievements, custom images, shares, download
+sources and activity. Blocking, per-user limits (see below), a per-category
+data purge and full deletion live there too, with byte counts reported for
+whatever was freed.
 
 **Saves** — every stored save on the server in one filterable table, across
 all three generations: Cloud Save V2 snapshots, legacy tarball backups and
@@ -213,12 +219,13 @@ theme with a toggle to override it.
 ### User portal
 
 `https://your-server/portal` is the players' own view: what they have stored
-here, how much of their quota it uses, which machines they sync from, and their
-achievements, custom images, shares and playtime. They can download any save —
-including individual files out of a cloud save — and delete what they no longer
-want, without an operator in the loop. Where automatic save deletion is off,
-the versions the server kept for them are listed as *older version*, so they
-can reclaim their own quota.
+here, how much of their quota it uses, which machines they sync from and the
+launcher version those syncs came from, and their achievements, custom images,
+shares and playtime. They can download any save — including individual files
+out of a cloud save — and delete what they no longer want, without an operator
+in the loop. Where automatic save deletion is off, the versions the server
+kept for them are listed as *older version*, so they can reclaim their own
+quota.
 
 Signing in asks for the Hydra account they already have. The server forwards
 those credentials **once** to the official Hydra API (`HYDRA_OFFICIAL_LOGIN_PATH`,

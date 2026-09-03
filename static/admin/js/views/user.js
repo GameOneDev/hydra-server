@@ -203,6 +203,10 @@ function identityCard(user, ctx) {
           h("strong", { style: { fontSize: "16px" }, text: user.displayName || user.id }),
           user.username ? h("span", { class: "muted", text: `@${user.username}` }) : null,
           user.isBlocked ? pill("blocked", "critical") : pill("active", "good"),
+          /* Absent until this account syncs from a launcher again: nothing
+             recorded the version before, and inventing one is worse than
+             saying nothing. */
+          user.launcherVersion ? pill(`launcher v${user.launcherVersion}`, "accent") : null,
         ),
         h("span", { class: "mono muted", text: user.id }),
         h("span", {

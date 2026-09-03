@@ -76,6 +76,9 @@ fn user_json(state: &AppState, row: &sqlx::sqlite::SqliteRow, defaults: &Runtime
         "isBlocked": row.get::<i64, _>("is_blocked") != 0,
         "createdAt": row.get::<String, _>("created_at"),
         "lastSeenAt": row.get::<String, _>("last_seen_at"),
+        /* What they were running when last seen; null until an account syncs
+           again from a launcher (see [`crate::launcher`]). */
+        "launcherVersion": row.get::<Option<String>, _>("launcher_version"),
         "usedBytes": used,
         "quotaBytes": quota,
         "quotaRatio": if quota > 0 { used as f64 / quota as f64 } else { 0.0 },
@@ -134,9 +137,13 @@ async fn list(
     let search = super::like_pattern(query.q.as_deref());
     let mut filters = vec!["1 = 1".to_string()];
     if search.is_some() {
+        /* Launcher version included: with the version on every row, the
+           question the column raises is "who else is on that one", and
+           typing it is the only way this screen can answer it — sorting
+           text would put v10 before v9. */
         filters.push(
             "(u.display_name LIKE ?1 ESCAPE '\\' OR u.username LIKE ?1 ESCAPE '\\'
-              OR u.id LIKE ?1 ESCAPE '\\')"
+              OR u.id LIKE ?1 ESCAPE '\\' OR u.launcher_version LIKE ?1 ESCAPE '\\')"
                 .to_string(),
         );
     }
