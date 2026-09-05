@@ -36,6 +36,9 @@ pub(crate) fn used_bytes_expr() -> String {
 const USER_COUNTS: &str = "
     (SELECT COUNT(*) FROM cloud_save_snapshots s
       WHERE s.user_id = u.id AND s.status = 'committed') AS cloud_save_count,
+    /* Kept older versions: no game's current save, but still stored. */
+    (SELECT COUNT(*) FROM cloud_save_snapshots s
+      WHERE s.user_id = u.id AND s.status = 'superseded') AS retained_save_count,
     (SELECT COUNT(*) FROM artifacts a WHERE a.user_id = u.id) AS backup_count,
     (SELECT COUNT(*) FROM emulation_saves e WHERE e.user_id = u.id) AS emulation_save_count,
     (SELECT COUNT(*) FROM game_achievements g WHERE g.user_id = u.id) AS achievement_game_count,
@@ -87,6 +90,7 @@ fn user_json(state: &AppState, row: &sqlx::sqlite::SqliteRow, defaults: &Runtime
         },
         "counts": {
             "cloudSaves": row.get::<i64, _>("cloud_save_count"),
+            "retainedCloudSaves": row.get::<i64, _>("retained_save_count"),
             "backups": row.get::<i64, _>("backup_count"),
             "emulationSaves": row.get::<i64, _>("emulation_save_count"),
             "achievementGames": row.get::<i64, _>("achievement_game_count"),
@@ -141,8 +145,8 @@ async fn list(
         );
     }
     /* Paging placeholders are numbered explicitly rather than left as bare
-       `?`: mixing the two forms in one statement does not survive the round
-       trip through the driver, and silently binds the wrong value to LIMIT. */
+    `?`: mixing the two forms in one statement does not survive the round
+    trip through the driver, and silently binds the wrong value to LIMIT. */
     let (limit_slot, offset_slot) = if search.is_some() { (2, 3) } else { (1, 2) };
     match query.status.as_deref() {
         Some("blocked") => filters.push("u.is_blocked = 1".to_string()),
@@ -219,8 +223,8 @@ async fn detail(
     .ok_or_else(|| ApiError::not_found("user not found"))?;
 
     /* Devices: the launcher stamps its hostname on everything it uploads, so
-       the union of those is the machine list for the account — the fastest
-       way to tell "synced from two PCs" from "someone else has the token". */
+    the union of those is the machine list for the account — the fastest
+    way to tell "synced from two PCs" from "someone else has the token". */
     let devices = sqlx::query(
         "SELECT hostname, platform, COUNT(*) AS items, MAX(at) AS last_seen_at
          FROM (
@@ -341,12 +345,11 @@ async fn library(
     .fetch_all(&state.pool)
     .await?;
 
-    let sources = sqlx::query(
-        "SELECT * FROM download_sources WHERE user_id = ? ORDER BY created_at DESC",
-    )
-    .bind(&id)
-    .fetch_all(&state.pool)
-    .await?;
+    let sources =
+        sqlx::query("SELECT * FROM download_sources WHERE user_id = ? ORDER BY created_at DESC")
+            .bind(&id)
+            .fetch_all(&state.pool)
+            .await?;
 
     Ok(Json(json!({
         "achievements": achievements.iter().map(|row| json!({
@@ -422,14 +425,22 @@ async fn set_blocked(
     }
 
     /* Blocked users may still have a cached token — drop the cache so the
-       block applies within seconds, not minutes. */
+    block applies within seconds, not minutes. */
     state.token_cache.write().await.clear();
 
     crate::events::record(
         &state,
         Event::admin(
-            if payload.blocked { "admin.user.blocked" } else { "admin.user.unblocked" },
-            if payload.blocked { "Blocked a user" } else { "Unblocked a user" },
+            if payload.blocked {
+                "admin.user.blocked"
+            } else {
+                "admin.user.unblocked"
+            },
+            if payload.blocked {
+                "Blocked a user"
+            } else {
+                "Unblocked a user"
+            },
         )
         .about(&id)
         .warning(),
@@ -630,7 +641,7 @@ async fn purge_cloud_saves(state: &AppState, user_id: &str) -> ApiResult<()> {
         .await?;
 
     /* With no manifest left, every blob is an orphan — this both deletes the
-       bytes and keeps the quota honest. */
+    bytes and keeps the quota honest. */
     cloud_saves::collect_orphan_blobs(state, user_id).await
 }
 
@@ -740,7 +751,7 @@ async fn delete_user(
     let freed = storage::used_bytes(&state, &id).await?;
 
     /* Every stored key has to be read before the row goes: the database
-       cascades, disk does not, and an id nothing points at is unrecoverable. */
+    cascades, disk does not, and an id nothing points at is unrecoverable. */
     let artifact_ids: Vec<String> =
         sqlx::query_scalar("SELECT id FROM artifacts WHERE user_id = ?")
             .bind(&id)
@@ -756,16 +767,17 @@ async fn delete_user(
             .bind(&id)
             .fetch_all(&state.pool)
             .await?;
-    let banner_key: Option<String> = sqlx::query_scalar("SELECT banner_key FROM users WHERE id = ?")
-        .bind(&id)
-        .fetch_optional(&state.pool)
-        .await?
-        .flatten();
+    let banner_key: Option<String> =
+        sqlx::query_scalar("SELECT banner_key FROM users WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&state.pool)
+            .await?
+            .flatten();
     let artwork_keys = crate::artwork::storage_keys_for_user(&state, &id).await;
     let souvenir_keys = crate::souvenirs::storage_keys_for_user(&state, &id).await;
 
     /* Likes this user left on other people's souvenirs aren't reachable from
-       their own rows, so the cascade below doesn't take them. */
+    their own rows, so the cascade below doesn't take them. */
     sqlx::query("DELETE FROM souvenir_likes WHERE user_id = ?")
         .bind(&id)
         .execute(&state.pool)
@@ -796,12 +808,9 @@ async fn delete_user(
             storage::delete_object(&state, &storage::cloud_save_blob_key(&id, hash)).await;
         }
         /* Succeeds only once the user's blob directory is empty, which is
-           exactly when it should go. */
-        let _ = tokio::fs::remove_dir(storage::storage_path(
-            &state,
-            &format!("cloud-saves/{id}"),
-        ))
-        .await;
+        exactly when it should go. */
+        let _ = tokio::fs::remove_dir(storage::storage_path(&state, &format!("cloud-saves/{id}")))
+            .await;
     }
 
     state.token_cache.write().await.clear();

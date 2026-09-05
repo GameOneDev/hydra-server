@@ -77,9 +77,9 @@ pub async fn list(state: &AppState) -> Vec<Backup> {
     }
 
     /* Newest first: the one an operator wants is almost always the last one.
-       By timestamp rather than name — an uploaded file's name doesn't sort
-       against a scheduled one's, and this order also decides what prune
-       deletes. */
+    By timestamp rather than name — an uploaded file's name doesn't sort
+    against a scheduled one's, and this order also decides what prune
+    deletes. */
     backups.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.name.cmp(&a.name)));
     backups
 }
@@ -106,12 +106,15 @@ async fn create_keeping(
         .await
         .map_err(|err| format!("cannot create the backup directory: {err}"))?;
 
-    let (name, path) = free_name(&dir, &format!("hydra-{}", Utc::now().format("%Y%m%d-%H%M%S")))
-        .await
-        .ok_or_else(|| "too many backups taken in the same second".to_string())?;
+    let (name, path) = free_name(
+        &dir,
+        &format!("hydra-{}", Utc::now().format("%Y%m%d-%H%M%S")),
+    )
+    .await
+    .ok_or_else(|| "too many backups taken in the same second".to_string())?;
 
     /* Refuse rather than fill the disk: a backup that leaves no room for the
-       next upload has traded one failure for a worse one. */
+    next upload has traded one failure for a worse one. */
     if let (Some(free), Ok(meta)) = (
         free_disk_bytes(&state.config.data_dir),
         tokio::fs::metadata(state.config.database_path()).await,
@@ -205,7 +208,7 @@ pub async fn restore(state: &AppState, name: &str) -> Result<RestoreReport, Stri
     let tables = verify(state, &path).await?;
 
     /* Before overwriting anything: a backup of what is about to be replaced.
-       Restoring the wrong file should cost a click, not the server. */
+    Restoring the wrong file should cost a click, not the server. */
     let safety = create_keeping(state, "pre-restore", Some(name)).await?;
 
     let mut connection = state
@@ -215,7 +218,7 @@ pub async fn restore(state: &AppState, name: &str) -> Result<RestoreReport, Stri
         .map_err(|err| format!("cannot open the database: {err}"))?;
 
     /* One connection for the whole operation: ATTACH is per-connection, and
-       the swap has to happen inside a single transaction. */
+    the swap has to happen inside a single transaction. */
     sqlx::query("PRAGMA foreign_keys = OFF")
         .execute(&mut *connection)
         .await
@@ -236,7 +239,7 @@ pub async fn restore(state: &AppState, name: &str) -> Result<RestoreReport, Stri
         let mut rows = 0i64;
         for table in &tables {
             /* Table names come from the database's own schema, never from the
-               request, and are quoted regardless. */
+            request, and are quoted regardless. */
             sqlx::query(&format!("DELETE FROM main.\"{table}\""))
                 .execute(&mut *transaction)
                 .await
@@ -262,7 +265,7 @@ pub async fn restore(state: &AppState, name: &str) -> Result<RestoreReport, Stri
     .await;
 
     /* Detach and re-arm foreign keys whether or not the swap worked — a
-       failed restore must not leave the connection in a strange state. */
+    failed restore must not leave the connection in a strange state. */
     let _ = sqlx::query("DETACH DATABASE backup")
         .execute(&mut *connection)
         .await;
@@ -274,7 +277,7 @@ pub async fn restore(state: &AppState, name: &str) -> Result<RestoreReport, Stri
     let rows = swap?;
 
     /* Settings and cached tokens both came from the database that just went
-       away. */
+    away. */
     let reloaded = crate::settings::load(&state.pool, &state.config).await;
     *state.settings.write().await = reloaded;
     state.token_cache.write().await.clear();
@@ -295,7 +298,10 @@ pub async fn restore(state: &AppState, name: &str) -> Result<RestoreReport, Stri
     )
     .await;
 
-    tracing::warn!("database restored from {name} ({rows} rows across {} tables)", tables.len());
+    tracing::warn!(
+        "database restored from {name} ({rows} rows across {} tables)",
+        tables.len()
+    );
 
     Ok(RestoreReport {
         tables: tables.len(),
@@ -328,7 +334,9 @@ async fn verify(state: &AppState, path: &Path) -> Result<Vec<String>, String> {
     )
     .fetch_all(&mut probe)
     .await
-    .map_err(|_| "that database has no migration history — it isn't a hydra-server backup".to_string())?;
+    .map_err(|_| {
+        "that database has no migration history — it isn't a hydra-server backup".to_string()
+    })?;
 
     let backup_tables: Vec<String> = sqlx::query_scalar(TABLE_QUERY)
         .fetch_all(&mut probe)
@@ -410,7 +418,7 @@ pub async fn store_upload(state: &AppState, bytes: &[u8]) -> Result<Backup, Stri
         .map_err(|err| format!("cannot write the file: {err}"))?;
 
     /* Verify after writing so the operator gets the real reason it can't be
-       used, then clean up rather than leave an unusable file lying around. */
+    used, then clean up rather than leave an unusable file lying around. */
     if let Err(error) = verify(state, &path).await {
         let _ = tokio::fs::remove_file(&path).await;
         return Err(error);
@@ -466,10 +474,10 @@ pub fn free_disk_bytes(path: &Path) -> Option<u64> {
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
 
     /* SAFETY: c_path is a valid NUL-terminated string and stat is a live,
-       correctly sized statvfs the call only writes into. */
+    correctly sized statvfs the call only writes into. */
     let ok = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } == 0;
     /* Field widths differ between libc targets; the casts keep this
-       compiling on all of them. */
+    compiling on all of them. */
     #[allow(clippy::unnecessary_cast)]
     ok.then(|| stat.f_bavail as u64 * stat.f_frsize as u64)
 }

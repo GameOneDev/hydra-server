@@ -30,8 +30,7 @@ pub async fn resolve(state: &AppState, shop: &str, object_id: &str) -> GameMetad
 
         let recently_failed = DateTime::parse_from_rfc3339(&row.get::<String, _>("fetched_at"))
             .map(|fetched| {
-                Utc::now() - fetched.with_timezone(&Utc)
-                    < Duration::hours(RETRY_FAILED_AFTER_HOURS)
+                Utc::now() - fetched.with_timezone(&Utc) < Duration::hours(RETRY_FAILED_AFTER_HOURS)
             })
             .unwrap_or(true);
 
@@ -71,14 +70,14 @@ async fn fetch(state: &AppState, shop: &str, object_id: &str) -> GameMetadata {
             fetch_steam(state, object_id).await
         }
         /* Other shops have no public metadata endpoint; the panel keeps
-           showing the raw shop/object id for them. */
+        showing the raw shop/object id for them. */
         _ => GameMetadata::default(),
     }
 }
 
 async fn fetch_steam(state: &AppState, app_id: &str) -> GameMetadata {
     /* The cover comes straight off the Steam CDN by app id, so it works
-       even when the store lookup below fails (e.g. delisted games). */
+    even when the store lookup below fails (e.g. delisted games). */
     let cover_url = Some(format!(
         "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{app_id}/capsule_231x87.jpg"
     ));
@@ -100,7 +99,10 @@ async fn fetch_steam(state: &AppState, app_id: &str) -> GameMetadata {
                 Some(entry.get("data")?.get("name")?.as_str()?.to_string())
             }),
         Ok(response) => {
-            tracing::warn!("steam store returned {} for app {app_id}", response.status());
+            tracing::warn!(
+                "steam store returned {} for app {app_id}",
+                response.status()
+            );
             None
         }
         Err(err) => {

@@ -22,7 +22,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::events::Event;
 use crate::state::AppState;
 use crate::storage;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -48,12 +48,17 @@ fn valid_shop(shop: &str) -> bool {
     matches!(shop, "steam" | "launchbox")
 }
 
+/// A version a commit replaced and the server kept. No sync reads one, which
+/// is why the by-id routes act on these and only these.
+fn is_retained(status: &str) -> bool {
+    status == "superseded"
+}
+
 /// `x-amz-checksum-sha256` carries the digest base64-encoded, not hex. The
 /// launcher recomputes this from its own hash and refuses the response if it
 /// disagrees, so the encoding has to match exactly.
 fn checksum_header(hash: &str) -> ApiResult<String> {
-    let raw = hex::decode(hash)
-        .map_err(|_| ApiError::bad_request("invalid file hash"))?;
+    let raw = hex::decode(hash).map_err(|_| ApiError::bad_request("invalid file hash"))?;
     Ok(BASE64.encode(raw))
 }
 
@@ -161,6 +166,28 @@ pub struct RemoteSnapshotSummary {
     pub file_count: i64,
     pub total_size_bytes: i64,
     pub aggregate_hash: String,
+}
+
+/// A snapshot for the launcher's Cloud Save Manager. Separate from
+/// `RemoteSnapshotSummary`, which the sync path validates key by key.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibrarySnapshotSummary {
+    pub id: String,
+    pub version: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub file_count: i64,
+    pub total_size_bytes: i64,
+    pub aggregate_hash: String,
+    pub shop: String,
+    pub object_id: String,
+    pub hostname: Option<String>,
+    pub platform: Option<String>,
+    pub game_name: Option<String>,
+    pub game_cover_url: Option<String>,
+    /// `current` for the save being synced, `retained` for a kept older one.
+    pub status: &'static str,
 }
 
 #[derive(Serialize)]
@@ -271,8 +298,8 @@ pub async fn prepare_snapshot(
     sweep_stale_pending(&state, user_id).await?;
 
     /* Optimistic concurrency. `baseVersion` is the version the launcher
-       started from; if the stored snapshot has moved on, another machine
-       committed in the meantime and this upload would lose that work. */
+    started from; if the stored snapshot has moved on, another machine
+    committed in the meantime and this upload would lose that work. */
     let current: Option<(String, i64)> = sqlx::query_as(
         "SELECT id, version FROM cloud_save_snapshots
          WHERE user_id = ? AND shop = ? AND object_id = ? AND status = 'committed'",
@@ -286,7 +313,7 @@ pub async fn prepare_snapshot(
     let current_version = current.as_ref().map(|(_, version)| *version).unwrap_or(0);
     if payload.base_version != current_version {
         /* Worth logging: a conflict is the visible half of "my save went
-           backwards on the other machine", and the panel can show it. */
+        backwards on the other machine", and the panel can show it. */
         crate::events::record(
             &state,
             Event::sync(
@@ -311,8 +338,8 @@ pub async fn prepare_snapshot(
     }
 
     /* Which blobs do we already hold? Deduplicate by hash first: the same
-       bytes can appear under several identities, and the launcher uploads
-       each distinct hash only once. */
+    bytes can appear under several identities, and the launcher uploads
+    each distinct hash only once. */
     let mut sizes_by_hash: HashMap<&str, i64> = HashMap::new();
     for file in &payload.files {
         sizes_by_hash.insert(&file.hash, file.size_bytes);
@@ -329,12 +356,9 @@ pub async fn prepare_snapshot(
         .await?;
 
         /* Trust the row only if the bytes are really still on disk — a
-           half-cleaned storage dir must not turn into a silent data loss. */
+        half-cleaned storage dir must not turn into a silent data loss. */
         if present.is_some() {
-            let path = storage::storage_path(
-                &state,
-                &storage::cloud_save_blob_key(user_id, hash),
-            );
+            let path = storage::storage_path(&state, &storage::cloud_save_blob_key(user_id, hash));
             if tokio::fs::metadata(&path).await.is_ok() {
                 existing.insert((*hash).to_string());
             }
@@ -353,10 +377,9 @@ pub async fn prepare_snapshot(
     let snapshot_id = Uuid::new_v4().to_string();
     let total_size: i64 = payload.files.iter().map(|file| file.size_bytes).sum();
 
-    let custom_paths = serde_json::to_string(&payload.custom_path_raw_paths)
-        .unwrap_or_else(|_| "[]".to_string());
-    let variants =
-        serde_json::to_string(&payload.variants).unwrap_or_else(|_| "[]".to_string());
+    let custom_paths =
+        serde_json::to_string(&payload.custom_path_raw_paths).unwrap_or_else(|_| "[]".to_string());
+    let variants = serde_json::to_string(&payload.variants).unwrap_or_else(|_| "[]".to_string());
 
     let mut tx = state.pool.begin().await?;
 
@@ -415,7 +438,7 @@ pub async fn prepare_snapshot(
             });
         } else {
             /* Every identity sharing a hash gets the same content-addressed
-               URL, so the launcher uploading one of them satisfies them all. */
+            URL, so the launcher uploading one of them satisfies them all. */
             files.push(PrepareSnapshotFile::Upload {
                 variant_id: file.variant_id.clone(),
                 raw_path: file.raw_path.clone(),
@@ -489,9 +512,9 @@ pub async fn commit_snapshot(
         let key = storage::cloud_save_blob_key(user_id, &hash);
         let path = storage::storage_path(&state, &key);
 
-        let metadata = tokio::fs::metadata(&path).await.map_err(|_| {
-            ApiError::bad_request("a snapshot file was never uploaded")
-        })?;
+        let metadata = tokio::fs::metadata(&path)
+            .await
+            .map_err(|_| ApiError::bad_request("a snapshot file was never uploaded"))?;
 
         if metadata.len() as i64 != expected {
             return Err(ApiError::bad_request(
@@ -500,7 +523,7 @@ pub async fn commit_snapshot(
         }
 
         /* The bytes were hash-verified during upload, so registering the blob
-           here is safe. Existing rows keep their original created_at. */
+        here is safe. Existing rows keep their original created_at. */
         sqlx::query(
             "INSERT INTO cloud_save_blobs (user_id, hash, size_in_bytes, created_at)
              VALUES (?, ?, ?, ?)
@@ -616,6 +639,56 @@ pub async fn commit_snapshot(
 }
 
 // ---------------------------------------------------------------------------
+// GET /profile/cloud-saves/all-snapshots
+// ---------------------------------------------------------------------------
+
+/// Every stored snapshot of this user, current and retained, so the manager
+/// needs one request instead of one per game. Pending uploads are left out.
+pub async fn list_all_snapshots(
+    State(state): State<AppState>,
+    user: CurrentUser,
+) -> ApiResult<Json<Vec<LibrarySnapshotSummary>>> {
+    let rows = sqlx::query(
+        "SELECT s.id, s.version, s.created_at, s.updated_at, s.file_count,
+                s.total_size_in_bytes, s.aggregate_hash, s.shop, s.object_id,
+                s.hostname, s.platform, s.status,
+                g.name AS game_name, g.cover_url AS game_cover_url
+         FROM cloud_save_snapshots s
+         LEFT JOIN game_metadata g ON g.shop = s.shop AND g.object_id = s.object_id
+         WHERE s.user_id = ? AND s.status IN ('committed', 'superseded')
+         ORDER BY s.updated_at DESC",
+    )
+    .bind(&user.0.id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    Ok(Json(
+        rows.iter()
+            .map(|row| LibrarySnapshotSummary {
+                id: row.get("id"),
+                version: row.get("version"),
+                created_at: row.get("created_at"),
+                updated_at: row.get("updated_at"),
+                file_count: row.get("file_count"),
+                total_size_bytes: row.get("total_size_in_bytes"),
+                aggregate_hash: row.get("aggregate_hash"),
+                shop: row.get("shop"),
+                object_id: row.get("object_id"),
+                hostname: row.get("hostname"),
+                platform: row.get("platform"),
+                game_name: row.try_get("game_name").unwrap_or(None),
+                game_cover_url: row.try_get("game_cover_url").unwrap_or(None),
+                status: if row.get::<String, _>("status") == "committed" {
+                    "current"
+                } else {
+                    "retained"
+                },
+            })
+            .collect(),
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // GET / DELETE /profile/cloud-saves/snapshots
 // ---------------------------------------------------------------------------
 
@@ -699,13 +772,217 @@ pub async fn delete_snapshots(
 
     crate::events::record(
         &state,
-        Event::sync("cloud_save.deleted", user_id, "Deleted a cloud save from the launcher")
-            .game(&query.shop, &query.object_id)
-            .detail(serde_json::json!({ "snapshots": ids.len() })),
+        Event::sync(
+            "cloud_save.deleted",
+            user_id,
+            "Deleted a cloud save from the launcher",
+        )
+        .game(&query.shop, &query.object_id)
+        .detail(serde_json::json!({ "snapshots": ids.len() })),
     )
     .await;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /profile/cloud-saves/snapshots/{id}
+// ---------------------------------------------------------------------------
+
+/// Removes one retained version and frees any blob it alone referenced.
+pub async fn delete_snapshot(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    let user_id = &user.0.id;
+
+    let snapshot = sqlx::query(
+        "SELECT shop, object_id, status, total_size_in_bytes
+         FROM cloud_save_snapshots WHERE id = ? AND user_id = ?",
+    )
+    .bind(&id)
+    .bind(user_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| ApiError::not_found("snapshot not found"))?;
+
+    /* Never the save in use: launchers hold a sync anchor for it, and would
+    read its files as remotely deleted. That goes through the per-game
+    delete, which clears the launcher's local state too. */
+    if !is_retained(&snapshot.get::<String, _>("status")) {
+        return Err(ApiError::bad_request(
+            "only a retained version can be deleted on its own",
+        ));
+    }
+
+    let shop: String = snapshot.get("shop");
+    let object_id: String = snapshot.get("object_id");
+
+    let mut tx = state.pool.begin().await?;
+    sqlx::query(
+        "DELETE FROM cloud_save_snapshot_files
+         WHERE snapshot_id = ?
+           AND EXISTS (
+               SELECT 1 FROM cloud_save_snapshots
+               WHERE id = ? AND user_id = ? AND status = 'superseded'
+           )",
+    )
+    .bind(&id)
+    .bind(&id)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+    let deleted = sqlx::query(
+        "DELETE FROM cloud_save_snapshots
+         WHERE id = ? AND user_id = ? AND status = 'superseded'",
+    )
+    .bind(&id)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if deleted != 1 {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "snapshot is no longer retained",
+        ));
+    }
+    tx.commit().await?;
+
+    collect_orphan_blobs(&state, user_id).await?;
+
+    tracing::info!("cloud save v2: deleted retained version {id} for {user_id}");
+
+    crate::events::record(
+        &state,
+        Event::sync(
+            "cloud_save.deleted",
+            user_id,
+            "Deleted a kept cloud save version from the launcher",
+        )
+        .game(&shop, &object_id)
+        .detail(serde_json::json!({ "snapshotId": id, "retained": true }))
+        .size(snapshot.get::<i64, _>("total_size_in_bytes")),
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// POST /profile/cloud-saves/snapshots/{id}/restore
+// ---------------------------------------------------------------------------
+
+/// Puts a retained version back in use as the game's current save.
+///
+/// The two versions swap places — no bytes move, so it is reversible — and
+/// every launcher restores it on its next sync like any other remote change.
+pub async fn restore_snapshot(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<String>,
+) -> ApiResult<Json<CommitSnapshotResponse>> {
+    let user_id = &user.0.id;
+
+    let snapshot = sqlx::query(
+        "SELECT shop, object_id, status, file_count, total_size_in_bytes, aggregate_hash
+         FROM cloud_save_snapshots WHERE id = ? AND user_id = ?",
+    )
+    .bind(&id)
+    .bind(user_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| ApiError::not_found("snapshot not found"))?;
+
+    if !is_retained(&snapshot.get::<String, _>("status")) {
+        return Err(ApiError::bad_request(
+            "only a retained version can be restored",
+        ));
+    }
+
+    let shop: String = snapshot.get("shop");
+    let object_id: String = snapshot.get("object_id");
+    let now = Utc::now().to_rfc3339();
+
+    let mut tx = state.pool.begin().await?;
+
+    /* Past every version this game has held, so launchers see it as newer. */
+    let next_version: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(version), 0) + 1 FROM cloud_save_snapshots
+         WHERE user_id = ? AND shop = ? AND object_id = ?",
+    )
+    .bind(user_id)
+    .bind(&shop)
+    .bind(&object_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    /* Demote first: only one snapshot per game may be committed. The one
+    stepping aside is kept, so the restore can be undone. */
+    sqlx::query(
+        "UPDATE cloud_save_snapshots SET status = 'superseded', updated_at = ?
+         WHERE user_id = ? AND shop = ? AND object_id = ? AND status = 'committed'",
+    )
+    .bind(&now)
+    .bind(user_id)
+    .bind(&shop)
+    .bind(&object_id)
+    .execute(&mut *tx)
+    .await?;
+
+    let restored = sqlx::query(
+        "UPDATE cloud_save_snapshots SET status = 'committed', version = ?, updated_at = ?
+         WHERE id = ? AND user_id = ? AND status = 'superseded'",
+    )
+    .bind(next_version)
+    .bind(&now)
+    .bind(&id)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if restored != 1 {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "snapshot is no longer retained",
+        ));
+    }
+
+    tx.commit().await?;
+
+    let file_count: i64 = snapshot.get("file_count");
+    let total_size: i64 = snapshot.get("total_size_in_bytes");
+    let aggregate_hash: String = snapshot.get("aggregate_hash");
+
+    tracing::info!(
+        "cloud save v2: restored {shop}:{object_id} to v{next_version} ({file_count} files) for {user_id}"
+    );
+
+    crate::events::record(
+        &state,
+        Event::sync(
+            "cloud_save.restored",
+            user_id,
+            format!("Restored a kept cloud save version (now v{next_version}, {file_count} files)"),
+        )
+        .game(&shop, &object_id)
+        .detail(serde_json::json!({
+            "snapshotId": id,
+            "version": next_version,
+            "fileCount": file_count,
+        }))
+        .size(total_size),
+    )
+    .await;
+
+    Ok(Json(CommitSnapshotResponse {
+        snapshot_id: id,
+        version: next_version,
+        file_count,
+        total_size_bytes: total_size,
+        aggregate_hash,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -799,10 +1076,7 @@ async fn fetch_committed(
     .ok_or_else(|| ApiError::not_found("snapshot not found"))
 }
 
-async fn fetch_manifest_files(
-    state: &AppState,
-    snapshot_id: &str,
-) -> ApiResult<Vec<ManifestFile>> {
+async fn fetch_manifest_files(state: &AppState, snapshot_id: &str) -> ApiResult<Vec<ManifestFile>> {
     let rows = sqlx::query(
         "SELECT variant_id, raw_path, relative_path, hash, size_in_bytes, last_modified_at
          FROM cloud_save_snapshot_files WHERE snapshot_id = ?",
@@ -827,11 +1101,7 @@ async fn fetch_manifest_files(
 /// Counts only the blobs this upload would actually add — files the server
 /// already holds cost nothing, so re-syncing an unchanged save never trips the
 /// quota.
-async fn enforce_quota(
-    state: &AppState,
-    user_id: &str,
-    incoming_bytes: i64,
-) -> ApiResult<()> {
+async fn enforce_quota(state: &AppState, user_id: &str, incoming_bytes: i64) -> ApiResult<()> {
     let max_bytes_per_user = crate::limits::for_user(state, user_id)
         .await?
         .max_bytes_per_user;
@@ -843,13 +1113,17 @@ async fn enforce_quota(
     if storage::exceeds_quota(max_bytes_per_user, used, incoming_bytes) {
         crate::events::record(
             state,
-            Event::sync("cloud_save.quota_exceeded", user_id, "Upload refused — quota full")
-                .detail(serde_json::json!({
-                    "usedBytes": used,
-                    "incomingBytes": incoming_bytes,
-                    "quotaBytes": max_bytes_per_user,
-                }))
-                .warning(),
+            Event::sync(
+                "cloud_save.quota_exceeded",
+                user_id,
+                "Upload refused — quota full",
+            )
+            .detail(serde_json::json!({
+                "usedBytes": used,
+                "incomingBytes": incoming_bytes,
+                "quotaBytes": max_bytes_per_user,
+            }))
+            .warning(),
         )
         .await;
 
@@ -862,8 +1136,8 @@ async fn enforce_quota(
 /// Drops pending snapshots that were never committed, so an interrupted
 /// upload does not keep its blobs alive forever.
 async fn sweep_stale_pending(state: &AppState, user_id: &str) -> ApiResult<()> {
-    let cutoff = (Utc::now() - chrono::Duration::seconds(PENDING_SNAPSHOT_TTL_SECONDS))
-        .to_rfc3339();
+    let cutoff =
+        (Utc::now() - chrono::Duration::seconds(PENDING_SNAPSHOT_TTL_SECONDS)).to_rfc3339();
 
     let stale: Vec<String> = sqlx::query_scalar(
         "SELECT id FROM cloud_save_snapshots
@@ -1040,6 +1314,54 @@ mod tests {
     }
 
     #[test]
+    fn only_a_retained_version_answers_to_the_by_id_routes() {
+        assert!(is_retained("superseded"));
+        assert!(!is_retained("committed"));
+        assert!(!is_retained("pending"));
+    }
+
+    #[test]
+    fn library_snapshot_summary_extends_the_launcher_shape() {
+        let value = serde_json::to_value(LibrarySnapshotSummary {
+            id: "id".into(),
+            version: 1,
+            created_at: "2026-08-01T10:00:00Z".into(),
+            updated_at: "2026-08-01T10:00:00Z".into(),
+            file_count: 3,
+            total_size_bytes: 42,
+            aggregate_hash: "b".repeat(64),
+            shop: "steam".into(),
+            object_id: "440".into(),
+            hostname: Some("desktop".into()),
+            platform: Some("windows".into()),
+            game_name: None,
+            game_cover_url: None,
+            status: "current",
+        })
+        .unwrap();
+
+        assert_eq!(
+            keys(&value),
+            vec![
+                "aggregateHash",
+                "createdAt",
+                "fileCount",
+                "gameCoverUrl",
+                "gameName",
+                "hostname",
+                "id",
+                "objectId",
+                "platform",
+                "shop",
+                "status",
+                "totalSizeBytes",
+                "updatedAt",
+                "version"
+            ]
+        );
+    }
+
+    #[test]
     fn download_url_entries_carry_exactly_seven_keys() {
         let value = serde_json::to_value(DownloadUrlFile {
             variant_id: "a".repeat(64),
@@ -1204,9 +1526,15 @@ mod tests {
 
         commit_the_pending_snapshot(&server).await;
 
-        assert_eq!(status_of(&server, "new").await.as_deref(), Some("committed"));
+        assert_eq!(
+            status_of(&server, "new").await.as_deref(),
+            Some("committed")
+        );
         assert_eq!(status_of(&server, "old").await, None);
-        assert_eq!(storage::used_bytes(&server.state, "alice").await.unwrap(), 200);
+        assert_eq!(
+            storage::used_bytes(&server.state, "alice").await.unwrap(),
+            200
+        );
         assert!(!storage::storage_path(
             &server.state,
             &storage::cloud_save_blob_key("alice", &"a".repeat(64))
@@ -1233,9 +1561,18 @@ mod tests {
 
         commit_the_pending_snapshot(&server).await;
 
-        assert_eq!(status_of(&server, "new").await.as_deref(), Some("committed"));
-        assert_eq!(status_of(&server, "old").await.as_deref(), Some("superseded"));
-        assert_eq!(storage::used_bytes(&server.state, "alice").await.unwrap(), 300);
+        assert_eq!(
+            status_of(&server, "new").await.as_deref(),
+            Some("committed")
+        );
+        assert_eq!(
+            status_of(&server, "old").await.as_deref(),
+            Some("superseded")
+        );
+        assert_eq!(
+            storage::used_bytes(&server.state, "alice").await.unwrap(),
+            300
+        );
 
         let Json(listed) = list_snapshots(
             State(server.state.clone()),
@@ -1297,6 +1634,9 @@ mod tests {
             1,
             "the kept version went with the one it was kept beside"
         );
-        assert_eq!(storage::used_bytes(&server.state, "alice").await.unwrap(), 0);
+        assert_eq!(
+            storage::used_bytes(&server.state, "alice").await.unwrap(),
+            0
+        );
     }
 }

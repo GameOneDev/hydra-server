@@ -244,12 +244,17 @@ const DELETE_PATHS = {
 
 async function remove(row, ctx) {
   const name = fmt.gameName(row.game);
+  const retained = row.state === "superseded";
   const ok = await confirm({
-    title: "Delete this save?",
+    title: retained ? "Delete this older version?" : "Delete this save?",
     body:
       row.kind === "cloud"
-        ? `The current cloud save for ${name} is deleted along with any file only it was keeping. The launcher re-uploads on the next sync.`
-        : `${fmt.bytes(row.sizeBytes)} for ${name} is deleted from this server. This cannot be undone.`,
+        ? retained
+          ? `An older version of ${name} that no launcher syncs is deleted, along with any file only it was keeping. The save in use is untouched, and the owner loses the option to go back to this one.`
+          : `The current cloud save for ${name} is deleted along with any file only it was keeping. The launcher re-uploads on the next sync.`
+        : retained
+          ? `An older version of ${name} — ${fmt.bytes(row.sizeBytes)} — is deleted from this server. The save in use is untouched.`
+          : `${fmt.bytes(row.sizeBytes)} for ${name} is deleted from this server. This cannot be undone.`,
     confirmLabel: "Delete",
     danger: true,
   });

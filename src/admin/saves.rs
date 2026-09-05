@@ -22,7 +22,10 @@ use sqlx::Row;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/admin/api/saves", get(list))
-        .route("/admin/api/cloud-saves/{id}", get(snapshot).delete(delete_snapshot))
+        .route(
+            "/admin/api/cloud-saves/{id}",
+            get(snapshot).delete(delete_snapshot),
+        )
         .route("/admin/api/cloud-saves/{id}/files", get(snapshot_files))
         .route(
             "/admin/api/cloud-saves/{id}/files/{hash}/download",
@@ -31,7 +34,10 @@ pub fn router() -> Router<AppState> {
         .route("/admin/api/artifacts/{id}", delete(delete_artifact))
         .route("/admin/api/artifacts/{id}/download", get(download_artifact))
         .route("/admin/api/artifacts/{id}/freeze", post(set_frozen))
-        .route("/admin/api/emulation-saves/{id}", delete(delete_emulation_save))
+        .route(
+            "/admin/api/emulation-saves/{id}",
+            delete(delete_emulation_save),
+        )
         .route(
             "/admin/api/emulation-saves/{id}/download",
             get(download_emulation_save),
@@ -101,7 +107,7 @@ async fn list(
     let paging = Paging::new(query.page, query.per_page);
 
     /* Filters are positional so the same list of binds serves the count and
-       the page query; every one of them is a bound value, never inlined. */
+    the page query; every one of them is a bound value, never inlined. */
     let mut filters: Vec<String> = Vec::new();
     let mut binds: Vec<String> = Vec::new();
 
@@ -182,8 +188,8 @@ async fn list(
     );
 
     /* Every placeholder is numbered, paging included: mixing `?N` with bare
-       `?` in one statement does not survive the round trip through the
-       driver, and binds a filter value to LIMIT. */
+    `?` in one statement does not survive the round trip through the
+    driver, and binds a filter value to LIMIT. */
     let (limit_slot, offset_slot) = (binds.len() + 1, binds.len() + 2);
     let sql = format!(
         "SELECT x.*, u.display_name, u.username, u.profile_image_url,
@@ -226,7 +232,7 @@ async fn list(
         .collect();
 
     /* Totals for the current filter, not just the current page — "3 of 412
-       shown, 84.2 GB matched" is the number an operator is actually after. */
+    shown, 84.2 GB matched" is the number an operator is actually after. */
     let sums_sql = format!(
         "SELECT COALESCE(SUM(x.size_bytes), 0) AS bytes, x.kind, COUNT(*) AS items {from} GROUP BY x.kind"
     );
@@ -486,7 +492,11 @@ async fn set_frozen(
     crate::events::record(
         &state,
         Event::admin(
-            if payload.frozen { "admin.save.frozen" } else { "admin.save.unfrozen" },
+            if payload.frozen {
+                "admin.save.frozen"
+            } else {
+                "admin.save.unfrozen"
+            },
             if payload.frozen {
                 "Froze a backup so the launcher can't rotate it away"
             } else {

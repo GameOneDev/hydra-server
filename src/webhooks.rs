@@ -98,8 +98,8 @@ fn body_for(format: &str, state: &AppState, event: &Event, at: &str) -> Value {
 }
 
 fn sign(secret: &str, body: &str) -> String {
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-        .expect("HMAC accepts keys of any length");
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts keys of any length");
     mac.update(body.as_bytes());
     format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
 }
@@ -125,7 +125,7 @@ pub async fn dispatch(state: &AppState, event: &Event, at: &str) {
     }
 
     /* Bodies are rendered here, while the event is still borrowed; the task
-       below only needs the finished strings. */
+    below only needs the finished strings. */
     let deliveries: Vec<(Webhook, String)> = hooks
         .into_iter()
         .map(|hook| {
@@ -148,7 +148,10 @@ async fn deliver(state: &AppState, hook: &Webhook, body: String) {
         .post(&hook.url)
         .timeout(std::time::Duration::from_secs(TIMEOUT_SECONDS))
         .header("content-type", "application/json")
-        .header("user-agent", concat!("hydra-server/", env!("CARGO_PKG_VERSION")));
+        .header(
+            "user-agent",
+            concat!("hydra-server/", env!("CARGO_PKG_VERSION")),
+        );
 
     if let Some(secret) = &hook.secret {
         request = request.header("x-hydra-signature", sign(secret, &body));
@@ -174,7 +177,11 @@ async fn deliver(state: &AppState, hook: &Webhook, body: String) {
         Err(error) => {
             tracing::warn!(
                 "webhook {} failed: {error}",
-                if hook.label.is_empty() { &hook.url } else { &hook.label }
+                if hook.label.is_empty() {
+                    &hook.url
+                } else {
+                    &hook.label
+                }
             );
             sqlx::query(
                 "UPDATE webhooks
@@ -236,7 +243,11 @@ pub async fn test(state: &AppState, id: &str) -> Result<Value, String> {
             )
             .bind(&now)
             .bind(status.as_u16().to_string())
-            .bind(if ok { None } else { Some(format!("HTTP {status}")) })
+            .bind(if ok {
+                None
+            } else {
+                Some(format!("HTTP {status}"))
+            })
             .bind(ok)
             .bind(id)
             .execute(&state.pool)

@@ -54,7 +54,7 @@ impl FromRequestParts<AppState> for CurrentUser {
         }
 
         /* Before the bump below overwrites the evidence: last_seen_at is how
-           the presence log tells a returning client from a busy one. */
+        the presence log tells a returning client from a busy one. */
         let ip = crate::client_ip::of(
             &state.config,
             &parts.headers,
@@ -66,15 +66,14 @@ impl FromRequestParts<AppState> for CurrentUser {
         crate::presence::touch(state, &user, Some(ip)).await;
 
         /* Bump last_seen_at on every authenticated request. resolve_user only
-           touches the row on token-cache misses, which would leave last_seen_at
-           up to TOKEN_CACHE_TTL_SECONDS stale while the client is active. */
-        let blocked: Option<(i64,)> = sqlx::query_as(
-            "UPDATE users SET last_seen_at = ? WHERE id = ? RETURNING is_blocked",
-        )
-        .bind(Utc::now().to_rfc3339())
-        .bind(&user.id)
-        .fetch_optional(&state.pool)
-        .await?;
+        touches the row on token-cache misses, which would leave last_seen_at
+        up to TOKEN_CACHE_TTL_SECONDS stale while the client is active. */
+        let blocked: Option<(i64,)> =
+            sqlx::query_as("UPDATE users SET last_seen_at = ? WHERE id = ? RETURNING is_blocked")
+                .bind(Utc::now().to_rfc3339())
+                .bind(&user.id)
+                .fetch_optional(&state.pool)
+                .await?;
 
         if matches!(blocked, Some((1,))) {
             return Err(ApiError::forbidden("user is blocked on this server"));
@@ -122,10 +121,7 @@ async fn resolve_user(state: &AppState, token: &str) -> Result<AuthenticatedUser
 ///
 /// Public because the portal signs people in with credentials rather than a
 /// header, and must reach the same verdict from the same authority.
-pub async fn verify_token(
-    state: &AppState,
-    token: &str,
-) -> Result<AuthenticatedUser, ApiError> {
+pub async fn verify_token(state: &AppState, token: &str) -> Result<AuthenticatedUser, ApiError> {
     let url = format!("{}/profile/me", state.config.official_api_url);
 
     let response = state
@@ -137,7 +133,7 @@ pub async fn verify_token(
         .map_err(|err| {
             tracing::warn!("official API unreachable: {err}");
             /* Anything but a real 401 must NOT look like one — the launcher
-               wipes its session on 401 responses. */
+            wipes its session on 401 responses. */
             ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "official Hydra API unreachable",
@@ -176,13 +172,13 @@ pub async fn upsert_user(state: &AppState, user: &AuthenticatedUser) -> Result<(
     let now = Utc::now().to_rfc3339();
 
     /* Deliberately does NOT move last_seen_at on an existing row: the presence
-       log reads that column to tell a returning client from a busy one, and a
-       write hidden in here would have overwritten the answer before it was
-       asked. Every caller bumps it explicitly instead.
+    log reads that column to tell a returning client from a busy one, and a
+    write hidden in here would have overwritten the answer before it was
+    asked. Every caller bumps it explicitly instead.
 
-       created_at is only written by the insert, so getting it back and finding
-       our own timestamp means this row is new — which is how a first sighting
-       gets logged without a second query to ask. */
+    created_at is only written by the insert, so getting it back and finding
+    our own timestamp means this row is new — which is how a first sighting
+    gets logged without a second query to ask. */
     let created_at: Option<(String,)> = sqlx::query_as(
         "INSERT INTO users (id, username, display_name, profile_image_url, created_at, last_seen_at)
          VALUES (?, ?, ?, ?, ?, ?)

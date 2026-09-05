@@ -71,7 +71,18 @@ export default {
           label: "Cloud saves",
           sortable: true,
           align: "right",
-          render: (row) => fmt.number(row.counts.cloudSaves),
+          render: (row) =>
+            h(
+              "div",
+              { class: "stack", style: { justifyItems: "end" } },
+              h("span", { class: "num", text: fmt.number(row.counts.cloudSaves) }),
+              row.counts.retainedCloudSaves
+                ? h("span", {
+                    class: "muted small num",
+                    text: `+ ${fmt.number(row.counts.retainedCloudSaves)} older`,
+                  })
+                : null,
+            ),
         },
         {
           key: "backups",

@@ -191,7 +191,11 @@ impl Comparison {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Trigger {
     Every {
         count: i64,
@@ -334,7 +338,9 @@ impl Trigger {
                 min_gap_minutes,
             } => {
                 if kinds.len() > 12 {
-                    return Err("that is more event kinds than one trigger should carry".to_string());
+                    return Err(
+                        "that is more event kinds than one trigger should carry".to_string()
+                    );
                 }
                 if kinds.iter().any(|kind| kind.trim().is_empty()) {
                     return Err("an event kind can't be blank".to_string());
@@ -417,11 +423,14 @@ fn step_months(from: DateTime<Utc>, count: i64, day: i64, at_minute: i64) -> Dat
     let mut anchor = midnight(from);
 
     for _ in 0..=13 {
-        let candidate = on_day(anchor, day) + Duration::minutes(at_minute.rem_euclid(MINUTES_PER_DAY));
+        let candidate =
+            on_day(anchor, day) + Duration::minutes(at_minute.rem_euclid(MINUTES_PER_DAY));
         if candidate > from {
             return candidate;
         }
-        anchor = anchor.checked_add_months(months).unwrap_or(anchor + Duration::days(30));
+        anchor = anchor
+            .checked_add_months(months)
+            .unwrap_or(anchor + Duration::days(30));
     }
 
     from + Duration::days(30)
@@ -443,7 +452,9 @@ fn days_in_month(year: i32, month: u32) -> i64 {
         (year, month + 1)
     };
     let first = Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0).single();
-    let next = Utc.with_ymd_and_hms(next_year, next_month, 1, 0, 0, 0).single();
+    let next = Utc
+        .with_ymd_and_hms(next_year, next_month, 1, 0, 0, 0)
+        .single();
     match (first, next) {
         (Some(first), Some(next)) => (next - first).num_days(),
         _ => 30,
@@ -627,7 +638,9 @@ mod tests {
     fn only_timers_have_a_next_run() {
         let now = at("2026-08-30T14:20:00Z");
 
-        assert!(Trigger::Startup { delay_minutes: 5 }.next_run(now).is_none());
+        assert!(Trigger::Startup { delay_minutes: 5 }
+            .next_run(now)
+            .is_none());
         assert!(Trigger::AfterTask {
             task: "backup".to_string(),
             delay_minutes: 0
@@ -644,7 +657,10 @@ mod tests {
 
     #[test]
     fn every_trigger_reads_as_a_sentence() {
-        assert_eq!(every(1, Unit::Day, Some(180)).label(), "every day at 03:00 UTC");
+        assert_eq!(
+            every(1, Unit::Day, Some(180)).label(),
+            "every day at 03:00 UTC"
+        );
         assert_eq!(every(6, Unit::Hour, None).label(), "every 6 hours");
         assert_eq!(every(30, Unit::Minute, None).label(), "every 30 minutes");
         assert_eq!(
@@ -681,30 +697,39 @@ mod tests {
 
     #[test]
     fn a_trigger_that_cannot_work_is_refused() {
-        assert!(every(1, Unit::Minute, None).validate("vacuum").is_err(), "faster than the tick");
+        assert!(
+            every(1, Unit::Minute, None).validate("vacuum").is_err(),
+            "faster than the tick"
+        );
         assert!(every(0, Unit::Day, None).validate("vacuum").is_err());
         assert!(every(400, Unit::Day, None).validate("vacuum").is_err());
         assert!(every(1, Unit::Day, Some(1500)).validate("vacuum").is_err());
         assert!(every(15, Unit::Minute, None).validate("vacuum").is_ok());
 
-        assert!(Trigger::AfterTask {
-            task: "vacuum".to_string(),
-            delay_minutes: 0
-        }
-        .validate("vacuum")
-        .is_err(), "a task can't wait for itself");
+        assert!(
+            Trigger::AfterTask {
+                task: "vacuum".to_string(),
+                delay_minutes: 0
+            }
+            .validate("vacuum")
+            .is_err(),
+            "a task can't wait for itself"
+        );
         assert!(Trigger::AfterTask {
             task: "no-such-task".to_string(),
             delay_minutes: 0
         }
         .validate("vacuum")
         .is_err());
-        assert!(Trigger::AfterTask {
-            task: "delete-orphan-files".to_string(),
-            delay_minutes: 0
-        }
-        .validate("vacuum")
-        .is_err(), "and can't wait for one that never runs unattended");
+        assert!(
+            Trigger::AfterTask {
+                task: "delete-orphan-files".to_string(),
+                delay_minutes: 0
+            }
+            .validate("vacuum")
+            .is_err(),
+            "and can't wait for one that never runs unattended"
+        );
 
         assert!(Trigger::Condition {
             metric: Metric::ExpiredEvents,

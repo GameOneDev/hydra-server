@@ -79,7 +79,7 @@ async fn asset(Path(path): Path<String>) -> ApiResult<Response> {
         [
             (header::CONTENT_TYPE, content_type),
             /* Revalidate every load: the front end ships inside the binary,
-               so a server upgrade must never be shadowed by a cached module. */
+            so a server upgrade must never be shadowed by a cached module. */
             (header::CACHE_CONTROL, "no-cache"),
         ],
         *body,

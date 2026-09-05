@@ -433,6 +433,12 @@ Steam games. A save is a manifest of files, each content-addressed by SHA-256:
 - `POST /profile/cloud-saves/commit-snapshot` — verifies the bytes landed and
   promotes the snapshot to the game's current save
 - `GET|DELETE /profile/cloud-saves/snapshots?shop=&objectId=`
+- `GET /profile/cloud-saves/all-snapshots` — every snapshot of the user,
+  tagged with its game and marked `current` or `retained`
+- `DELETE /profile/cloud-saves/snapshots/{id}` — deletes one retained
+  version (the current save goes through the per-game delete above)
+- `POST /profile/cloud-saves/snapshots/{id}/restore` — puts a retained
+  version back in use; the two swap places, so it can be undone
 - `GET /profile/cloud-saves/snapshot-restore-manifest?snapshotId=`
 - `GET /profile/cloud-saves/snapshot-download-urls?snapshotId=`
 

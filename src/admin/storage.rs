@@ -111,7 +111,7 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
         area["expectedRows"] = json!(rows);
         area["expectedBytes"] = json!(bytes);
         /* Profile images have a row naming the current file but no recorded
-           size, so there is nothing to compare bytes against. */
+        size, so there is nothing to compare bytes against. */
         area["tracked"] = json!(expected.contains_key(&key));
     }
 
@@ -173,7 +173,7 @@ async fn integrity(State(state): State<AppState>, _admin: AdminSession) -> ApiRe
     }
 
     /* A committed manifest referencing a hash with no blob row at all is the
-       same failure one step earlier, and just as fatal to a restore. */
+    same failure one step earlier, and just as fatal to a restore. */
     let dangling = sqlx::query(
         "SELECT DISTINCT s.user_id, f.hash, s.id AS snapshot_id
          FROM cloud_save_snapshot_files f
@@ -267,8 +267,8 @@ async fn integrity(State(state): State<AppState>, _admin: AdminSession) -> ApiRe
     }
 
     /* A reservation whose upload never arrived has no file to reconcile and
-       isn't an orphan either — Maintenance sweeps those. Its key still counts
-       as known so a partially-written file isn't reported as stray bytes. */
+    isn't an orphan either — Maintenance sweeps those. Its key still counts
+    as known so a partially-written file isn't reported as stray bytes. */
     let pending_souvenir_keys: Vec<String> =
         sqlx::query_scalar("SELECT image_key FROM souvenirs WHERE is_uploaded = 0")
             .fetch_all(&state.pool)
@@ -276,13 +276,12 @@ async fn integrity(State(state): State<AppState>, _admin: AdminSession) -> ApiRe
     known.extend(pending_souvenir_keys);
 
     /* A profile image is one key on the user's row, so the current file
-       reconciles like any other and the ones it superseded show up below as
-       orphans. */
+    reconciles like any other and the ones it superseded show up below as
+    orphans. */
     for (kind, column) in [("banner", "banner_key"), ("avatar", "avatar_key")] {
-        let keys: Vec<Option<String>> =
-            sqlx::query_scalar(&format!("SELECT {column} FROM users"))
-                .fetch_all(&state.pool)
-                .await?;
+        let keys: Vec<Option<String>> = sqlx::query_scalar(&format!("SELECT {column} FROM users"))
+            .fetch_all(&state.pool)
+            .await?;
         for key in keys.into_iter().flatten() {
             known.insert(key.clone());
             if tokio::fs::metadata(root.join(&key)).await.is_err() {
@@ -292,8 +291,8 @@ async fn integrity(State(state): State<AppState>, _admin: AdminSession) -> ApiRe
     }
 
     /* Avatars uploaded before `avatar_key` existed are named only by the
-       profile URL mirrored from the official account. Counting those keeps a
-       picture someone is still using off the orphan list. */
+    profile URL mirrored from the official account. Counting those keeps a
+    picture someone is still using off the orphan list. */
     let profile_urls: Vec<Option<String>> =
         sqlx::query_scalar("SELECT profile_image_url FROM users")
             .fetch_all(&state.pool)
@@ -326,8 +325,8 @@ async fn integrity(State(state): State<AppState>, _admin: AdminSession) -> ApiRe
             let key = relative.to_string_lossy().replace('\\', "/");
 
             /* Every area under images/ now has a row naming its current
-               file, so all of them are reconciled. A .uploading file is a
-               transfer in flight, not an orphan. */
+            file, so all of them are reconciled. A .uploading file is a
+            transfer in flight, not an orphan. */
             if key.ends_with(".uploading") {
                 continue;
             }

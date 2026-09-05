@@ -78,7 +78,15 @@ export default {
         statTile({
           label: "Cloud saves (v2)",
           value: fmt.number(user.counts.cloudSaves),
-          sub: `${fmt.plural(user.counts.backups, "legacy backup")}`,
+          sub: [
+            fmt.plural(user.counts.backups, "legacy backup"),
+            /* Not counted above, but they still fill the account. */
+            user.counts.retainedCloudSaves
+              ? `+ ${fmt.plural(user.counts.retainedCloudSaves, "older version")} kept`
+              : null,
+          ]
+            .filter(Boolean)
+            .join(" · "),
         }),
         statTile({
           label: "Emulation saves",

@@ -80,7 +80,7 @@ impl FromRequestParts<AppState> for PortalSession {
         }
 
         /* A block or a deletion has to take effect on the next request, not
-           whenever the week-long cookie happens to expire. */
+        whenever the week-long cookie happens to expire. */
         let row: Option<(i64,)> = sqlx::query_as("SELECT is_blocked FROM users WHERE id = ?")
             .bind(&claims.sub)
             .fetch_optional(&state.pool)
@@ -90,16 +90,16 @@ impl FromRequestParts<AppState> for PortalSession {
             Some((0,)) => Ok(PortalSession {
                 user_id: claims.sub,
             }),
-            Some(_) => Err(ApiError::forbidden("this account is blocked on this server")),
+            Some(_) => Err(ApiError::forbidden(
+                "this account is blocked on this server",
+            )),
             None => Err(ApiError::unauthorized("this account no longer exists")),
         }
     }
 }
 
 fn session_cookie(token: &str) -> String {
-    format!(
-        "{COOKIE_NAME}={token}; HttpOnly; Path=/; Max-Age={SESSION_TTL_SECONDS}; SameSite=Lax"
-    )
+    format!("{COOKIE_NAME}={token}; HttpOnly; Path=/; Max-Age={SESSION_TTL_SECONDS}; SameSite=Lax")
 }
 
 fn issue(state: &AppState, user_id: &str, ttl: i64, typ: &str) -> ApiResult<String> {
@@ -160,7 +160,7 @@ async fn login(
     };
 
     /* The official API is the only authority on who this is — the same call
-       the launcher's token goes through on every sync. */
+    the launcher's token goes through on every sync. */
     let user = match crate::auth::verify_token(&state, &token).await {
         Ok(user) => user,
         Err(error) => {
@@ -179,13 +179,15 @@ async fn login(
         .await
         .user_allowed(&user.id, user.username.as_deref());
     if !allowed {
-        return Err(ApiError::forbidden("this account isn't allowed on this server"));
+        return Err(ApiError::forbidden(
+            "this account isn't allowed on this server",
+        ));
     }
 
     crate::auth::upsert_user(&state, &user).await?;
 
     /* Signing in to the portal is being seen, and upsert_user deliberately
-       leaves that column to whoever knows it happened. */
+    leaves that column to whoever knows it happened. */
     let blocked: Option<(i64,)> =
         sqlx::query_as("UPDATE users SET last_seen_at = ? WHERE id = ? RETURNING is_blocked")
             .bind(Utc::now().to_rfc3339())
@@ -193,7 +195,9 @@ async fn login(
             .fetch_optional(&state.pool)
             .await?;
     if matches!(blocked, Some((1,))) {
-        return Err(ApiError::forbidden("this account is blocked on this server"));
+        return Err(ApiError::forbidden(
+            "this account is blocked on this server",
+        ));
     }
 
     ratelimit::record_success(&state, SCOPE, &ip).await;
@@ -203,10 +207,7 @@ async fn login(
 /// Records the miss, counts it, and hands back the error to return.
 async fn fail(state: &AppState, ip: &str, error: ApiError) -> ApiError {
     use std::sync::atomic::Ordering;
-    state
-        .metrics
-        .login_failures
-        .fetch_add(1, Ordering::Relaxed);
+    state.metrics.login_failures.fetch_add(1, Ordering::Relaxed);
 
     let (failures, locked) = ratelimit::record_failure(state, SCOPE, ip).await;
 
@@ -239,11 +240,14 @@ async fn finish_sign_in(
 
     crate::events::record(
         state,
-        Event::auth("auth.portal.login", format!("{} signed in to the portal", user.display_name))
-            .actor(format!("user:{}", user.id))
-            .about(&user.id)
-            .ip(Some(ip.to_string()))
-            .detail(json!({ "method": method })),
+        Event::auth(
+            "auth.portal.login",
+            format!("{} signed in to the portal", user.display_name),
+        )
+        .actor(format!("user:{}", user.id))
+        .about(&user.id)
+        .ip(Some(ip.to_string()))
+        .detail(json!({ "method": method })),
     )
     .await;
 
@@ -286,7 +290,7 @@ async fn exchange_credentials(
     let status = response.status();
     if status == StatusCode::NOT_FOUND || status == StatusCode::METHOD_NOT_ALLOWED {
         /* This deployment's official API has no password endpoint. Say so
-           precisely — the operator can hand out portal links instead. */
+        precisely — the operator can hand out portal links instead. */
         return Err(ApiError::new(
             StatusCode::NOT_IMPLEMENTED,
             "this server's Hydra API doesn't accept password sign-in — ask the server admin for a portal link",
@@ -428,8 +432,10 @@ mod tests {
             "abc"
         );
         assert_eq!(
-            extract_access_token(&json!({ "tokens": { "accessToken": "abc", "refreshToken": "r" } }))
-                .unwrap(),
+            extract_access_token(
+                &json!({ "tokens": { "accessToken": "abc", "refreshToken": "r" } })
+            )
+            .unwrap(),
             "abc"
         );
     }
