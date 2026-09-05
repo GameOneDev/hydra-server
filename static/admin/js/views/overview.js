@@ -102,6 +102,7 @@ export default {
                 : emptyState("No users yet", null, "users"),
             ),
           }),
+          launcherVersions(data.users.launchers),
           card({
             title: "Top games by storage",
             body: h(
@@ -131,6 +132,42 @@ export default {
     );
   },
 };
+
+/** What the fleet is running, most-used build first. */
+function launcherVersions(launchers = []) {
+  const known = launchers.filter((entry) => entry.version);
+  const unknown = launchers.find((entry) => !entry.version);
+
+  return card({
+    title: "Launcher versions",
+    subtitle: known.length ? `${fmt.plural(known.length, "version")} in use` : null,
+    body: h(
+      "div",
+      { class: "card-body" },
+      launchers.length
+        ? barList(
+            launchers.map((entry) => ({
+              label: h("span", {
+                class: entry.version ? "mono" : "muted",
+                text: entry.version ? `v${entry.version}` : "not reported yet",
+              }),
+              value: entry.users,
+            })),
+            { formatValue: fmt.number },
+          )
+        : emptyState("No users yet", null, "users"),
+      unknown
+        ? h("div", {
+            class: "muted small",
+            style: { marginTop: "12px" },
+            text: `${fmt.plural(unknown.users, "account")} ${
+              unknown.users === 1 ? "hasn't" : "haven't"
+            } synced from a launcher since this landed.`,
+          })
+        : null,
+    ),
+  });
+}
 
 function alerts(list) {
   return card({

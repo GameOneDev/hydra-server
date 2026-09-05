@@ -67,7 +67,12 @@ export default {
         }),
         card({
           title: "Your devices",
-          subtitle: `${overview.devices.length} seen`,
+          subtitle: [
+            `${overview.devices.length} seen`,
+            overview.launcherVersion ? `Hydra Launcher v${overview.launcherVersion}` : null,
+          ]
+            .filter(Boolean)
+            .join(" · "),
           body: overview.devices.length
             ? h(
                 "div",

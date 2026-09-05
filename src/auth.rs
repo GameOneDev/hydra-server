@@ -68,19 +68,31 @@ impl FromRequestParts<AppState> for CurrentUser {
         /* Bump last_seen_at on every authenticated request. resolve_user only
         touches the row on token-cache misses, which would leave last_seen_at
         up to TOKEN_CACHE_TTL_SECONDS stale while the client is active. */
-        let blocked: Option<(i64,)> =
-            sqlx::query_as("UPDATE users SET last_seen_at = ? WHERE id = ? RETURNING is_blocked")
-                .bind(Utc::now().to_rfc3339())
-                .bind(&user.id)
-                .fetch_optional(&state.pool)
-                .await?;
-
-        if matches!(blocked, Some((1,))) {
+        let launcher = crate::launcher::version(&parts.headers);
+        if touch(state, &user.id, launcher.as_deref()).await? {
             return Err(ApiError::forbidden("user is blocked on this server"));
         }
 
         Ok(CurrentUser(user))
     }
+}
+
+/// Bumps `last_seen_at`, records the launcher version the request named and
+/// reports whether the account is blocked — one statement, on the path every
+/// authenticated request takes. `COALESCE`: a caller that names no version is
+/// no news, not a version lost.
+async fn touch(state: &AppState, id: &str, version: Option<&str>) -> Result<bool, ApiError> {
+    let blocked: Option<(i64,)> = sqlx::query_as(
+        "UPDATE users SET last_seen_at = ?, launcher_version = COALESCE(?, launcher_version)
+          WHERE id = ? RETURNING is_blocked",
+    )
+    .bind(Utc::now().to_rfc3339())
+    .bind(version)
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    Ok(matches!(blocked, Some((1,))))
 }
 
 async fn resolve_user(state: &AppState, token: &str) -> Result<AuthenticatedUser, ApiError> {
@@ -215,4 +227,78 @@ pub async fn upsert_user(state: &AppState, user: &AuthenticatedUser) -> Result<(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::TestServer;
+
+    async fn launcher_version(server: &TestServer) -> Option<String> {
+        sqlx::query_scalar("SELECT launcher_version FROM users WHERE id = 'alice'")
+            .fetch_one(&server.state.pool)
+            .await
+            .expect("alice")
+    }
+
+    #[tokio::test]
+    async fn a_request_records_the_launcher_version_it_named() {
+        let server = TestServer::start().await;
+        assert_eq!(launcher_version(&server).await, None);
+
+        touch(&server.state, "alice", Some("3.2.1"))
+            .await
+            .expect("the bump");
+        assert_eq!(launcher_version(&server).await.as_deref(), Some("3.2.1"));
+
+        touch(&server.state, "alice", Some("3.3.0"))
+            .await
+            .expect("the bump");
+        assert_eq!(launcher_version(&server).await.as_deref(), Some("3.3.0"));
+    }
+
+    #[tokio::test]
+    async fn a_caller_that_names_no_version_leaves_the_known_one_alone() {
+        let server = TestServer::start().await;
+        touch(&server.state, "alice", Some("3.2.1"))
+            .await
+            .expect("the bump");
+
+        touch(&server.state, "alice", None).await.expect("the bump");
+
+        assert_eq!(launcher_version(&server).await.as_deref(), Some("3.2.1"));
+    }
+
+    #[tokio::test]
+    async fn the_bump_reports_a_blocked_account_and_still_moves_last_seen_at() {
+        let server = TestServer::start().await;
+        server
+            .execute("UPDATE users SET is_blocked = 1, last_seen_at = '2000-01-01T00:00:00Z'")
+            .await;
+
+        let blocked = touch(&server.state, "alice", Some("3.2.1"))
+            .await
+            .expect("the bump");
+
+        assert!(blocked);
+        let last_seen: String = server
+            .scalar("SELECT last_seen_at FROM users WHERE id = 'alice'")
+            .await;
+        assert!(
+            last_seen.as_str() > "2000-01-01T00:00:00Z",
+            "last_seen_at was not bumped: {last_seen}"
+        );
+        assert_eq!(launcher_version(&server).await.as_deref(), Some("3.2.1"));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_account_is_not_blocked() {
+        let server = TestServer::start().await;
+
+        let blocked = touch(&server.state, "nobody", Some("3.2.1"))
+            .await
+            .expect("the bump");
+
+        assert!(!blocked);
+    }
 }

@@ -104,6 +104,15 @@ export default {
           align: "right",
           render: (row) => fmt.duration(row.playtimeSeconds),
         },
+        /* Not sortable: text sorting would put v10 before v9. */
+        {
+          key: "launcher",
+          label: "Launcher",
+          render: (row) =>
+            row.launcherVersion
+              ? h("span", { class: "mono small", text: `v${row.launcherVersion}` })
+              : h("span", { class: "muted", text: "—" }),
+        },
         {
           key: "lastSeen",
           label: "Last seen",
@@ -154,7 +163,7 @@ export default {
         {},
         toolbar({
           search: query.q,
-          placeholder: "Search name, username or id…",
+          placeholder: "Search name, username, id or launcher version…",
           onSearch: (value) => setQuery({ q: value, page: null }),
           children: [
             segmented({

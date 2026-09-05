@@ -228,6 +228,17 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
     )
     .await?;
 
+    /* NULL is not a version: it is an account that hasn't synced from a
+    launcher since this landed. */
+    let launchers = sqlx::query(
+        "SELECT launcher_version AS version, COUNT(*) AS users,
+                MAX(last_seen_at) AS last_seen_at
+         FROM users GROUP BY launcher_version
+         ORDER BY users DESC, version DESC",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+
     let failed_tasks: Vec<String> = sqlx::query_scalar(
         "SELECT id FROM scheduled_tasks WHERE last_status = 'error' ORDER BY id",
     )
@@ -329,6 +340,11 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
             "active30d": active_30d,
             "new7d": new_7d,
             "overQuota": over_quota,
+            "launchers": launchers.iter().map(|row| json!({
+                "version": row.get::<Option<String>, _>("version"),
+                "users": row.get::<i64, _>("users"),
+                "lastSeenAt": row.get::<Option<String>, _>("last_seen_at"),
+            })).collect::<Vec<_>>(),
         },
         "cloudSaves": {
             "committed": cloud_saves,

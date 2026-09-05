@@ -71,7 +71,8 @@ async fn overview(State(state): State<AppState>, portal: PortalSession) -> ApiRe
             (SELECT COUNT(*) FROM souvenirs v
               WHERE v.user_id = ?1 AND v.status = 'ready' AND v.is_uploaded = 1) AS souvenirs,
             (SELECT COALESCE(SUM(size_in_bytes), 0) FROM souvenirs v WHERE v.user_id = ?1)
-              AS souvenir_bytes",
+              AS souvenir_bytes,
+            (SELECT launcher_version FROM users u WHERE u.id = ?1) AS launcher_version",
     )
     .bind(&portal.user_id)
     .fetch_one(&state.pool)
@@ -117,6 +118,7 @@ async fn overview(State(state): State<AppState>, portal: PortalSession) -> ApiRe
             "souvenirs": row.get::<i64, _>("souvenirs"),
         },
         "playtimeSeconds": row.get::<i64, _>("playtime_seconds"),
+        "launcherVersion": row.get::<Option<String>, _>("launcher_version"),
         "storage": [
             { "key": "cloudSaves", "label": "Cloud saves", "bytes": row.get::<i64, _>("cloud_save_bytes") },
             { "key": "backups", "label": "Save backups", "bytes": row.get::<i64, _>("backup_bytes") },

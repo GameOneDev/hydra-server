@@ -79,6 +79,7 @@ fn user_json(state: &AppState, row: &sqlx::sqlite::SqliteRow, defaults: &Runtime
         "isBlocked": row.get::<i64, _>("is_blocked") != 0,
         "createdAt": row.get::<String, _>("created_at"),
         "lastSeenAt": row.get::<String, _>("last_seen_at"),
+        "launcherVersion": row.get::<Option<String>, _>("launcher_version"),
         "usedBytes": used,
         "quotaBytes": quota,
         "quotaRatio": if quota > 0 { used as f64 / quota as f64 } else { 0.0 },
@@ -140,7 +141,7 @@ async fn list(
     if search.is_some() {
         filters.push(
             "(u.display_name LIKE ?1 ESCAPE '\\' OR u.username LIKE ?1 ESCAPE '\\'
-              OR u.id LIKE ?1 ESCAPE '\\')"
+              OR u.id LIKE ?1 ESCAPE '\\' OR u.launcher_version LIKE ?1 ESCAPE '\\')"
                 .to_string(),
         );
     }
