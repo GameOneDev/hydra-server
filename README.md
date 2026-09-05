@@ -387,7 +387,8 @@ up with no further wiring.
 Implements the endpoints the launcher routes to a self-hosted cloud server:
 
 - `GET|POST /profile/games/artifacts`, `POST /profile/games/artifacts/{id}/download`,
-  `DELETE|PATCH /profile/games/artifacts/{id}`, `PUT …/{id}/freeze|unfreeze`
+  `DELETE|PUT|PATCH /profile/games/artifacts/{id}` (the launcher renames with
+  PUT), `PUT …/{id}/freeze|unfreeze`
 - `PUT /profile/games/achievements` (union merge by achievement name, earliest
   unlock wins), `DELETE /profile/games/achievements/{remoteGameId}`
 - `GET /profile/achievements/{userId}` — recently unlocked achievements for a

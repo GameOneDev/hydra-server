@@ -164,9 +164,15 @@ fn router(_state: AppState) -> Router<AppState> {
             "/profile/games/artifacts",
             get(artifacts::list).post(artifacts::create),
         )
+        /* Renaming a backup answers to both methods on purpose: the launcher
+           sends PUT (upstream's own call, which the official API answers), and
+           PATCH is what the route was first written for. Serving only one of
+           them turns a rename into a 405. */
         .route(
             "/profile/games/artifacts/{id}",
-            delete(artifacts::delete).patch(artifacts::rename),
+            delete(artifacts::delete)
+                .patch(artifacts::rename)
+                .put(artifacts::rename),
         )
         .route(
             "/profile/games/artifacts/{id}/download",
