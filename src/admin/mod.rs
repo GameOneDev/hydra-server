@@ -181,7 +181,7 @@ pub(crate) fn like_pattern(query: Option<&str>) -> Option<String> {
         return None;
     }
     /* Escaping keeps a literal % or _ from turning into a wildcard; the
-       clauses that use this pattern declare ESCAPE '\'. */
+    clauses that use this pattern declare ESCAPE '\'. */
     let escaped = query
         .replace('\\', "\\\\")
         .replace('%', "\\%")
@@ -199,16 +199,22 @@ mod tests {
     fn sort_keys_never_reach_sql() {
         let columns = &[("size", "x.size_bytes"), ("name", "g.name")];
 
-        assert_eq!(order_by(columns, Some("size"), Some("asc"), "x.at"), "x.size_bytes ASC");
+        assert_eq!(
+            order_by(columns, Some("size"), Some("asc"), "x.at"),
+            "x.size_bytes ASC"
+        );
         assert_eq!(order_by(columns, Some("name"), None, "x.at"), "g.name DESC");
 
         /* Anything not on the list falls back to the default column, and the
-           direction only ever renders as one of two literals. */
+        direction only ever renders as one of two literals. */
         assert_eq!(
             order_by(columns, Some("x.at; DROP TABLE users"), Some("asc"), "x.at"),
             "x.at ASC"
         );
-        assert_eq!(order_by(columns, None, Some("' OR 1=1"), "x.at"), "x.at DESC");
+        assert_eq!(
+            order_by(columns, None, Some("' OR 1=1"), "x.at"),
+            "x.at DESC"
+        );
     }
 
     #[test]
@@ -217,7 +223,10 @@ mod tests {
         /* A user searching for "100%" wants that literal, not "anything". */
         assert_eq!(like_pattern(Some("100%")).unwrap(), "%100\\%%");
         assert_eq!(like_pattern(Some("a_b")).unwrap(), "%a\\_b%");
-        assert_eq!(like_pattern(Some("back\\slash")).unwrap(), "%back\\\\slash%");
+        assert_eq!(
+            like_pattern(Some("back\\slash")).unwrap(),
+            "%back\\\\slash%"
+        );
 
         assert!(like_pattern(Some("   ")).is_none());
         assert!(like_pattern(None).is_none());
@@ -226,7 +235,10 @@ mod tests {
     #[test]
     fn paging_clamps_what_a_query_string_can_ask_for() {
         let paging = Paging::new(Some(3), Some(50));
-        assert_eq!((paging.page(), paging.per_page(), paging.offset()), (3, 50, 100));
+        assert_eq!(
+            (paging.page(), paging.per_page(), paging.offset()),
+            (3, 50, 100)
+        );
 
         /* Page 0 and negative pages would produce a negative OFFSET. */
         assert_eq!(Paging::new(Some(0), None).page(), 1);

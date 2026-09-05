@@ -114,9 +114,24 @@ pub async fn render(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
         out,
         "# HELP hydra_http_responses_total HTTP responses by status class.\n# TYPE hydra_http_responses_total counter"
     );
-    labelled(&mut out, "hydra_http_responses_total", "class=\"2xx\"", counters.responses_2xx.load(Ordering::Relaxed));
-    labelled(&mut out, "hydra_http_responses_total", "class=\"4xx\"", counters.responses_4xx.load(Ordering::Relaxed));
-    labelled(&mut out, "hydra_http_responses_total", "class=\"5xx\"", counters.responses_5xx.load(Ordering::Relaxed));
+    labelled(
+        &mut out,
+        "hydra_http_responses_total",
+        "class=\"2xx\"",
+        counters.responses_2xx.load(Ordering::Relaxed),
+    );
+    labelled(
+        &mut out,
+        "hydra_http_responses_total",
+        "class=\"4xx\"",
+        counters.responses_4xx.load(Ordering::Relaxed),
+    );
+    labelled(
+        &mut out,
+        "hydra_http_responses_total",
+        "class=\"5xx\"",
+        counters.responses_5xx.load(Ordering::Relaxed),
+    );
 
     metric(
         &mut out,
@@ -178,7 +193,10 @@ pub async fn render(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
         "# HELP hydra_saves Stored saves by kind.\n# TYPE hydra_saves gauge"
     );
     for (label, sql) in [
-        ("cloud_saves", "SELECT COUNT(*) FROM cloud_save_snapshots WHERE status = 'committed'"),
+        (
+            "cloud_saves",
+            "SELECT COUNT(*) FROM cloud_save_snapshots WHERE status = 'committed'",
+        ),
         ("backups", "SELECT COUNT(*) FROM artifacts"),
         ("emulation_saves", "SELECT COUNT(*) FROM emulation_saves"),
     ] {
@@ -225,7 +243,11 @@ pub async fn render(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
         "hydra_playtime_seconds",
         "Playtime reported by every launcher, all time.",
         "gauge",
-        scalar(&state, "SELECT COALESCE(SUM(seconds), 0) FROM playtime_daily").await,
+        scalar(
+            &state,
+            "SELECT COALESCE(SUM(seconds), 0) FROM playtime_daily",
+        )
+        .await,
     );
     metric(
         &mut out,
@@ -240,7 +262,7 @@ pub async fn render(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
     );
 
     /* Events in the last hour, by category: the cheapest signal of "is the
-       server actually being used" for a dashboard. */
+    server actually being used" for a dashboard. */
     let since = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
     let rows = sqlx::query_as::<_, (String, i64)>(
         "SELECT category, COUNT(*) FROM events WHERE at >= ? GROUP BY category",
@@ -289,9 +311,5 @@ pub async fn render(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
         );
     }
 
-    Ok((
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
-        out,
-    )
-        .into_response())
+    Ok(([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], out).into_response())
 }

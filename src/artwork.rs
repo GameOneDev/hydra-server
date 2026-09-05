@@ -102,8 +102,8 @@ pub async fn upload_url(
     }
 
     /* A declared size is mandatory: `sign_upload_url` needs a real limit to
-       bind the token to, and it is also what the quota below is checked
-       against. The launcher stats the file before asking. */
+    bind the token to, and it is also what the quota below is checked
+    against. The launcher stats the file before asking. */
     let length = payload.image_length.unwrap_or(0);
     let limit = storage::upload_limit(length)
         .ok_or_else(|| ApiError::bad_request("imageLength is required"))?;
@@ -116,12 +116,12 @@ pub async fn upload_url(
     }
 
     /* Checked against the length the launcher declares, since the file
-       doesn't exist yet. `storage::upload` checks the bytes themselves, so an
-       understated length buys nothing. */
+    doesn't exist yet. `storage::upload` checks the bytes themselves, so an
+    understated length buys nothing. */
     storage::check_quota(&state, &user.0.id, length).await?;
 
     /* Flat, uuid-named keys: the game a file belongs to is tracked in the
-       database, so nothing user-controlled ends up in a filesystem path. */
+    database, so nothing user-controlled ends up in a filesystem path. */
     let file_name = format!("{}.{ext}", Uuid::new_v4());
     let key = format!("images/artwork/{}/{file_name}", user.0.id);
 
@@ -163,7 +163,7 @@ pub async fn save(
     }
 
     /* Uploads must point at a key this server just signed for this user;
-       otherwise a client could claim someone else's stored file. */
+    otherwise a client could claim someone else's stored file. */
     let storage_key = if payload.source == "upload" {
         let prefix = format!("{}/images/artwork/{}/", state.config.public_url, user.0.id);
         let file_name = payload
@@ -178,8 +178,8 @@ pub async fn save(
     };
 
     /* The upload has landed by now, so this is the real size on disk rather
-       than the length the launcher predicted. SteamGridDB picks stay at 0 —
-       they cost this server nothing. */
+    than the length the launcher predicted. SteamGridDB picks stay at 0 —
+    they cost this server nothing. */
     let size_in_bytes = match &storage_key {
         Some(key) => tokio::fs::metadata(storage::storage_path(&state, key))
             .await
@@ -265,7 +265,9 @@ pub async fn delete(
 /// GET /profile/games/artwork — every custom image the caller has saved here,
 /// so a freshly installed launcher can repaint its whole library at once.
 pub async fn list(State(state): State<AppState>, user: CurrentUser) -> ApiResult<Json<Value>> {
-    Ok(Json(json!({ "artwork": fetch_for_user(&state, &user.0.id).await? })))
+    Ok(Json(
+        json!({ "artwork": fetch_for_user(&state, &user.0.id).await? }),
+    ))
 }
 
 /// GET /profile/games/artwork/{userId} — the same listing for someone else on

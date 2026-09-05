@@ -81,7 +81,7 @@ pub async fn presign(
     }
 
     /* A declared size is mandatory: `sign_upload_url` needs a real limit to
-       bind the token to, and the launcher stats the file before asking. */
+    bind the token to, and the launcher stats the file before asking. */
     let length = payload.image_length.unwrap_or(0);
     let limit = storage::upload_limit(length)
         .ok_or_else(|| ApiError::bad_request("imageLength is required"))?;
@@ -171,10 +171,7 @@ pub async fn delete_banner(
 
 /// GET /images/{*path} — public, so profile banners/avatars saved to the
 /// official profile render for everyone who views it.
-pub async fn serve(
-    State(state): State<AppState>,
-    Path(path): Path<String>,
-) -> ApiResult<Response> {
+pub async fn serve(State(state): State<AppState>, Path(path): Path<String>) -> ApiResult<Response> {
     if path.contains("..")
         || !path
             .chars()

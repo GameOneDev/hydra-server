@@ -49,8 +49,7 @@ const MAX_PAGE_SIZE: i64 = 100;
 /// the launcher as `expiresAt`.
 const UPLOAD_TTL_SECONDS: i64 = 60 * 60;
 
-const ALLOWED_REPORT_REASONS: &[&str] =
-    &["hate", "sexual_content", "violence", "spam", "other"];
+const ALLOWED_REPORT_REASONS: &[&str] = &["hate", "sexual_content", "violence", "spam", "other"];
 
 const REPORT_RATE_LIMIT_PER_HOUR: i64 = 30;
 
@@ -149,8 +148,8 @@ pub async fn authorize(
     }
 
     /* A declared size is mandatory: `sign_upload_url` needs a real limit to
-       bind the token to, and it is also what the quota below is checked
-       against. The launcher stats the file before asking. */
+    bind the token to, and it is also what the quota below is checked
+    against. The launcher stats the file before asking. */
     let limit = storage::upload_limit(request.image_length)
         .ok_or_else(|| ApiError::bad_request("imageLength is required"))?;
 
@@ -193,8 +192,8 @@ pub async fn authorize(
     }
 
     /* Against the declared length: the file doesn't exist yet, and the real
-       size is recorded once the upload lands — which is also where the bytes
-       are held to this. */
+    size is recorded once the upload lands — which is also where the bytes
+    are held to this. */
     storage::check_quota(state, user_id, length).await?;
 
     let now = Utc::now();
@@ -319,7 +318,7 @@ async fn claim_one(
     names.truncate(MAX_ACHIEVEMENTS_PER_SOUVENIR);
 
     /* "rebuild" is the launcher's recovery for this, which is what we want:
-       its achievement state is ahead of ours. */
+    its achievement state is ahead of ours. */
     if names.iter().any(|name| !unlocked.contains(name)) {
         return Err(conflict("achievement_not_found", client_id));
     }
@@ -341,16 +340,16 @@ async fn claim_one(
     }
 
     /* The sync can overtake its own upload — a buffering proxy, an interrupted
-       transfer — and the bytes are usually seconds away, so this asks for a
-       retry rather than reporting a conflict. */
+    transfer — and the bytes are usually seconds away, so this asks for a
+    retry rather than reporting a conflict. */
     if reservation.get::<i64, _>("is_uploaded") != 1 {
         return Err(ApiError::new(StatusCode::CONFLICT, UPLOAD_INCOMPLETE_CODE)
             .with_extra(json!({ "clientId": client_id })));
     }
 
     /* One souvenir per achievement, as the achievement list shows a single
-       thumbnail per unlock. The launcher abandons a second capture and syncs
-       the achievements alone. */
+    thumbnail per unlock. The launcher abandons a second capture and syncs
+    the achievements alone. */
     if achievement_already_captured(state, user_id, game.remote_id, &id, &names).await? {
         return Err(conflict("achievement_already_assigned", client_id));
     }
@@ -517,16 +516,15 @@ pub async fn list_for_user(
 ) -> ApiResult<Json<Value>> {
     let is_owner = viewer.0.id == user_id;
 
-    let account_visibility: Option<String> = sqlx::query_scalar(
-        "SELECT souvenirs_visibility FROM users WHERE id = ?",
-    )
-    .bind(&user_id)
-    .fetch_optional(&state.pool)
-    .await?;
+    let account_visibility: Option<String> =
+        sqlx::query_scalar("SELECT souvenirs_visibility FROM users WHERE id = ?")
+            .bind(&user_id)
+            .fetch_optional(&state.pool)
+            .await?;
 
     /* A profile this server has never seen keeps its souvenirs on official
-       Hydra. Saying "hidden" would be a lie the launcher renders as a locked
-       tab, so it is told plainly that this isn't the right server to ask. */
+    Hydra. Saying "hidden" would be a lie the launcher renders as a locked
+    tab, so it is told plainly that this isn't the right server to ask. */
     let Some(account_visibility) = account_visibility else {
         return Ok(Json(json!({
             "items": [],
@@ -545,12 +543,15 @@ pub async fn list_for_user(
         })));
     }
 
-    let take = query.take.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, MAX_PAGE_SIZE);
+    let take = query
+        .take
+        .unwrap_or(DEFAULT_PAGE_SIZE)
+        .clamp(1, MAX_PAGE_SIZE);
     let skip = query.skip.unwrap_or(0).max(0);
     let shops = shops_from_query(raw.as_deref());
 
     /* "rare" would rank by catalogue points, which never reach this server;
-       capture order is the honest fallback. */
+    capture order is the honest fallback. */
     let order = match query.sort_by.as_deref() {
         Some("oldest") => "s.captured_at ASC",
         _ => "s.captured_at DESC",
@@ -591,11 +592,7 @@ pub async fn list_for_user(
         page = page.bind(shop);
     }
 
-    let rows = page
-        .bind(take)
-        .bind(skip)
-        .fetch_all(&state.pool)
-        .await?;
+    let rows = page.bind(take).bind(skip).fetch_all(&state.pool).await?;
 
     let unlock_times = unlock_times_for(&state, &user_id, &rows).await?;
     let mut items = Vec::with_capacity(rows.len());
@@ -980,7 +977,11 @@ pub async fn set_visibility(
 ) -> ApiResult<Json<Value>> {
     let visibility = match normalize_visibility(&payload.visibility) {
         Some(visibility @ ("PUBLIC" | "PRIVATE")) => visibility,
-        _ => return Err(ApiError::bad_request("visibility must be PUBLIC or PRIVATE")),
+        _ => {
+            return Err(ApiError::bad_request(
+                "visibility must be PUBLIC or PRIVATE",
+            ))
+        }
     };
 
     let updated = sqlx::query(
@@ -1020,7 +1021,9 @@ pub async fn set_account_visibility(
         .execute(&state.pool)
         .await?;
 
-    Ok(Json(json!({ "ok": true, "souvenirsVisibility": visibility })))
+    Ok(Json(
+        json!({ "ok": true, "souvenirsVisibility": visibility }),
+    ))
 }
 
 /// DELETE /profile/souvenirs/{souvenirId}
@@ -1036,19 +1039,14 @@ pub async fn delete(
 
 /// Shared with the portal, so ownership is re-checked here rather than at
 /// either call site. Returns the bytes freed.
-pub async fn delete_owned(
-    state: &AppState,
-    user_id: &str,
-    souvenir_id: &str,
-) -> ApiResult<i64> {
-    let row = sqlx::query(
-        "SELECT image_key, size_in_bytes FROM souvenirs WHERE id = ? AND user_id = ?",
-    )
-    .bind(souvenir_id)
-    .bind(user_id)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or_else(|| ApiError::not_found("souvenir not found"))?;
+pub async fn delete_owned(state: &AppState, user_id: &str, souvenir_id: &str) -> ApiResult<i64> {
+    let row =
+        sqlx::query("SELECT image_key, size_in_bytes FROM souvenirs WHERE id = ? AND user_id = ?")
+            .bind(souvenir_id)
+            .bind(user_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or_else(|| ApiError::not_found("souvenir not found"))?;
 
     sqlx::query("DELETE FROM souvenirs WHERE id = ? AND user_id = ?")
         .bind(souvenir_id)
@@ -1063,9 +1061,13 @@ pub async fn delete_owned(
 
     crate::events::record(
         state,
-        Event::sync("souvenir.deleted", user_id, "Deleted an achievement souvenir")
-            .detail(json!({ "souvenirId": souvenir_id }))
-            .size(freed),
+        Event::sync(
+            "souvenir.deleted",
+            user_id,
+            "Deleted an achievement souvenir",
+        )
+        .detail(json!({ "souvenirId": souvenir_id }))
+        .size(freed),
     )
     .await;
 
@@ -1170,7 +1172,7 @@ mod tests {
         assert_eq!(hidden_reason("PRIVATE", true), None);
         assert_eq!(hidden_reason("PUBLIC", false), None);
         /* Friends-only means "members of this server" here, and a viewer that
-           got this far is one. */
+        got this far is one. */
         assert_eq!(hidden_reason("FRIENDS", false), None);
     }
 

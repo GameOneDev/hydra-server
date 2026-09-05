@@ -65,13 +65,12 @@ pub async fn share(
         return Err(ApiError::bad_request("cannot share a backup with yourself"));
     }
 
-    let owns_artifact: Option<(i64,)> = sqlx::query_as(
-        "SELECT 1 FROM artifacts WHERE id = ? AND user_id = ? AND is_uploaded = 1",
-    )
-    .bind(&id)
-    .bind(&user.0.id)
-    .fetch_optional(&state.pool)
-    .await?;
+    let owns_artifact: Option<(i64,)> =
+        sqlx::query_as("SELECT 1 FROM artifacts WHERE id = ? AND user_id = ? AND is_uploaded = 1")
+            .bind(&id)
+            .bind(&user.0.id)
+            .fetch_optional(&state.pool)
+            .await?;
 
     if owns_artifact.is_none() {
         return Err(ApiError::not_found("artifact not found"));

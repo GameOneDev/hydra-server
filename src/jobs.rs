@@ -152,7 +152,11 @@ impl Job {
             day: (unit == Unit::Month).then_some(1),
         };
 
-        let own = timer(self.default_every, self.default_unit, self.default_at_minute);
+        let own = timer(
+            self.default_every,
+            self.default_unit,
+            self.default_at_minute,
+        );
 
         if self.id != BACKUP {
             return (self.default_enabled, vec![own]);
@@ -449,7 +453,11 @@ mod tests {
 
     #[test]
     fn only_jobs_that_can_run_unattended_are_schedulable() {
-        assert!(!find("delete-orphan-files").expect("the file sweep").schedulable);
+        assert!(
+            !find("delete-orphan-files")
+                .expect("the file sweep")
+                .schedulable
+        );
         assert!(find(BACKUP).expect("the backup job").schedulable);
         assert!(find("no-such-job").is_none());
     }
@@ -474,6 +482,9 @@ mod tests {
         );
 
         config.backup_interval_hours = 0;
-        assert!(!job.default_schedule(&config).0, "0 hours means no scheduled backup");
+        assert!(
+            !job.default_schedule(&config).0,
+            "0 hours means no scheduled backup"
+        );
     }
 }

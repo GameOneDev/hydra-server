@@ -153,8 +153,8 @@ pub async fn create_upload_url(
     Json(payload): Json<CreateUploadUrl>,
 ) -> ApiResult<Json<Value>> {
     /* Before the insert, so a save that declares no size leaves no row: the
-       upload token is bound to this number, and a zero used to mean "no
-       limit". The launcher has the buffer in hand before it asks. */
+    upload token is bound to this number, and a zero used to mean "no
+    limit". The launcher has the buffer in hand before it asks. */
     let limit = storage::upload_limit(payload.artifact_length_in_bytes)
         .ok_or_else(|| ApiError::bad_request("invalid artifact length"))?;
 
@@ -166,8 +166,8 @@ pub async fn create_upload_url(
     }
 
     /* Against the declared length, like every other presign — the file isn't
-       here yet. `storage::upload` re-checks against the bytes that arrive, so
-       an understated length can't spend more than this reserves. */
+    here yet. `storage::upload` re-checks against the bytes that arrive, so
+    an understated length can't spend more than this reserves. */
     storage::check_quota(&state, &user.0.id, payload.artifact_length_in_bytes).await?;
 
     let id = Uuid::new_v4().to_string();
@@ -225,7 +225,7 @@ pub async fn commit(
     let now = Utc::now().to_rfc3339();
 
     /* Replace older saves for the same slot: the launcher expects one save
-       per saveIdentity, mirroring how a memory card slot works. */
+    per saveIdentity, mirroring how a memory card slot works. */
     let old_rows = sqlx::query(
         "SELECT s.id, s.is_uploaded FROM emulation_saves s
          JOIN emulation_saves new_save ON new_save.id = ?
@@ -475,7 +475,9 @@ mod tests {
         commit_new(&server).await;
 
         assert_eq!(
-            server.scalar::<i64>("SELECT COUNT(*) FROM emulation_saves").await,
+            server
+                .scalar::<i64>("SELECT COUNT(*) FROM emulation_saves")
+                .await,
             1
         );
         assert!(!older.exists(), "its bytes went with the row");
@@ -512,7 +514,10 @@ mod tests {
         );
         assert_eq!(listed(&server).await, vec!["new".to_string()]);
 
-        assert_eq!(storage::used_bytes(&server.state, "alice").await.unwrap(), 128);
+        assert_eq!(
+            storage::used_bytes(&server.state, "alice").await.unwrap(),
+            128
+        );
     }
 
     /// Keeping older versions is about saves, not about reservations: a row
@@ -538,11 +543,16 @@ mod tests {
         commit_new(&server).await;
 
         assert_eq!(
-            server.scalar::<i64>("SELECT COUNT(*) FROM emulation_saves").await,
+            server
+                .scalar::<i64>("SELECT COUNT(*) FROM emulation_saves")
+                .await,
             1,
             "the abandoned reservation went, and its declared bytes with it"
         );
-        assert_eq!(storage::used_bytes(&server.state, "alice").await.unwrap(), 64);
+        assert_eq!(
+            storage::used_bytes(&server.state, "alice").await.unwrap(),
+            64
+        );
     }
 
     /// Switching deletion back on clears what it left behind, on the next
@@ -590,7 +600,9 @@ mod tests {
 
         assert_eq!(listed(&server).await, vec!["newer".to_string()]);
         assert_eq!(
-            server.scalar::<i64>("SELECT COUNT(*) FROM emulation_saves").await,
+            server
+                .scalar::<i64>("SELECT COUNT(*) FROM emulation_saves")
+                .await,
             1,
             "the kept save went with the one it was kept beside"
         );

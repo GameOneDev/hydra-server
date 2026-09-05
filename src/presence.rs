@@ -43,8 +43,8 @@ pub async fn touch(state: &AppState, user: &AuthenticatedUser, ip: Option<String
     let previous = {
         let mut seen = state.presence.write().await;
         /* Opportunistic cleanup, on the same slow path as everything else
-           here: entries past the idle window are re-derived from the database
-           anyway, so keeping them buys nothing. */
+        here: entries past the idle window are re-derived from the database
+        anyway, so keeping them buys nothing. */
         seen.retain(|_, last| now - *last < idle);
         seen.insert(user.id.clone(), now)
     };
@@ -52,8 +52,8 @@ pub async fn touch(state: &AppState, user: &AuthenticatedUser, ip: Option<String
     let previous = match previous {
         Some(at) => Some(at),
         /* Nothing in memory: either this process just started or the entry
-           aged out. The database remembers what the process doesn't, which is
-           what keeps a restart from announcing everybody as newly arrived. */
+        aged out. The database remembers what the process doesn't, which is
+        what keeps a restart from announcing everybody as newly arrived. */
         None => last_seen(state, &user.id).await,
     };
 
@@ -82,7 +82,7 @@ fn is_return(previous: Option<DateTime<Utc>>, now: DateTime<Utc>, idle: Duration
     match previous {
         Some(at) => now - at >= idle,
         /* No record at all — a user row without a timestamp. Treat an unknown
-           past as an absent one; the alternative is never reporting them. */
+        past as an absent one; the alternative is never reporting them. */
         None => true,
     }
 }

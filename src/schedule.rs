@@ -119,13 +119,17 @@ fn parse_triggers(id: &str, stored: String) -> Vec<Trigger> {
 
     values
         .into_iter()
-        .filter_map(|value| match serde_json::from_value::<Trigger>(value.clone()) {
-            Ok(trigger) => Some(trigger),
-            Err(err) => {
-                tracing::warn!("task {id} has a trigger this build can't read ({err}): {value}");
-                None
-            }
-        })
+        .filter_map(
+            |value| match serde_json::from_value::<Trigger>(value.clone()) {
+                Ok(trigger) => Some(trigger),
+                Err(err) => {
+                    tracing::warn!(
+                        "task {id} has a trigger this build can't read ({err}): {value}"
+                    );
+                    None
+                }
+            },
+        )
         .collect()
 }
 
@@ -341,10 +345,9 @@ pub async fn run(state: &AppState, id: &str, reason: Reason) -> ApiResult<Value>
         (_, "error") => {
             Event::system("system.task.failed", format!("{title} failed: {summary}")).warning()
         }
-        (Reason::Manual, _) => Event::admin(
-            "admin.task.run",
-            format!("Ran {title} by hand — {summary}"),
-        ),
+        (Reason::Manual, _) => {
+            Event::admin("admin.task.run", format!("Ran {title} by hand — {summary}"))
+        }
         _ => Event::system("system.task.ran", format!("{title}: {summary}")),
     };
 
@@ -514,7 +517,9 @@ async fn asking_to_run(state: &AppState, task: &Task, now: DateTime<Utc>) -> Opt
                 if !gap_elapsed(last_run, *min_gap_minutes, now) {
                     None
                 } else {
-                    recent_event(state, kinds, last_run, now).await.map(Reason::Event)
+                    recent_event(state, kinds, last_run, now)
+                        .await
+                        .map(Reason::Event)
                 }
             }
 
@@ -530,10 +535,7 @@ async fn asking_to_run(state: &AppState, task: &Task, now: DateTime<Utc>) -> Opt
                     triggers::condition_holds(state, *metric, *comparison, *value)
                         .await
                         .map(|measured| {
-                            Reason::Condition(format!(
-                                "{} — {measured} now",
-                                trigger.label()
-                            ))
+                            Reason::Condition(format!("{} — {measured} now", trigger.label()))
                         })
                 }
             }
@@ -770,7 +772,9 @@ mod tests {
                 .unwrap_or_else(|err| panic!("{} failed: {}", job.id, err.message));
 
             assert!(
-                result["summary"].as_str().is_some_and(|line| !line.is_empty()),
+                result["summary"]
+                    .as_str()
+                    .is_some_and(|line| !line.is_empty()),
                 "{} reported nothing",
                 job.id
             );
@@ -791,13 +795,18 @@ mod tests {
         update(&server.state, "prune-events", Some(false), None)
             .await
             .expect("switching it off");
-        server.set("gc-blobs", vec![every(6, Unit::Hour, None)]).await;
+        server
+            .set("gc-blobs", vec![every(6, Unit::Hour, None)])
+            .await;
 
         ensure_rows(&server.state).await.expect("the second start");
 
         let pruning = get(&server.state, "prune-events").await.expect("the task");
         assert!(!pruning.enabled);
-        assert!(pruning.next_run_at.is_none(), "a disabled task has no next run");
+        assert!(
+            pruning.next_run_at.is_none(),
+            "a disabled task has no next run"
+        );
 
         let collecting = get(&server.state, "gc-blobs").await.expect("the task");
         assert_eq!(collecting.triggers, vec![every(6, Unit::Hour, None)]);
@@ -808,7 +817,10 @@ mod tests {
     async fn only_enabled_tasks_that_are_due_come_up() {
         let server = TestServer::start().await;
 
-        assert!(due(&server.state, Utc::now()).await.expect("the queue").is_empty());
+        assert!(due(&server.state, Utc::now())
+            .await
+            .expect("the queue")
+            .is_empty());
 
         let later = due(&server.state, Utc::now() + Duration::hours(1))
             .await
@@ -837,7 +849,10 @@ mod tests {
             .set("vacuum", vec![Trigger::Startup { delay_minutes: 0 }])
             .await;
 
-        assert!(matches!(server.asking("vacuum").await, Some(Reason::Startup)));
+        assert!(matches!(
+            server.asking("vacuum").await,
+            Some(Reason::Startup)
+        ));
 
         run(&server.state, "vacuum", Reason::Startup)
             .await
@@ -862,16 +877,26 @@ mod tests {
             )
             .await;
 
-        assert!(server.asking("gc-blobs").await.is_none(), "the backup hasn't run");
+        assert!(
+            server.asking("gc-blobs").await.is_none(),
+            "the backup hasn't run"
+        );
 
         run(&server.state, "backup", Reason::Manual)
             .await
             .expect("a backup");
-        assert!(matches!(server.asking("gc-blobs").await, Some(Reason::After(_))));
+        assert!(matches!(
+            server.asking("gc-blobs").await,
+            Some(Reason::After(_))
+        ));
 
-        run(&server.state, "gc-blobs", Reason::After("backup".to_string()))
-            .await
-            .expect("the collection");
+        run(
+            &server.state,
+            "gc-blobs",
+            Reason::After("backup".to_string()),
+        )
+        .await
+        .expect("the collection");
         assert!(server.asking("gc-blobs").await.is_none());
     }
 
@@ -890,7 +915,10 @@ mod tests {
             )
             .await;
 
-        assert!(server.asking("prune-events").await.is_none(), "nothing has expired");
+        assert!(
+            server.asking("prune-events").await.is_none(),
+            "nothing has expired"
+        );
 
         let stale = (Utc::now() - Duration::days(400)).to_rfc3339();
         for index in 0..5 {
@@ -908,7 +936,10 @@ mod tests {
         let Some(Reason::Condition(detail)) = server.asking("prune-events").await else {
             panic!("five events past the window is over a threshold of two");
         };
-        assert!(detail.contains('5'), "the reason says what it saw: {detail}");
+        assert!(
+            detail.contains('5'),
+            "the reason says what it saw: {detail}"
+        );
 
         run(&server.state, "prune-events", Reason::Condition(detail))
             .await
@@ -1001,7 +1032,10 @@ mod tests {
     #[tokio::test]
     async fn a_schedule_the_server_cannot_keep_is_refused() {
         let server = TestServer::start().await;
-        let before = get(&server.state, "vacuum").await.expect("the task").triggers;
+        let before = get(&server.state, "vacuum")
+            .await
+            .expect("the task")
+            .triggers;
 
         assert!(update(
             &server.state,
@@ -1021,11 +1055,20 @@ mod tests {
         .await
         .is_err());
 
-        assert!(update(&server.state, "delete-orphan-files", Some(true), None)
-            .await
-            .is_err(), "a job that takes arguments has no schedule to edit");
+        assert!(
+            update(&server.state, "delete-orphan-files", Some(true), None)
+                .await
+                .is_err(),
+            "a job that takes arguments has no schedule to edit"
+        );
 
-        assert_eq!(get(&server.state, "vacuum").await.expect("the task").triggers, before);
+        assert_eq!(
+            get(&server.state, "vacuum")
+                .await
+                .expect("the task")
+                .triggers,
+            before
+        );
     }
 
     #[tokio::test]
@@ -1049,10 +1092,19 @@ mod tests {
         assert_eq!(task.triggers.len(), 3);
         assert!(task.summary().contains(" · "), "{}", task.summary());
 
-        let next = task.next_run_at.as_deref().and_then(parse_time).expect("a next run");
+        let next = task
+            .next_run_at
+            .as_deref()
+            .and_then(parse_time)
+            .expect("a next run");
         assert!(next <= Utc::now() + Duration::hours(6) + Duration::minutes(1));
 
-        run(&server.state, "backup", Reason::Manual).await.expect("a backup");
-        assert!(matches!(server.asking("gc-blobs").await, Some(Reason::After(_))));
+        run(&server.state, "backup", Reason::Manual)
+            .await
+            .expect("a backup");
+        assert!(matches!(
+            server.asking("gc-blobs").await,
+            Some(Reason::After(_))
+        ));
     }
 }

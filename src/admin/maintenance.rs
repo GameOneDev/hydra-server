@@ -44,7 +44,10 @@ async fn delete_orphans(
         &state,
         Event::admin(
             "admin.maintenance",
-            result["summary"].as_str().unwrap_or("Deleted orphaned files").to_string(),
+            result["summary"]
+                .as_str()
+                .unwrap_or("Deleted orphaned files")
+                .to_string(),
         )
         .detail(json!({ "action": "delete-orphan-files", "result": result })),
     )
@@ -120,13 +123,12 @@ async fn still_referenced(state: &AppState, key: &str) -> ApiResult<bool> {
         let Some((user_id, hash)) = rest.split_once('/') else {
             return Ok(false);
         };
-        let found: Option<String> = sqlx::query_scalar(
-            "SELECT hash FROM cloud_save_blobs WHERE user_id = ? AND hash = ?",
-        )
-        .bind(user_id)
-        .bind(hash)
-        .fetch_optional(&state.pool)
-        .await?;
+        let found: Option<String> =
+            sqlx::query_scalar("SELECT hash FROM cloud_save_blobs WHERE user_id = ? AND hash = ?")
+                .bind(user_id)
+                .bind(hash)
+                .fetch_optional(&state.pool)
+                .await?;
         return Ok(found.is_some());
     }
 
@@ -164,9 +166,9 @@ async fn still_referenced(state: &AppState, key: &str) -> ApiResult<bool> {
 
     if key.starts_with("images/banners/") || key.starts_with("images/avatars/") {
         /* The live file is the one on the user's row. `profile_image_url` is
-           consulted too: it is all an avatar uploaded before `avatar_key`
-           existed has, and mistaking one of those for an orphan would delete
-           a picture someone is still using. */
+        consulted too: it is all an avatar uploaded before `avatar_key`
+        existed has, and mistaking one of those for an orphan would delete
+        a picture someone is still using. */
         let found: Option<String> = sqlx::query_scalar(
             "SELECT id FROM users
              WHERE banner_key = ?1 OR avatar_key = ?1
@@ -180,7 +182,7 @@ async fn still_referenced(state: &AppState, key: &str) -> ApiResult<bool> {
     }
 
     /* Anything else is outside the areas the scan reconciles — refuse rather
-       than delete something this code doesn't understand. */
+    than delete something this code doesn't understand. */
     Ok(true)
 }
 

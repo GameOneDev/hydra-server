@@ -246,7 +246,7 @@ async fn library(State(state): State<AppState>, portal: PortalSession) -> ApiRes
     .await?;
 
     /* Both directions of sharing: what this user shared out, and what other
-       people shared with them (which the launcher can restore). */
+    people shared with them (which the launcher can restore). */
     let shared_out = sqlx::query(
         "SELECT sh.recipient_user_id, sh.created_at, a.label, a.shop, a.object_id,
                 a.artifact_length_in_bytes AS size_bytes,
@@ -277,12 +277,11 @@ async fn library(State(state): State<AppState>, portal: PortalSession) -> ApiRes
     .fetch_all(&state.pool)
     .await?;
 
-    let sources = sqlx::query(
-        "SELECT * FROM download_sources WHERE user_id = ? ORDER BY created_at DESC",
-    )
-    .bind(&portal.user_id)
-    .fetch_all(&state.pool)
-    .await?;
+    let sources =
+        sqlx::query("SELECT * FROM download_sources WHERE user_id = ? ORDER BY created_at DESC")
+            .bind(&portal.user_id)
+            .fetch_all(&state.pool)
+            .await?;
 
     let share_json = |row: &sqlx::sqlite::SqliteRow| {
         json!({
@@ -370,7 +369,9 @@ async fn playtime(State(state): State<AppState>, portal: PortalSession) -> ApiRe
 /// Confirms the row belongs to the session before anything touches it.
 async fn owned(state: &AppState, table: &str, id: &str, user_id: &str) -> ApiResult<()> {
     let sql = match table {
-        "cloud_save_snapshots" => "SELECT id FROM cloud_save_snapshots WHERE id = ? AND user_id = ?",
+        "cloud_save_snapshots" => {
+            "SELECT id FROM cloud_save_snapshots WHERE id = ? AND user_id = ?"
+        }
         "artifacts" => "SELECT id FROM artifacts WHERE id = ? AND user_id = ?",
         "emulation_saves" => "SELECT id FROM emulation_saves WHERE id = ? AND user_id = ?",
         _ => return Err(ApiError::internal("unknown table")),
@@ -383,8 +384,10 @@ async fn owned(state: &AppState, table: &str, id: &str, user_id: &str) -> ApiRes
         .await?;
 
     /* Not-found rather than forbidden: someone probing ids should not learn
-       which ones exist on other accounts. */
-    found.map(|_| ()).ok_or_else(|| ApiError::not_found("not found"))
+    which ones exist on other accounts. */
+    found
+        .map(|_| ())
+        .ok_or_else(|| ApiError::not_found("not found"))
 }
 
 async fn snapshot_files(
@@ -466,9 +469,13 @@ async fn delete_snapshot(
 
     crate::events::record(
         &state,
-        Event::sync("cloud_save.deleted", &portal.user_id, "Deleted a cloud save from the portal")
-            .detail(json!({ "snapshotId": id, "via": "portal" }))
-            .size(before - after),
+        Event::sync(
+            "cloud_save.deleted",
+            &portal.user_id,
+            "Deleted a cloud save from the portal",
+        )
+        .detail(json!({ "snapshotId": id, "via": "portal" }))
+        .size(before - after),
     )
     .await;
 
@@ -508,9 +515,13 @@ async fn delete_backup(
 
     crate::events::record(
         &state,
-        Event::sync("backup.deleted", &portal.user_id, "Deleted a save backup from the portal")
-            .detail(json!({ "artifactId": id, "via": "portal" }))
-            .size(size),
+        Event::sync(
+            "backup.deleted",
+            &portal.user_id,
+            "Deleted a save backup from the portal",
+        )
+        .detail(json!({ "artifactId": id, "via": "portal" }))
+        .size(size),
     )
     .await;
 

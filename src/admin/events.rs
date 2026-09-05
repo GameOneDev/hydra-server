@@ -67,7 +67,7 @@ async fn list(
     }
     if let Some(kind) = query.kind.as_deref().filter(|value| !value.is_empty()) {
         /* Prefixes so "cloud_save." selects the whole family, exactly like a
-           webhook filter does. */
+        webhook filter does. */
         add(format!("{kind}%"), &|i| format!("e.kind LIKE ?{i}"));
     }
     if let Some(user_id) = query.user_id.as_deref().filter(|value| !value.is_empty()) {
@@ -128,7 +128,7 @@ async fn list(
     let events: Vec<Value> = rows.iter().map(crate::events::row_json).collect();
 
     /* Counts for the current filter, so the severity chips can show how much
-       of the result set is a problem. */
+    of the result set is a problem. */
     let severity_sql = format!(
         "SELECT e.severity, COUNT(*) {EVENT_JOINS} WHERE {where_clause} GROUP BY e.severity"
     );

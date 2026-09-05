@@ -66,6 +66,8 @@ pub async fn set(pool: &SqlitePool, key: &str, value: &str) -> Result<(), sqlx::
 
 /// Drops every panel override so the environment values apply again.
 pub async fn clear(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM server_settings").execute(pool).await?;
+    sqlx::query("DELETE FROM server_settings")
+        .execute(pool)
+        .await?;
     Ok(())
 }

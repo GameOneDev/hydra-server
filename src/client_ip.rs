@@ -49,8 +49,8 @@ pub fn resolve(config: &Config, headers: &HeaderMap, socket: Option<SocketAddr>)
     }
 
     /* A named header is the whole answer: an operator who says where the
-       address lives has ruled out the others, and quietly falling back to
-       guessing would reintroduce exactly the header they ruled out. */
+    address lives has ruled out the others, and quietly falling back to
+    guessing would reintroduce exactly the header they ruled out. */
     if !config.client_ip_header.is_empty() {
         let header = config.client_ip_header.to_ascii_lowercase();
         return match first_address(headers, &header) {
@@ -128,7 +128,7 @@ fn parse_address(raw: &str) -> Option<String> {
     }
 
     /* Some proxies include the source port — "203.0.113.7:54321" or
-       "[2001:db8::1]:54321" — and a few bracket IPv6 without one. */
+    "[2001:db8::1]:54321" — and a few bracket IPv6 without one. */
     if let Ok(addr) = raw.parse::<SocketAddr>() {
         return Some(addr.ip().to_string());
     }
@@ -217,10 +217,13 @@ mod tests {
         let map = headers(&[("x-forwarded-for", "1.2.3.4, 203.0.113.7, 172.70.9.1")]);
 
         assert_eq!(resolve(&config(true, 0, ""), &map, peer()).ip, "172.70.9.1");
-        assert_eq!(resolve(&config(true, 1, ""), &map, peer()).ip, "203.0.113.7");
+        assert_eq!(
+            resolve(&config(true, 1, ""), &map, peer()).ip,
+            "203.0.113.7"
+        );
         assert_eq!(resolve(&config(true, 2, ""), &map, peer()).ip, "1.2.3.4");
         /* Further back than the chain goes is a misconfiguration, not an
-           excuse to pick the forgeable end. */
+        excuse to pick the forgeable end. */
         assert_eq!(resolve(&config(true, 3, ""), &map, peer()).ip, "10.0.0.5");
     }
 
@@ -230,8 +233,14 @@ mod tests {
             ("x-forwarded-for", "203.0.113.7:54321"),
             ("x-forwarded-for", "[2001:db8::1]:443"),
         ]);
-        assert_eq!(resolve(&config(true, 1, ""), &map, peer()).ip, "203.0.113.7");
-        assert_eq!(resolve(&config(true, 0, ""), &map, peer()).ip, "2001:db8::1");
+        assert_eq!(
+            resolve(&config(true, 1, ""), &map, peer()).ip,
+            "203.0.113.7"
+        );
+        assert_eq!(
+            resolve(&config(true, 0, ""), &map, peer()).ip,
+            "2001:db8::1"
+        );
     }
 
     /// A header full of junk must not become a rate-limit key.
@@ -252,7 +261,7 @@ mod tests {
         assert_eq!(resolved.source, "x-client-ip");
 
         /* Named but absent falls back to the socket, never to the headers the
-           operator chose against. */
+        operator chose against. */
         let other = headers(&[("cf-connecting-ip", "198.51.100.2")]);
         assert_eq!(
             resolve(&config(true, 0, "X-Client-IP"), &other, peer()).ip,

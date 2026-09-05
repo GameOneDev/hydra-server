@@ -117,7 +117,7 @@ pub async fn create(
     Json(payload): Json<CreateArtifact>,
 ) -> ApiResult<Json<serde_json::Value>> {
     /* Zero is as invalid as negative: it is the size the upload token is
-       bound to and the number the quota below is checked against. */
+    bound to and the number the quota below is checked against. */
     let limit = storage::upload_limit(payload.artifact_length_in_bytes)
         .ok_or_else(|| ApiError::bad_request("invalid artifact length"))?;
 
@@ -195,7 +195,7 @@ async fn enforce_quotas(
     }
 
     /* The declared length, which is all there is to go on before the upload:
-       `storage::upload` holds the bytes to what is actually left. */
+    `storage::upload` holds the bytes to what is actually left. */
     storage::check_quota(state, user_id, payload.artifact_length_in_bytes).await?;
 
     Ok(())
@@ -263,7 +263,7 @@ pub async fn delete(
     }
 
     /* Foreign keys are not enforced on this connection, so drop the share
-       rows explicitly. */
+    rows explicitly. */
     sqlx::query("DELETE FROM artifact_shares WHERE artifact_id = ?")
         .bind(&id)
         .execute(&state.pool)
@@ -326,15 +326,14 @@ pub async fn rename(
     Path(id): Path<String>,
     Json(payload): Json<RenameArtifact>,
 ) -> ApiResult<StatusCode> {
-    let result = sqlx::query(
-        "UPDATE artifacts SET label = ?, updated_at = ? WHERE id = ? AND user_id = ?",
-    )
-    .bind(&payload.label)
-    .bind(Utc::now().to_rfc3339())
-    .bind(&id)
-    .bind(&user.0.id)
-    .execute(&state.pool)
-    .await?;
+    let result =
+        sqlx::query("UPDATE artifacts SET label = ?, updated_at = ? WHERE id = ? AND user_id = ?")
+            .bind(&payload.label)
+            .bind(Utc::now().to_rfc3339())
+            .bind(&id)
+            .bind(&user.0.id)
+            .execute(&state.pool)
+            .await?;
 
     if result.rows_affected() == 0 {
         return Err(ApiError::not_found("artifact not found"));
