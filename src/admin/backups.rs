@@ -22,7 +22,10 @@ pub fn router() -> Router<AppState> {
         .route("/admin/api/backups", get(list).post(create))
         .route("/admin/api/backups/{name}", axum::routing::delete(remove))
         .route("/admin/api/backups/{name}/download", get(download))
-        .route("/admin/api/backups/{name}/restore", axum::routing::post(restore))
+        .route(
+            "/admin/api/backups/{name}/restore",
+            axum::routing::post(restore),
+        )
         .route(
             "/admin/api/backups/upload",
             axum::routing::post(upload)
@@ -60,7 +63,9 @@ async fn create(State(state): State<AppState>, _admin: AdminSession) -> ApiResul
         .await
         .map_err(ApiError::internal)?;
 
-    Ok(Json(json!({ "ok": true, "backup": backup::backup_json(&backup) })))
+    Ok(Json(
+        json!({ "ok": true, "backup": backup::backup_json(&backup) }),
+    ))
 }
 
 /// Streams a backup file. Useful precisely when the server itself is in
@@ -80,9 +85,12 @@ async fn download(
 
     crate::events::record(
         &state,
-        Event::admin("admin.backup.downloaded", format!("Downloaded backup {name}"))
-            .detail(json!({ "name": name }))
-            .size(length as i64),
+        Event::admin(
+            "admin.backup.downloaded",
+            format!("Downloaded backup {name}"),
+        )
+        .detail(json!({ "name": name }))
+        .size(length as i64),
     )
     .await;
 
@@ -140,7 +148,9 @@ async fn upload(
         .await
         .map_err(ApiError::bad_request)?;
 
-    Ok(Json(json!({ "ok": true, "backup": backup::backup_json(&stored) })))
+    Ok(Json(
+        json!({ "ok": true, "backup": backup::backup_json(&stored) }),
+    ))
 }
 
 async fn remove(

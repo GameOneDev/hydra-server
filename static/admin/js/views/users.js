@@ -71,7 +71,18 @@ export default {
           label: "Cloud saves",
           sortable: true,
           align: "right",
-          render: (row) => fmt.number(row.counts.cloudSaves),
+          render: (row) =>
+            h(
+              "div",
+              { class: "stack", style: { justifyItems: "end" } },
+              h("span", { class: "num", text: fmt.number(row.counts.cloudSaves) }),
+              row.counts.retainedCloudSaves
+                ? h("span", {
+                    class: "muted small num",
+                    text: `+ ${fmt.number(row.counts.retainedCloudSaves)} older`,
+                  })
+                : null,
+            ),
         },
         {
           key: "backups",
@@ -93,10 +104,7 @@ export default {
           align: "right",
           render: (row) => fmt.duration(row.playtimeSeconds),
         },
-        /* Not sortable: version strings sort as text, and text puts v10
-           before v9 — a column that lies about which build is newest is worse
-           than one read by eye. Searching a version gathers everyone on it,
-           which is the question this column raises anyway. */
+        /* Not sortable: text sorting would put v10 before v9. */
         {
           key: "launcher",
           label: "Launcher",

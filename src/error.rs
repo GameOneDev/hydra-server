@@ -56,7 +56,11 @@ impl ApiError {
         let mut body = serde_json::Map::new();
 
         if let Some(extra) = self.extra.as_ref().and_then(Value::as_object) {
-            body.extend(extra.iter().map(|(key, value)| (key.clone(), value.clone())));
+            body.extend(
+                extra
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone())),
+            );
         }
 
         body.insert("message".to_string(), json!(self.message));
@@ -110,8 +114,8 @@ mod tests {
     /// stand in for it.
     #[test]
     fn extra_cannot_replace_the_message() {
-        let error = ApiError::bad_request("real message")
-            .with_extra(json!({ "message": "impostor" }));
+        let error =
+            ApiError::bad_request("real message").with_extra(json!({ "message": "impostor" }));
 
         assert_eq!(error.body()["message"], "real message");
     }

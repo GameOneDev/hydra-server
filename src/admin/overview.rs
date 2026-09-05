@@ -90,8 +90,8 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
         "SELECT COALESCE(SUM(artifact_length_in_bytes), 0) FROM artifacts",
     )
     .await?;
-    let frozen_backups: i64 = scalar(&state, "SELECT COUNT(*) FROM artifacts WHERE is_frozen = 1")
-        .await?;
+    let frozen_backups: i64 =
+        scalar(&state, "SELECT COUNT(*) FROM artifacts WHERE is_frozen = 1").await?;
     let shares: i64 = scalar(&state, "SELECT COUNT(*) FROM artifact_shares").await?;
     let stuck_backups: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM artifacts WHERE is_uploaded = 0 AND created_at < ?",
@@ -134,7 +134,7 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
     )
     .await?;
     /* Reservations whose upload never arrived. Sweepable from Maintenance,
-       and worth surfacing next to the other stuck-upload counts. */
+    and worth surfacing next to the other stuck-upload counts. */
     let stuck_souvenirs: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM souvenirs WHERE status = 'pending' AND created_at < ?",
     )
@@ -176,7 +176,7 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
     .await?;
 
     /* Blobs the database expects but disk may not have: reported as a count
-       only — the storage screen does the expensive per-file verification. */
+    only — the storage screen does the expensive per-file verification. */
     let missing_blobs: i64 = scalar(
         &state,
         "SELECT COUNT(*) FROM (
@@ -193,7 +193,7 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
     .await?;
 
     /* WAL/SHM files hold data not yet checkpointed into the main file, so
-       count them into the database size too. */
+    count them into the database size too. */
     let db_path = state.config.database_path();
     let mut database_bytes: u64 = 0;
     for suffix in ["", "-wal", "-shm"] {
@@ -206,10 +206,10 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
     let current = state.settings.read().await.clone();
 
     /* `>=`, not `>`: the endpoints refuse when `used + declared` passes the
-       quota and no declared size is ever less than a byte, so an account
-       sitting exactly on its quota is one whose next upload is already
-       refused. That is what the alert below says, and
-       `storage::exceeds_quota` is the same boundary asked of one byte. */
+    quota and no declared size is ever less than a byte, so an account
+    sitting exactly on its quota is one whose next upload is already
+    refused. That is what the alert below says, and
+    `storage::exceeds_quota` is the same boundary asked of one byte. */
     let quota = crate::limits::quota_expr("u", "?1");
     let over_quota: i64 = sqlx::query_scalar(&format!(
         "SELECT COUNT(*) FROM users u
@@ -221,20 +221,15 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
     .await?;
 
     /* Summed from the metered-table list rather than from the per-category
-       figures above, which are shaped for display and drifted once already. */
+    figures above, which are shaped for display and drifted once already. */
     let stored_bytes: i64 = scalar(
         &state,
         &format!("SELECT {}", crate::storage::stored_bytes_expr()),
     )
     .await?;
 
-    /* What the fleet is running. The version comes off the User-Agent of
-       each account's last sync (see [`crate::launcher`]), so this is the
-       users screen's own column, counted — and the answer to "is everyone on
-       the build that fixed it yet". NULL is nobody's version: it means that
-       account hasn't synced from a launcher since this server started
-       recording, and it is reported as such rather than folded into a real
-       version's tally. */
+    /* NULL is not a version: it is an account that hasn't synced from a
+    launcher since this landed. */
     let launchers = sqlx::query(
         "SELECT launcher_version AS version, COUNT(*) AS users,
                 MAX(last_seen_at) AS last_seen_at
@@ -251,7 +246,7 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
     .await?;
 
     /* Alerts are the panel's reason to be checked at all: each is a condition
-       an operator would want to act on, with the screen that acts on it. */
+    an operator would want to act on, with the screen that acts on it. */
     let mut alerts: Vec<Value> = Vec::new();
     if !failed_tasks.is_empty() {
         let titles: Vec<&str> = failed_tasks
@@ -427,7 +422,7 @@ async fn trends(
         .to_string();
 
     /* substr(at, 1, 10) turns an RFC3339 timestamp into its calendar day
-       without pulling every row into memory to parse it. */
+    without pulling every row into memory to parse it. */
     let rows = sqlx::query(
         "SELECT substr(at, 1, 10) AS day, category, COUNT(*) AS events,
                 COALESCE(SUM(size_bytes), 0) AS bytes
@@ -547,7 +542,7 @@ async fn playtime_heatmap(
     let rows = db_query.fetch_all(&state.pool).await?;
 
     /* Distinct players per day can't be derived from the per-game grouping
-       above (one player may appear under several games). */
+    above (one player may appear under several games). */
     let mut players_by_day: std::collections::BTreeMap<String, i64> = Default::default();
     if query.user_id.is_none() {
         let player_rows = sqlx::query(
@@ -564,7 +559,7 @@ async fn playtime_heatmap(
     }
 
     /* Totals count every game; the games list keeps only the biggest ones
-       (rows arrive seconds DESC within each day). */
+    (rows arrive seconds DESC within each day). */
     let mut by_day: std::collections::BTreeMap<String, (i64, Vec<Value>)> = Default::default();
     for row in rows {
         let day: String = row.get("day");

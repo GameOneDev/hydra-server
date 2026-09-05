@@ -141,7 +141,9 @@ fn signed(bytes: u64) -> i64 {
 /// leaving one behind. [`upload`] is what actually holds the line, against the
 /// bytes that really arrive.
 pub async fn check_quota(state: &AppState, user_id: &str, incoming: i64) -> ApiResult<()> {
-    let quota = crate::limits::for_user(state, user_id).await?.max_bytes_per_user;
+    let quota = crate::limits::for_user(state, user_id)
+        .await?
+        .max_bytes_per_user;
     if quota == 0 {
         return Ok(());
     }
@@ -217,7 +219,7 @@ async fn quota_target(state: &AppState, key: &str) -> ApiResult<Option<QuotaTarg
     }
 
     /* The rest are stored under their owner's own prefix, so the account is
-       known even before a row exists to carry the size. */
+    known even before a row exists to carry the size. */
     if let Some((user_id, _)) = owner_prefixed(key, "images/souvenirs/") {
         let counted = sqlx::query_scalar("SELECT size_in_bytes FROM souvenirs WHERE image_key = ?")
             .bind(key)
@@ -594,9 +596,9 @@ pub async fn upload(
     };
 
     /* Hash-bound keys (Cloud Save V2 blobs) are verified as the body streams,
-       which only works when the whole object arrives in one request. The
-       launcher uploads these in a single PUT; refuse chunking rather than
-       quietly storing unverified bytes under a content-addressed name. */
+    which only works when the whole object arrives in one request. The
+    launcher uploads these in a single PUT; refuse chunking rather than
+    quietly storing unverified bytes under a content-addressed name. */
     if claims.sha256.is_some() && (offset != 0 || total.is_some()) {
         return Err(ApiError::bad_request(
             "chunked upload is not supported for content-addressed objects",
@@ -615,10 +617,10 @@ pub async fn upload(
     let temp_path = path.with_extension("uploading");
 
     /* Opened before a byte is written, and checked at `offset` so a chunked
-       upload is re-measured on every chunk: what already landed still counts
-       when the next one asks for room. A chunked upload that runs out of room
-       partway through can never be finished, so the part of it already on disk
-       goes too. */
+    upload is re-measured on every chunk: what already landed still counts
+    when the next one asks for room. A chunked upload that runs out of room
+    partway through can never be finished, so the part of it already on disk
+    goes too. */
     let mut gate = QuotaGate::open(&state, &claims.key, total.unwrap_or(claims.max)).await?;
     if let Some(gate) = gate.as_mut() {
         if let Err(err) = gate.check(&state, offset).await {
@@ -653,8 +655,7 @@ pub async fn upload(
     let mut digest = claims.sha256.as_ref().map(|_| Sha256::new());
 
     while let Some(chunk) = stream.next().await {
-        let chunk =
-            chunk.map_err(|_| ApiError::bad_request("upload interrupted"))?;
+        let chunk = chunk.map_err(|_| ApiError::bad_request("upload interrupted"))?;
 
         if let Some(digest) = digest.as_mut() {
             digest.update(&chunk);
@@ -672,8 +673,8 @@ pub async fn upload(
         }
 
         /* A body that understated its size gets no further than the byte that
-           fills the quota, and the partial file goes with it — a refused
-           upload leaves nothing on disk to sweep up later. */
+        fills the quota, and the partial file goes with it — a refused
+        upload leaves nothing on disk to sweep up later. */
         if let Some(gate) = gate.as_mut() {
             if let Err(err) = gate.check(&state, written).await {
                 drop(file);
@@ -682,9 +683,7 @@ pub async fn upload(
             }
         }
 
-        file.write_all(&chunk)
-            .await
-            .map_err(ApiError::from)?;
+        file.write_all(&chunk).await.map_err(ApiError::from)?;
     }
 
     file.flush().await?;
@@ -705,8 +704,8 @@ pub async fn upload(
             let _ = tokio::fs::remove_file(&temp_path).await;
 
             /* Content-addressed storage rejecting its own bytes is either a
-               corrupted transfer or someone trying to poison a hash — either
-               way an operator wants to know it happened. */
+            corrupted transfer or someone trying to poison a hash — either
+            way an operator wants to know it happened. */
             crate::events::record(
                 &state,
                 crate::events::Event::system(
@@ -738,8 +737,8 @@ async fn finalize_upload(state: &AppState, key: &str, written: u64) -> ApiResult
     let now = Utc::now().to_rfc3339();
 
     /* A profile image becomes the user's current one and the file it
-       supersedes is deleted, so avatars and banners hold one file each
-       instead of piling up outside the quota. */
+    supersedes is deleted, so avatars and banners hold one file each
+    instead of piling up outside the quota. */
     for (prefix, column) in [
         ("images/banners/", "banner_key"),
         ("images/avatars/", "avatar_key"),
@@ -767,8 +766,8 @@ async fn finalize_upload(state: &AppState, key: &str, written: u64) -> ApiResult
     }
 
     /* Souvenir screenshots are reserved before their bytes exist, so the row
-       only counts against the quota — and only becomes visible on a profile —
-       once the upload has actually landed. */
+    only counts against the quota — and only becomes visible on a profile —
+    once the upload has actually landed. */
     if key.starts_with("images/souvenirs/") {
         crate::souvenirs::mark_uploaded(state, key, written).await?;
     }
@@ -885,8 +884,14 @@ mod tests {
             assert!(global.contains(&format!("FROM {table} t)")));
         }
 
-        assert_eq!(per_user.matches("SELECT COALESCE").count(), METERED_TABLES.len());
-        assert_eq!(global.matches("SELECT COALESCE").count(), METERED_TABLES.len());
+        assert_eq!(
+            per_user.matches("SELECT COALESCE").count(),
+            METERED_TABLES.len()
+        );
+        assert_eq!(
+            global.matches("SELECT COALESCE").count(),
+            METERED_TABLES.len()
+        );
     }
 
     /// Correlating against a joined `users u` needs the inner predicate to
@@ -954,7 +959,10 @@ mod tests {
         assert_eq!(owner_prefixed("cloud-saves/u1", "cloud-saves/"), None);
         assert_eq!(owner_prefixed("cloud-saves//abc", "cloud-saves/"), None);
         assert_eq!(owner_prefixed("cloud-saves/u1/", "cloud-saves/"), None);
-        assert_eq!(owner_prefixed("images/avatars/u1/a.png", "cloud-saves/"), None);
+        assert_eq!(
+            owner_prefixed("images/avatars/u1/a.png", "cloud-saves/"),
+            None
+        );
     }
 
     /// One upload only sees what the *others* are holding, or it would refuse
@@ -974,7 +982,7 @@ mod tests {
         assert_eq!(uploads.extra_bytes("carol", ""), 0);
 
         /* A later chunk replaces the figure rather than adding to it: each
-           entry is a running total, not a delta. */
+        entry is a running total, not a delta. */
         uploads.publish("artifacts/a.tar", "alice", 40);
         assert_eq!(uploads.extra_bytes("alice", "artifacts/b.tar"), 40);
 
@@ -1136,7 +1144,7 @@ mod tests {
             .expect_err("160 000 bytes into a 100 000 byte quota");
 
         /* The declared-size cap would have let all of this through: that is
-           the hole this closes, so the refusal has to be the quota's. */
+        the hole this closes, so the refusal has to be the quota's. */
         assert!(size_limit(1) > 160_000);
         assert_eq!(refusal.status, StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(refusal.message, QUOTA_MESSAGE);
@@ -1160,7 +1168,9 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
-            std::fs::metadata(&save.path).expect("the stored object").len(),
+            std::fs::metadata(&save.path)
+                .expect("the stored object")
+                .len(),
             50_000
         );
         assert!(!save.partial().exists());
@@ -1188,7 +1198,9 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
-            std::fs::metadata(save.partial()).expect("a partial file").len(),
+            std::fs::metadata(save.partial())
+                .expect("a partial file")
+                .len(),
             40_000
         );
 

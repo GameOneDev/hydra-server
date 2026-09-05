@@ -99,14 +99,12 @@ pub async fn unhide(
     user: CurrentUser,
     Query(query): Query<UnhideQuery>,
 ) -> ApiResult<StatusCode> {
-    sqlx::query(
-        "DELETE FROM hidden_games WHERE user_id = ? AND shop = ? AND object_id = ?",
-    )
-    .bind(&user.0.id)
-    .bind(&query.shop)
-    .bind(&query.object_id)
-    .execute(&state.pool)
-    .await?;
+    sqlx::query("DELETE FROM hidden_games WHERE user_id = ? AND shop = ? AND object_id = ?")
+        .bind(&user.0.id)
+        .bind(&query.shop)
+        .bind(&query.object_id)
+        .execute(&state.pool)
+        .await?;
 
     crate::events::record(
         &state,

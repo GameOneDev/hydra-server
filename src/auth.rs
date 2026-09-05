@@ -54,7 +54,7 @@ impl FromRequestParts<AppState> for CurrentUser {
         }
 
         /* Before the bump below overwrites the evidence: last_seen_at is how
-           the presence log tells a returning client from a busy one. */
+        the presence log tells a returning client from a busy one. */
         let ip = crate::client_ip::of(
             &state.config,
             &parts.headers,
@@ -66,8 +66,8 @@ impl FromRequestParts<AppState> for CurrentUser {
         crate::presence::touch(state, &user, Some(ip)).await;
 
         /* Bump last_seen_at on every authenticated request. resolve_user only
-           touches the row on token-cache misses, which would leave last_seen_at
-           up to TOKEN_CACHE_TTL_SECONDS stale while the client is active. */
+        touches the row on token-cache misses, which would leave last_seen_at
+        up to TOKEN_CACHE_TTL_SECONDS stale while the client is active. */
         let launcher = crate::launcher::version(&parts.headers);
         if touch(state, &user.id, launcher.as_deref()).await? {
             return Err(ApiError::forbidden("user is blocked on this server"));
@@ -77,14 +77,10 @@ impl FromRequestParts<AppState> for CurrentUser {
     }
 }
 
-/// Records that this account just called: `last_seen_at`, the launcher
-/// version the request named, and — since the row is open anyway — whether
-/// the account is blocked.
-///
-/// One statement, because this runs on every authenticated request. `version`
-/// is `None` for anything holding a token that didn't name itself — curl, a
-/// script, a launcher too old to say — and `COALESCE` reads that as no news
-/// rather than as a launcher that lost its version.
+/// Bumps `last_seen_at`, records the launcher version the request named and
+/// reports whether the account is blocked — one statement, on the path every
+/// authenticated request takes. `COALESCE`: a caller that names no version is
+/// no news, not a version lost.
 async fn touch(state: &AppState, id: &str, version: Option<&str>) -> Result<bool, ApiError> {
     let blocked: Option<(i64,)> = sqlx::query_as(
         "UPDATE users SET last_seen_at = ?, launcher_version = COALESCE(?, launcher_version)
@@ -137,10 +133,7 @@ async fn resolve_user(state: &AppState, token: &str) -> Result<AuthenticatedUser
 ///
 /// Public because the portal signs people in with credentials rather than a
 /// header, and must reach the same verdict from the same authority.
-pub async fn verify_token(
-    state: &AppState,
-    token: &str,
-) -> Result<AuthenticatedUser, ApiError> {
+pub async fn verify_token(state: &AppState, token: &str) -> Result<AuthenticatedUser, ApiError> {
     let url = format!("{}/profile/me", state.config.official_api_url);
 
     let response = state
@@ -152,7 +145,7 @@ pub async fn verify_token(
         .map_err(|err| {
             tracing::warn!("official API unreachable: {err}");
             /* Anything but a real 401 must NOT look like one — the launcher
-               wipes its session on 401 responses. */
+            wipes its session on 401 responses. */
             ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "official Hydra API unreachable",
@@ -191,13 +184,13 @@ pub async fn upsert_user(state: &AppState, user: &AuthenticatedUser) -> Result<(
     let now = Utc::now().to_rfc3339();
 
     /* Deliberately does NOT move last_seen_at on an existing row: the presence
-       log reads that column to tell a returning client from a busy one, and a
-       write hidden in here would have overwritten the answer before it was
-       asked. Every caller bumps it explicitly instead.
+    log reads that column to tell a returning client from a busy one, and a
+    write hidden in here would have overwritten the answer before it was
+    asked. Every caller bumps it explicitly instead.
 
-       created_at is only written by the insert, so getting it back and finding
-       our own timestamp means this row is new — which is how a first sighting
-       gets logged without a second query to ask. */
+    created_at is only written by the insert, so getting it back and finding
+    our own timestamp means this row is new — which is how a first sighting
+    gets logged without a second query to ask. */
     let created_at: Option<(String,)> = sqlx::query_as(
         "INSERT INTO users (id, username, display_name, profile_image_url, created_at, last_seen_at)
          VALUES (?, ?, ?, ?, ?, ?)
@@ -253,20 +246,23 @@ mod tests {
         let server = TestServer::start().await;
         assert_eq!(launcher_version(&server).await, None);
 
-        touch(&server.state, "alice", Some("3.2.1")).await.expect("the bump");
+        touch(&server.state, "alice", Some("3.2.1"))
+            .await
+            .expect("the bump");
         assert_eq!(launcher_version(&server).await.as_deref(), Some("3.2.1"));
 
-        touch(&server.state, "alice", Some("3.3.0")).await.expect("the bump");
+        touch(&server.state, "alice", Some("3.3.0"))
+            .await
+            .expect("the bump");
         assert_eq!(launcher_version(&server).await.as_deref(), Some("3.3.0"));
     }
 
-    /// A launcher's own requests are not the only ones that arrive with a
-    /// token: forgetting the version over one call from something else would
-    /// leave the panel blinking between "v3.2.1" and nothing.
     #[tokio::test]
     async fn a_caller_that_names_no_version_leaves_the_known_one_alone() {
         let server = TestServer::start().await;
-        touch(&server.state, "alice", Some("3.2.1")).await.expect("the bump");
+        touch(&server.state, "alice", Some("3.2.1"))
+            .await
+            .expect("the bump");
 
         touch(&server.state, "alice", None).await.expect("the bump");
 
@@ -280,7 +276,9 @@ mod tests {
             .execute("UPDATE users SET is_blocked = 1, last_seen_at = '2000-01-01T00:00:00Z'")
             .await;
 
-        let blocked = touch(&server.state, "alice", Some("3.2.1")).await.expect("the bump");
+        let blocked = touch(&server.state, "alice", Some("3.2.1"))
+            .await
+            .expect("the bump");
 
         assert!(blocked);
         let last_seen: String = server
@@ -293,13 +291,13 @@ mod tests {
         assert_eq!(launcher_version(&server).await.as_deref(), Some("3.2.1"));
     }
 
-    /// Nobody by that id: no row to bump, and no reason to refuse the caller
-    /// on the strength of a block that isn't recorded anywhere.
     #[tokio::test]
     async fn an_unknown_account_is_not_blocked() {
         let server = TestServer::start().await;
 
-        let blocked = touch(&server.state, "nobody", Some("3.2.1")).await.expect("the bump");
+        let blocked = touch(&server.state, "nobody", Some("3.2.1"))
+            .await
+            .expect("the bump");
 
         assert!(!blocked);
     }

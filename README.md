@@ -15,7 +15,7 @@ and download sources browsing all work exactly as before.
 | Account, login, friends, profiles, catalogue | Official Hydra servers (unchanged) |
 | Cloud save backups (Ludusavi tar bundles) | **this server** |
 | Cloud Save V2 — per-file snapshot sync (launcher 4.1.0+) | **this server** |
-| Emulation memory-card saves (PS1/PS2) | **this server** |
+| Emulation saves — PS1/PS2 memory cards, PSP savedata, GameCube/Wii | **this server** |
 | Achievement sync across devices | **this server** |
 | Achievement souvenirs — screenshots on the profile | **this server** |
 | Download source list sync across devices | **this server** |
@@ -138,11 +138,9 @@ all of them, so that column renders whatever this row happened to record. The
 full blob is still one click away in the expanded row.
 
 **Users** — searchable, sortable directory with storage against quota and the
-launcher version each account last called with. The launcher names itself in
-the `User-Agent` of every request, so *who is still on the old build* is
-answerable without asking anyone; accounts that haven't synced since this
-server started reading it show a dash, and *Overview* counts the fleet by
-version. Each account opens onto its own screen: what it stores broken down by
+launcher version each account last synced from, taken off the `User-Agent` the
+launcher sends. Searching a version gathers everyone still on it; *Overview*
+counts the fleet by build. Each account opens onto its own screen: what it stores broken down by
 kind, the machines it syncs from (hostname, platform, last seen), its top
 games, and tabs for saves, achievements, custom images, shares, download
 sources and activity. Blocking, per-user limits (see below), a per-category
@@ -394,7 +392,8 @@ up with no further wiring.
 Implements the endpoints the launcher routes to a self-hosted cloud server:
 
 - `GET|POST /profile/games/artifacts`, `POST /profile/games/artifacts/{id}/download`,
-  `DELETE|PATCH /profile/games/artifacts/{id}`, `PUT …/{id}/freeze|unfreeze`
+  `DELETE|PUT|PATCH /profile/games/artifacts/{id}` (the launcher renames with
+  PUT), `PUT …/{id}/freeze|unfreeze`
 - `PUT /profile/games/achievements` (union merge by achievement name, earliest
   unlock wins), `DELETE /profile/games/achievements/{remoteGameId}`
 - `GET /profile/achievements/{userId}` — recently unlocked achievements for a
@@ -439,6 +438,12 @@ Steam games. A save is a manifest of files, each content-addressed by SHA-256:
 - `POST /profile/cloud-saves/commit-snapshot` — verifies the bytes landed and
   promotes the snapshot to the game's current save
 - `GET|DELETE /profile/cloud-saves/snapshots?shop=&objectId=`
+- `GET /profile/cloud-saves/all-snapshots` — every snapshot of the user,
+  tagged with its game and marked `current` or `retained`
+- `DELETE /profile/cloud-saves/snapshots/{id}` — deletes one retained
+  version (the current save goes through the per-game delete above)
+- `POST /profile/cloud-saves/snapshots/{id}/restore` — puts a retained
+  version back in use; the two swap places, so it can be undone
 - `GET /profile/cloud-saves/snapshot-restore-manifest?snapshotId=`
 - `GET /profile/cloud-saves/snapshot-download-urls?snapshotId=`
 
@@ -534,7 +539,7 @@ for someone who already has it.
 `GET /capabilities` (unauthenticated) reports what this build supports:
 
 ```json
-{ "name": "hydra-server", "version": "4.1.2", "features": ["cloud-saves-v2", "souvenirs", "..."] }
+{ "name": "hydra-server", "version": "4.1.3", "features": ["cloud-saves-v2", "souvenirs", "..."] }
 ```
 
 The launcher checks this before enabling a feature whose endpoints might not

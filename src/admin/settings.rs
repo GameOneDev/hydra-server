@@ -22,7 +22,9 @@ use std::net::SocketAddr;
 pub fn router() -> Router<AppState> {
     Router::new().route(
         "/admin/api/settings",
-        get(get_settings).put(update_settings).delete(reset_settings),
+        get(get_settings)
+            .put(update_settings)
+            .delete(reset_settings),
     )
 }
 
@@ -121,7 +123,12 @@ async fn update_settings(
     Json(request): Json<UpdateRequest>,
 ) -> ApiResult<Json<Value>> {
     if let Some(max_bytes) = request.max_bytes_per_user {
-        store::set(&state.pool, store::MAX_BYTES_PER_USER, &max_bytes.to_string()).await?;
+        store::set(
+            &state.pool,
+            store::MAX_BYTES_PER_USER,
+            &max_bytes.to_string(),
+        )
+        .await?;
     }
 
     if let Some(limit) = request.backups_per_game_limit {
@@ -155,13 +162,12 @@ async fn update_settings(
     let current = state.settings.read().await.clone();
     crate::events::record(
         &state,
-        Event::admin("admin.settings.updated", "Settings changed")
-            .detail(json!({
-                "maxBytesPerUser": current.max_bytes_per_user,
-                "backupsPerGameLimit": current.backups_per_game_limit,
-                "autoDeleteSaves": current.auto_delete_saves,
-                "allowedUsers": current.allowed_users,
-            })),
+        Event::admin("admin.settings.updated", "Settings changed").detail(json!({
+            "maxBytesPerUser": current.max_bytes_per_user,
+            "backupsPerGameLimit": current.backups_per_game_limit,
+            "autoDeleteSaves": current.auto_delete_saves,
+            "allowedUsers": current.allowed_users,
+        })),
     )
     .await;
 
@@ -180,7 +186,10 @@ async fn reset_settings(
 
     crate::events::record(
         &state,
-        Event::admin("admin.settings.reset", "Settings reset to the environment values"),
+        Event::admin(
+            "admin.settings.reset",
+            "Settings reset to the environment values",
+        ),
     )
     .await;
 

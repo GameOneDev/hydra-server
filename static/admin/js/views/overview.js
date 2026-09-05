@@ -133,15 +133,7 @@ export default {
   },
 };
 
-/**
- * What the fleet is running, from the User-Agent of each account's last sync.
- *
- * Ordered by how many accounts are on each build rather than by version, so
- * the bar to read first is "what almost everybody is on" and the short ones
- * under it are who to chase. Accounts that haven't synced since the server
- * started recording have no version and say so, instead of padding out the
- * oldest one.
- */
+/** What the fleet is running, most-used build first. */
 function launcherVersions(launchers = []) {
   const known = launchers.filter((entry) => entry.version);
   const unknown = launchers.find((entry) => !entry.version);
@@ -170,7 +162,7 @@ function launcherVersions(launchers = []) {
             style: { marginTop: "12px" },
             text: `${fmt.plural(unknown.users, "account")} ${
               unknown.users === 1 ? "hasn't" : "haven't"
-            } synced from a launcher since this server started reading the version.`,
+            } synced from a launcher since this landed.`,
           })
         : null,
     ),

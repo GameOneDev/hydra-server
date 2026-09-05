@@ -13,11 +13,11 @@ use axum::http::{header, request::Parts, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use std::net::SocketAddr;
 use chrono::Utc;
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::net::SocketAddr;
 
 const SESSION_TTL_SECONDS: i64 = 60 * 60 * 12;
 const COOKIE_NAME: &str = "hydra_admin";
@@ -106,7 +106,7 @@ async fn login(
     }
 
     /* One shared password guards everything here, so an attacker with
-       unlimited guesses eventually wins. Lock the address out first. */
+    unlimited guesses eventually wins. Lock the address out first. */
     let ip = crate::client_ip::of(&state.config, &headers, Some(peer));
     ratelimit::check(&state, SCOPE, &ip).await?;
 

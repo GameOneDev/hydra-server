@@ -26,8 +26,8 @@ mod ratelimit;
 mod schedule;
 mod settings;
 mod shares;
-mod souvenirs;
 mod sources;
+mod souvenirs;
 mod state;
 mod storage;
 #[cfg(test)]
@@ -38,12 +38,12 @@ mod webhooks;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
-use std::net::SocketAddr;
 use config::Config;
 use serde_json::json;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use state::AppState;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -155,9 +155,12 @@ async fn count_request(
 
 fn router(_state: AppState) -> Router<AppState> {
     /* Save backups can be many GB — the storage routes stream to disk and
-       must not be capped by the default body limit. */
+    must not be capped by the default body limit. */
     let storage_routes = Router::new()
-        .route("/storage/{token}", put(storage::upload).get(storage::download))
+        .route(
+            "/storage/{token}",
+            put(storage::upload).get(storage::download),
+        )
         .layer(DefaultBodyLimit::disable());
 
     let api_routes = Router::new()
@@ -165,9 +168,15 @@ fn router(_state: AppState) -> Router<AppState> {
             "/profile/games/artifacts",
             get(artifacts::list).post(artifacts::create),
         )
+        /* Renaming a backup answers to both methods on purpose: the launcher
+           sends PUT (upstream's own call, which the official API answers), and
+           PATCH is what the route was first written for. Serving only one of
+           them turns a rename into a 405. */
         .route(
             "/profile/games/artifacts/{id}",
-            delete(artifacts::delete).patch(artifacts::rename),
+            delete(artifacts::delete)
+                .patch(artifacts::rename)
+                .put(artifacts::rename),
         )
         .route(
             "/profile/games/artifacts/{id}/download",
@@ -177,10 +186,7 @@ fn router(_state: AppState) -> Router<AppState> {
             "/profile/games/artifacts/shared-with-me",
             get(shares::shared_with_me),
         )
-        .route(
-            "/profile/games/artifacts/{id}/share",
-            post(shares::share),
-        )
+        .route("/profile/games/artifacts/{id}/share", post(shares::share))
         .route(
             "/profile/games/artifacts/{id}/share/{recipient_id}",
             delete(shares::unshare),
@@ -189,17 +195,23 @@ fn router(_state: AppState) -> Router<AppState> {
             "/profile/games/artifacts/{id}/shares",
             get(shares::list_shares),
         )
-        .route("/profile/games/artifacts/{id}/freeze", put(artifacts::freeze))
+        .route(
+            "/profile/games/artifacts/{id}/freeze",
+            put(artifacts::freeze),
+        )
         .route(
             "/profile/games/artifacts/{id}/unfreeze",
             put(artifacts::unfreeze),
         )
         /* Custom game artwork (Hydra Cloud's "Custom Image Sync"). The
-           listing routes sit above the parameterised ones; static segments
-           win in the router, so "artwork"/"artifacts" never get read as a
-           shop name. */
+        listing routes sit above the parameterised ones; static segments
+        win in the router, so "artwork"/"artifacts" never get read as a
+        shop name. */
         .route("/profile/games/artwork", get(artwork::list))
-        .route("/profile/games/artwork/{user_id}", get(artwork::list_for_user))
+        .route(
+            "/profile/games/artwork/{user_id}",
+            get(artwork::list_for_user),
+        )
         .route(
             "/profile/games/{shop}/{object_id}/artwork/{kind}/upload-url",
             post(artwork::upload_url),
@@ -209,10 +221,22 @@ fn router(_state: AppState) -> Router<AppState> {
             put(artwork::save).delete(artwork::delete),
         )
         /* Cloud Save V2 (launcher 4.1.0+). Static segments before the
-           parameterised /profile/games routes, same reason as artwork. */
+        parameterised /profile/games routes, same reason as artwork. */
         .route(
             "/profile/cloud-saves/snapshots",
             get(cloud_saves::list_snapshots).delete(cloud_saves::delete_snapshots),
+        )
+        .route(
+            "/profile/cloud-saves/snapshots/{id}",
+            delete(cloud_saves::delete_snapshot),
+        )
+        .route(
+            "/profile/cloud-saves/snapshots/{id}/restore",
+            post(cloud_saves::restore_snapshot),
+        )
+        .route(
+            "/profile/cloud-saves/all-snapshots",
+            get(cloud_saves::list_all_snapshots),
         )
         .route(
             "/profile/cloud-saves/prepare-snapshot",
@@ -237,7 +261,9 @@ fn router(_state: AppState) -> Router<AppState> {
         )
         .route(
             "/profile/download-sources",
-            get(sources::list).post(sources::add).delete(sources::remove),
+            get(sources::list)
+                .post(sources::add)
+                .delete(sources::remove),
         )
         .route("/profile/emulation-saves", get(emulation::list))
         .route(
@@ -248,7 +274,10 @@ fn router(_state: AppState) -> Router<AppState> {
             "/profile/emulation-saves/{id}",
             put(emulation::update).delete(emulation::delete),
         )
-        .route("/profile/emulation-saves/{id}/commit", post(emulation::commit))
+        .route(
+            "/profile/emulation-saves/{id}/commit",
+            post(emulation::commit),
+        )
         .route(
             "/profile/emulation-saves/{id}/download-url",
             post(emulation::download_url),
@@ -257,14 +286,11 @@ fn router(_state: AppState) -> Router<AppState> {
             "/profile/playtime",
             get(playtime::heatmap).post(playtime::report),
         )
-        .route(
-            "/profile/playtime/{user_id}",
-            get(playtime::user_heatmap),
-        )
+        .route("/profile/playtime/{user_id}", get(playtime::user_heatmap))
         .route("/profile/members/{user_id}", get(members::lookup))
         /* Achievement souvenirs. The per-souvenir routes sit under /profile,
-           the profile-facing ones under /users/{id} — the same split upstream
-           uses, and the launcher builds both. */
+        the profile-facing ones under /users/{id} — the same split upstream
+        uses, and the launcher builds both. */
         .route(
             "/profile/souvenirs-visibility",
             patch(souvenirs::set_account_visibility),
@@ -284,8 +310,8 @@ fn router(_state: AppState) -> Router<AppState> {
             post(souvenirs::report),
         )
         /* Souvenir thumbnails for the achievement list. Named as upstream
-           names it, so the launcher reads the images off the same endpoint it
-           already asks for a profile's achievements. */
+        names it, so the launcher reads the images off the same endpoint it
+        already asks for a profile's achievements. */
         .route(
             "/users/{user_id}/games/achievements",
             get(souvenirs::user_game_achievements),
@@ -298,7 +324,9 @@ fn router(_state: AppState) -> Router<AppState> {
         .route("/images/{*path}", get(images::serve))
         .route(
             "/profile/hidden-games",
-            get(hidden_games::list).post(hidden_games::hide).delete(hidden_games::unhide),
+            get(hidden_games::list)
+                .post(hidden_games::hide)
+                .delete(hidden_games::unhide),
         )
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024));
 

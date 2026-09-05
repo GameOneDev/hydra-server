@@ -117,7 +117,7 @@ pub async fn create(
     Json(payload): Json<CreateArtifact>,
 ) -> ApiResult<Json<serde_json::Value>> {
     /* Zero is as invalid as negative: it is the size the upload token is
-       bound to and the number the quota below is checked against. */
+    bound to and the number the quota below is checked against. */
     let limit = storage::upload_limit(payload.artifact_length_in_bytes)
         .ok_or_else(|| ApiError::bad_request("invalid artifact length"))?;
 
@@ -195,7 +195,7 @@ async fn enforce_quotas(
     }
 
     /* The declared length, which is all there is to go on before the upload:
-       `storage::upload` holds the bytes to what is actually left. */
+    `storage::upload` holds the bytes to what is actually left. */
     storage::check_quota(state, user_id, payload.artifact_length_in_bytes).await?;
 
     Ok(())
@@ -263,7 +263,7 @@ pub async fn delete(
     }
 
     /* Foreign keys are not enforced on this connection, so drop the share
-       rows explicitly. */
+    rows explicitly. */
     sqlx::query("DELETE FROM artifact_shares WHERE artifact_id = ?")
         .bind(&id)
         .execute(&state.pool)
@@ -319,26 +319,140 @@ pub struct RenameArtifact {
     pub label: Option<String>,
 }
 
-/// PATCH /profile/games/artifacts/{id} — rename a backup.
+/// PUT|PATCH /profile/games/artifacts/{id} — rename a backup.
+///
+/// The launcher's rename modal sends PUT; PATCH answers the same way for
+/// clients that send it. See the route in `main.rs`.
 pub async fn rename(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(id): Path<String>,
     Json(payload): Json<RenameArtifact>,
 ) -> ApiResult<StatusCode> {
-    let result = sqlx::query(
-        "UPDATE artifacts SET label = ?, updated_at = ? WHERE id = ? AND user_id = ?",
-    )
-    .bind(&payload.label)
-    .bind(Utc::now().to_rfc3339())
-    .bind(&id)
-    .bind(&user.0.id)
-    .execute(&state.pool)
-    .await?;
+    let result =
+        sqlx::query("UPDATE artifacts SET label = ?, updated_at = ? WHERE id = ? AND user_id = ?")
+            .bind(&payload.label)
+            .bind(Utc::now().to_rfc3339())
+            .bind(&id)
+            .bind(&user.0.id)
+            .execute(&state.pool)
+            .await?;
 
     if result.rows_affected() == 0 {
         return Err(ApiError::not_found("artifact not found"));
     }
 
     Ok(StatusCode::OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::CachedUser;
+    use crate::testing::TestServer;
+
+    const TOKEN: &str = "alices-access-token";
+
+    /// One uploaded backup of alice's — the row the rename modal acts on.
+    async fn backup(server: &TestServer) {
+        sqlx::query(
+            "INSERT INTO artifacts
+               (id, user_id, shop, object_id, artifact_length_in_bytes, label,
+                is_uploaded, created_at, updated_at)
+             VALUES ('backup-1', 'alice', 'steam', '440', 64, 'Before the boss',
+                     1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&server.state.pool)
+        .await
+        .expect("a backup to rename");
+    }
+
+    /// A token the auth extractor accepts. Seeding the cache is what the first
+    /// verified request would leave behind, and keeps the test off the
+    /// official API.
+    async fn authorize(server: &TestServer) {
+        server.state.token_cache.write().await.insert(
+            TOKEN.to_string(),
+            CachedUser {
+                user: server.user("alice").0,
+                cached_at: Utc::now(),
+            },
+        );
+    }
+
+    /// The assembled router, on a real loopback port.
+    ///
+    /// Calling `rename` directly would pass whatever methods the route is
+    /// registered under — and the method is the whole bug: the launcher's PUT
+    /// was rejected by the router, before any handler ran. Only a real request
+    /// over `crate::router` can tell 405 from 200.
+    async fn serve(server: &TestServer) -> String {
+        let app = crate::router(server.state.clone()).with_state(server.state.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a free port");
+        let base = format!("http://{}", listener.local_addr().expect("the bound address"));
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("the test server");
+        });
+
+        base
+    }
+
+    async fn rename_over_http(server: &TestServer, method: reqwest::Method) -> StatusCode {
+        let base = serve(server).await;
+
+        /* The proxy this may run behind has no business intercepting loopback. */
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("an http client");
+
+        let response = client
+            .request(method, format!("{base}/profile/games/artifacts/backup-1"))
+            .bearer_auth(TOKEN)
+            .json(&json!({ "label": "After the boss" }))
+            .send()
+            .await
+            .expect("a response");
+
+        StatusCode::from_u16(response.status().as_u16()).expect("a known status")
+    }
+
+    async fn label(server: &TestServer) -> String {
+        server
+            .scalar::<String>("SELECT label FROM artifacts WHERE id = 'backup-1'")
+            .await
+    }
+
+    /// The rename modal sends PUT — upstream's own call, which the official API
+    /// answers. Registering only PATCH here made every self-hosted rename a 405.
+    #[tokio::test]
+    async fn the_launchers_rename_put_is_answered() {
+        let server = TestServer::start().await;
+        authorize(&server).await;
+        backup(&server).await;
+
+        assert_eq!(
+            rename_over_http(&server, reqwest::Method::PUT).await,
+            StatusCode::OK
+        );
+        assert_eq!(label(&server).await, "After the boss");
+    }
+
+    /// And PATCH keeps working, for anything already sending it.
+    #[tokio::test]
+    async fn a_rename_patch_is_answered_too() {
+        let server = TestServer::start().await;
+        authorize(&server).await;
+        backup(&server).await;
+
+        assert_eq!(
+            rename_over_http(&server, reqwest::Method::PATCH).await,
+            StatusCode::OK
+        );
+        assert_eq!(label(&server).await, "After the boss");
+    }
 }

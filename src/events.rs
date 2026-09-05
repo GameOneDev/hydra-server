@@ -170,10 +170,7 @@ impl Event {
 pub async fn record(state: &AppState, event: Event) {
     let at = Utc::now().to_rfc3339();
 
-    let detail = event
-        .detail
-        .as_ref()
-        .map(|detail| detail.to_string());
+    let detail = event.detail.as_ref().map(|detail| detail.to_string());
 
     let result = sqlx::query(
         "INSERT INTO events

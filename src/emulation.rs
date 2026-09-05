@@ -153,8 +153,8 @@ pub async fn create_upload_url(
     Json(payload): Json<CreateUploadUrl>,
 ) -> ApiResult<Json<Value>> {
     /* Before the insert, so a save that declares no size leaves no row: the
-       upload token is bound to this number, and a zero used to mean "no
-       limit". The launcher has the buffer in hand before it asks. */
+    upload token is bound to this number, and a zero used to mean "no
+    limit". The launcher has the buffer in hand before it asks. */
     let limit = storage::upload_limit(payload.artifact_length_in_bytes)
         .ok_or_else(|| ApiError::bad_request("invalid artifact length"))?;
 
@@ -166,8 +166,8 @@ pub async fn create_upload_url(
     }
 
     /* Against the declared length, like every other presign — the file isn't
-       here yet. `storage::upload` re-checks against the bytes that arrive, so
-       an understated length can't spend more than this reserves. */
+    here yet. `storage::upload` re-checks against the bytes that arrive, so
+    an understated length can't spend more than this reserves. */
     storage::check_quota(&state, &user.0.id, payload.artifact_length_in_bytes).await?;
 
     let id = Uuid::new_v4().to_string();
@@ -211,6 +211,11 @@ pub struct CommitSave {
     pub local_last_modified_at: Option<String>,
     #[serde(default)]
     pub label: Option<String>,
+    /* Launcher 4.1.3+ describes non-memory-card saves (PSP savedata, Dolphin
+       GCI/Wii data.bin) here, and needs it back to restore them. It arrives on
+       the commit, not a follow-up PUT, so dropping it loses the save. */
+    #[serde(default)]
+    pub metadata: Option<Value>,
 }
 
 /// POST /profile/emulation-saves/{id}/commit -> EmulationCloudSave
@@ -223,9 +228,13 @@ pub async fn commit(
     fetch_save(&state, &user.0.id, &id).await?;
 
     let now = Utc::now().to_rfc3339();
+    let metadata_json = payload
+        .metadata
+        .as_ref()
+        .map(|metadata| serde_json::to_string(metadata).unwrap_or_default());
 
     /* Replace older saves for the same slot: the launcher expects one save
-       per saveIdentity, mirroring how a memory card slot works. */
+    per saveIdentity, mirroring how a memory card slot works. */
     let old_rows = sqlx::query(
         "SELECT s.id, s.is_uploaded FROM emulation_saves s
          JOIN emulation_saves new_save ON new_save.id = ?
@@ -279,6 +288,7 @@ pub async fn commit(
             hostname = COALESCE(?, hostname),
             local_last_modified_at = COALESCE(?, local_last_modified_at),
             label = COALESCE(?, label),
+            metadata = COALESCE(?, metadata),
             last_uploaded_at = ?,
             updated_at = ?
          WHERE id = ? AND user_id = ?",
@@ -288,6 +298,7 @@ pub async fn commit(
     .bind(&payload.hostname)
     .bind(&payload.local_last_modified_at)
     .bind(&payload.label)
+    .bind(&metadata_json)
     .bind(&now)
     .bind(&now)
     .bind(&id)
@@ -442,6 +453,7 @@ mod tests {
                 hostname: None,
                 local_last_modified_at: None,
                 label: None,
+                metadata: None,
             }),
         )
         .await
@@ -475,7 +487,9 @@ mod tests {
         commit_new(&server).await;
 
         assert_eq!(
-            server.scalar::<i64>("SELECT COUNT(*) FROM emulation_saves").await,
+            server
+                .scalar::<i64>("SELECT COUNT(*) FROM emulation_saves")
+                .await,
             1
         );
         assert!(!older.exists(), "its bytes went with the row");
@@ -512,7 +526,10 @@ mod tests {
         );
         assert_eq!(listed(&server).await, vec!["new".to_string()]);
 
-        assert_eq!(storage::used_bytes(&server.state, "alice").await.unwrap(), 128);
+        assert_eq!(
+            storage::used_bytes(&server.state, "alice").await.unwrap(),
+            128
+        );
     }
 
     /// Keeping older versions is about saves, not about reservations: a row
@@ -538,11 +555,16 @@ mod tests {
         commit_new(&server).await;
 
         assert_eq!(
-            server.scalar::<i64>("SELECT COUNT(*) FROM emulation_saves").await,
+            server
+                .scalar::<i64>("SELECT COUNT(*) FROM emulation_saves")
+                .await,
             1,
             "the abandoned reservation went, and its declared bytes with it"
         );
-        assert_eq!(storage::used_bytes(&server.state, "alice").await.unwrap(), 64);
+        assert_eq!(
+            storage::used_bytes(&server.state, "alice").await.unwrap(),
+            64
+        );
     }
 
     /// Switching deletion back on clears what it left behind, on the next
@@ -583,6 +605,7 @@ mod tests {
                 hostname: None,
                 local_last_modified_at: None,
                 label: None,
+                metadata: None,
             }),
         )
         .await
@@ -590,9 +613,83 @@ mod tests {
 
         assert_eq!(listed(&server).await, vec!["newer".to_string()]);
         assert_eq!(
-            server.scalar::<i64>("SELECT COUNT(*) FROM emulation_saves").await,
+            server
+                .scalar::<i64>("SELECT COUNT(*) FROM emulation_saves")
+                .await,
             1,
             "the kept save went with the one it was kept beside"
+        );
+    }
+
+    /// A PSP or Dolphin save is described by the metadata the launcher sends
+    /// with the commit, and it needs that back to restore the save. Before
+    /// 4.1.3 only memory cards synced, so only the follow-up PUT carried it.
+    #[tokio::test]
+    async fn the_commits_metadata_is_kept_and_read_back() {
+        let server = TestServer::start().await;
+        slot(&server).await;
+
+        let metadata = json!({
+            "schemaVersion": 1,
+            "artifactFormat": "ppsspp-savedata-zip",
+            "discId": "ULUS10041",
+            "savedataDirectory": "ULUS10041DATA00",
+        });
+
+        let _ = commit(
+            State(server.state.clone()),
+            server.user("alice"),
+            Path("new".to_string()),
+            Json(CommitSave {
+                artifact_length_in_bytes: Some(64),
+                file_name: None,
+                hostname: None,
+                local_last_modified_at: None,
+                label: None,
+                metadata: Some(metadata.clone()),
+            }),
+        )
+        .await
+        .expect("the commit");
+
+        let Json(saves) = list(
+            State(server.state.clone()),
+            server.user("alice"),
+            Query(ListQuery {
+                platform: None,
+                emulator: None,
+                save_kind: None,
+                shop: None,
+                object_id: None,
+            }),
+        )
+        .await
+        .expect("the listing");
+
+        assert_eq!(saves[0].metadata.as_ref(), Some(&metadata));
+    }
+
+    /// COALESCE, so a later commit that says nothing about metadata does not
+    /// erase what the save already carries.
+    #[tokio::test]
+    async fn a_commit_without_metadata_leaves_what_is_stored() {
+        let server = TestServer::start().await;
+        slot(&server).await;
+
+        server
+            .execute(
+                "UPDATE emulation_saves
+                 SET metadata = '{\"schemaVersion\":1}' WHERE id = 'new'",
+            )
+            .await;
+
+        commit_new(&server).await;
+
+        assert_eq!(
+            server
+                .scalar::<String>("SELECT metadata FROM emulation_saves WHERE id = 'new'")
+                .await,
+            "{\"schemaVersion\":1}"
         );
     }
 }

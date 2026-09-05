@@ -71,7 +71,7 @@ pub async fn record_failure(
     let mut guard = state.login_guard.write().await;
 
     /* Opportunistic cleanup: this map is only touched on failures, so it can
-       be tidied here instead of on a timer. */
+    be tidied here instead of on a timer. */
     guard.retain(|_, attempts| {
         let recent = attempts
             .first_failure_at

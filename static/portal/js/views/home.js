@@ -67,9 +67,6 @@ export default {
         }),
         card({
           title: "Your devices",
-          /* The launcher names its version on every call, so this is what
-             you are running right now — the thing a support answer starts
-             with, and one less trip into the launcher's settings. */
           subtitle: [
             `${overview.devices.length} seen`,
             overview.launcherVersion ? `Hydra Launcher v${overview.launcherVersion}` : null,

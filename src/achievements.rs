@@ -62,9 +62,10 @@ fn merge_achievements(existing: Vec<Value>, incoming: Vec<Value>) -> Vec<Value> 
             continue;
         };
 
-        match merged.iter_mut().find(|entry| {
-            achievement_name(entry).map(str::to_uppercase) == Some(name.clone())
-        }) {
+        match merged
+            .iter_mut()
+            .find(|entry| achievement_name(entry).map(str::to_uppercase) == Some(name.clone()))
+        {
             Some(entry) => {
                 if unlocked_at(&achievement) < unlocked_at(entry) {
                     *entry = achievement;
@@ -101,9 +102,7 @@ pub async fn sync(
 
     let existing_achievements: Vec<Value> = existing
         .as_ref()
-        .and_then(|row| {
-            serde_json::from_str(&row.get::<String, _>("achievements")).ok()
-        })
+        .and_then(|row| serde_json::from_str(&row.get::<String, _>("achievements")).ok())
         .unwrap_or_default();
 
     let shop = payload
@@ -159,9 +158,9 @@ pub async fn sync(
         }))
         .into_response()),
         /* Without shop/objectId the launcher can't repaint its local state
-           from this response, but an acknowledged souvenir still has to be
-           reported — losing it would leave the launcher retrying a souvenir
-           this server already stored. */
+        from this response, but an acknowledged souvenir still has to be
+        reported — losing it would leave the launcher retrying a souvenir
+        this server already stored. */
         _ if !souvenirs.is_empty() => Ok(Json(json!({
             "objectId": Value::Null,
             "shop": Value::Null,
@@ -234,7 +233,7 @@ const RECENT_ACHIEVEMENTS_PER_GAME: usize = 500;
 /// it against other games. `None` when nothing in the game is unlocked.
 fn recent_game(shop: String, object_id: String, achievements: &[Value]) -> Option<(i64, Value)> {
     /* Only unlocked entries carry a time; the rest can't be ranked by
-       recency and would just be noise on a profile. */
+    recency and would just be noise on a profile. */
     let mut unlocked: Vec<(i64, &Value)> = achievements
         .iter()
         .filter_map(|achievement| Some((unlock_time(achievement)?, achievement)))
@@ -312,10 +311,10 @@ pub async fn recent(
     games.truncate(RECENT_GAMES_LIMIT);
 
     /* The viewer may not have the game in their own library, and the owner's
-       library isn't always readable, so the name and cover ride along from
-       the metadata cache. Without them the launcher has unlocks it can't
-       label and has to drop. Bounded by RECENT_GAMES_LIMIT, and cached after
-       the first lookup. */
+    library isn't always readable, so the name and cover ride along from
+    the metadata cache. Without them the launcher has unlocks it can't
+    label and has to drop. Bounded by RECENT_GAMES_LIMIT, and cached after
+    the first lookup. */
     let mut resolved = Vec::with_capacity(games.len());
     for (_, mut game) in games {
         let shop = game["shop"].as_str().unwrap_or_default().to_string();
@@ -412,8 +411,7 @@ mod tests {
     fn recent_game_accepts_the_legacy_unlock_field() {
         let legacy = vec![json!({ "name": "FIRST_BLOOD", "unlockedAt": 1700 })];
 
-        let (most_recent, _) =
-            recent_game("steam".into(), "440".into(), &legacy).expect("game");
+        let (most_recent, _) = recent_game("steam".into(), "440".into(), &legacy).expect("game");
 
         assert_eq!(most_recent, 1700);
     }
@@ -450,8 +448,7 @@ mod tests {
             .map(|i| json!({ "name": format!("ACH_{i}"), "unlockTime": 1000 + i }))
             .collect();
 
-        let (_, game) =
-            recent_game("steam".into(), "648800".into(), &achievements).expect("game");
+        let (_, game) = recent_game("steam".into(), "648800".into(), &achievements).expect("game");
 
         assert_eq!(game["achievements"].as_array().unwrap().len(), 104);
         assert_eq!(game["unlockedCount"], 104);

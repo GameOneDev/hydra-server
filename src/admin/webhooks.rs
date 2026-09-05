@@ -96,12 +96,16 @@ struct WebhookRequest {
 fn validate(request: &WebhookRequest) -> ApiResult<(String, String)> {
     let url = request.url.trim().to_string();
     if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err(ApiError::bad_request("the URL must start with http:// or https://"));
+        return Err(ApiError::bad_request(
+            "the URL must start with http:// or https://",
+        ));
     }
 
     let format = request.format.clone().unwrap_or_else(|| "json".to_string());
     if !matches!(format.as_str(), "json" | "discord" | "slack") {
-        return Err(ApiError::bad_request("format must be json, discord or slack"));
+        return Err(ApiError::bad_request(
+            "format must be json, discord or slack",
+        ));
     }
 
     Ok((url, format))
@@ -161,8 +165,16 @@ async fn update(
     .bind(request.label.clone().unwrap_or_default())
     .bind(&url)
     .bind(&format)
-    .bind(serde_json::to_string(&request.kinds.clone().unwrap_or_default()).unwrap_or_else(|_| "[]".into()))
-    .bind(request.min_severity.clone().unwrap_or_else(|| "info".into()))
+    .bind(
+        serde_json::to_string(&request.kinds.clone().unwrap_or_default())
+            .unwrap_or_else(|_| "[]".into()),
+    )
+    .bind(
+        request
+            .min_severity
+            .clone()
+            .unwrap_or_else(|| "info".into()),
+    )
     .bind(request.enabled.unwrap_or(true) as i64)
     .bind(&id)
     .bind(request.secret.clone())
@@ -176,8 +188,11 @@ async fn update(
 
     crate::events::record(
         &state,
-        Event::admin("admin.webhook.updated", format!("Webhook updated for {url}"))
-            .detail(json!({ "id": id })),
+        Event::admin(
+            "admin.webhook.updated",
+            format!("Webhook updated for {url}"),
+        )
+        .detail(json!({ "id": id })),
     )
     .await;
 
@@ -202,8 +217,11 @@ async fn remove(
 
     crate::events::record(
         &state,
-        Event::admin("admin.webhook.deleted", format!("Webhook removed for {url}"))
-            .detail(json!({ "id": id })),
+        Event::admin(
+            "admin.webhook.deleted",
+            format!("Webhook removed for {url}"),
+        )
+        .detail(json!({ "id": id })),
     )
     .await;
 
