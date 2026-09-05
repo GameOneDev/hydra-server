@@ -15,7 +15,7 @@ and download sources browsing all work exactly as before.
 | Account, login, friends, profiles, catalogue | Official Hydra servers (unchanged) |
 | Cloud save backups (Ludusavi tar bundles) | **this server** |
 | Cloud Save V2 — per-file snapshot sync (launcher 4.1.0+) | **this server** |
-| Emulation memory-card saves (PS1/PS2) | **this server** |
+| Emulation saves — PS1/PS2 memory cards, PSP savedata, GameCube/Wii (launcher 4.1.3+) | **this server** |
 | Achievement sync across devices | **this server** |
 | Achievement souvenirs — screenshots on the profile | **this server** |
 | Download source list sync across devices | **this server** |
@@ -527,7 +527,7 @@ for someone who already has it.
 `GET /capabilities` (unauthenticated) reports what this build supports:
 
 ```json
-{ "name": "hydra-server", "version": "4.1.2", "features": ["cloud-saves-v2", "souvenirs", "..."] }
+{ "name": "hydra-server", "version": "4.1.3", "features": ["cloud-saves-v2", "souvenirs", "..."] }
 ```
 
 The launcher checks this before enabling a feature whose endpoints might not
