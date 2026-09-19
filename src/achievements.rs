@@ -1,8 +1,9 @@
 use crate::auth::CurrentUser;
 use crate::error::{ApiError, ApiResult};
 use crate::games;
+use crate::query::shops_from_query;
 use crate::state::AppState;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -21,6 +22,11 @@ pub struct SyncAchievements {
     pub object_id: Option<String>,
     #[serde(default)]
     pub shop: Option<String>,
+    /// Whether the Steam integration is what brought this game in, which is
+    /// how [`user_stats`] answers a profile filtered to the Steam library.
+    /// Absent leaves whatever is already stored.
+    #[serde(default)]
+    pub has_active_steam_import: Option<bool>,
     #[serde(default)]
     pub achievements: Vec<Value>,
     /// Screenshots captured alongside these unlocks, already uploaded by the
@@ -119,12 +125,16 @@ pub async fn sync(
         .map_err(|_| ApiError::internal("failed to serialize achievements"))?;
 
     sqlx::query(
-        "INSERT INTO game_achievements (user_id, remote_game_id, shop, object_id, achievements, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)
+        "INSERT INTO game_achievements (user_id, remote_game_id, shop, object_id, achievements, has_active_steam_import, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(user_id, remote_game_id) DO UPDATE SET
            shop = COALESCE(excluded.shop, game_achievements.shop),
            object_id = COALESCE(excluded.object_id, game_achievements.object_id),
            achievements = excluded.achievements,
+           has_active_steam_import = COALESCE(
+             excluded.has_active_steam_import,
+             game_achievements.has_active_steam_import
+           ),
            updated_at = excluded.updated_at",
     )
     .bind(&user.0.id)
@@ -132,6 +142,7 @@ pub async fn sync(
     .bind(&shop)
     .bind(&object_id)
     .bind(&merged_json)
+    .bind(payload.has_active_steam_import)
     .bind(Utc::now().to_rfc3339())
     .execute(&state.pool)
     .await?;
@@ -172,19 +183,69 @@ pub async fn sync(
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserStatsQuery {
+    /// Set by the launcher's "Steam library" tab. `shop` is repeated rather
+    /// than listed, so it is read from the raw query string instead.
+    pub steam_library: Option<bool>,
+}
+
+/// Whether a stored game belongs to the slice of the library the profile is
+/// showing.
+///
+/// `shops` is what the launcher's platform tabs send
+/// (`?shop=steam&shop=launchbox` for all of it, `?shop=launchbox` for
+/// Classics), and `steam_library` narrows that to the games the Steam
+/// integration imported.
+fn counts_toward_stats(
+    shop: Option<&str>,
+    has_active_steam_import: Option<bool>,
+    shops: &[String],
+    steam_library: bool,
+) -> bool {
+    /* A game that has not synced since this server started storing the flag
+    reads as "not imported": claiming the Steam tab for it would inflate a
+    total the official API computes from the import itself. */
+    if steam_library && has_active_steam_import != Some(true) {
+        return false;
+    }
+
+    if shops.is_empty() {
+        return true;
+    }
+
+    match shop {
+        Some(shop) => shops.contains(&shop.to_lowercase()),
+        /* Rows predating the launcher sending shop/objectId can't be placed
+        in a tab. Dropping them would understate the library-wide total the
+        default tab shows, which is the number nearly everyone reads. */
+        None => true,
+    }
+}
+
 /// GET /profile/stats/{userId} — achievement-count fallback.
 ///
 /// The official API only computes profile achievement totals for
 /// subscribers; launchers fill the gap from the achievements synced here.
 /// Returns null when the user has no achievement data on this server so
 /// clients don't render a misleading zero.
+///
+/// The launcher's profile tabs pass their filter along (`?shop=…`,
+/// `?steamLibrary=true`), so the total follows the tab rather than always
+/// answering for the whole library.
 pub async fn user_stats(
     State(state): State<AppState>,
     _viewer: CurrentUser,
     Path(user_id): Path<String>,
+    Query(query): Query<UserStatsQuery>,
+    RawQuery(raw): RawQuery,
 ) -> ApiResult<Json<Value>> {
+    let shops = shops_from_query(raw.as_deref());
+    let steam_library = query.steam_library.unwrap_or(false);
+
     let rows = sqlx::query(
-        "SELECT shop, object_id, json_array_length(achievements) AS cnt
+        "SELECT shop, object_id, has_active_steam_import, json_array_length(achievements) AS cnt
          FROM game_achievements WHERE user_id = ?",
     )
     .bind(&user_id)
@@ -209,6 +270,14 @@ pub async fn user_stats(
                 (Some(shop), Some(object_id)) => !hidden.contains(shop, object_id),
                 _ => true,
             }
+        })
+        .filter(|row| {
+            counts_toward_stats(
+                row.get("shop"),
+                row.get("has_active_steam_import"),
+                &shops,
+                steam_library,
+            )
         })
         .map(|row| row.get::<i64, _>("cnt"))
         .sum();
@@ -347,6 +416,154 @@ pub async fn reset(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::CachedUser;
+    use crate::testing::TestServer;
+
+    const TOKEN: &str = "alices-access-token";
+
+    /// A token the auth extractor accepts. Seeding the cache is what the
+    /// first verified request would leave behind, and keeps the test off the
+    /// official API.
+    async fn authorize(server: &TestServer) {
+        server.state.token_cache.write().await.insert(
+            TOKEN.to_string(),
+            CachedUser {
+                user: server.user("alice").0,
+                cached_at: Utc::now(),
+            },
+        );
+    }
+
+    /// The assembled router on a loopback port. The stats filter is half
+    /// query-string parsing — `shop` repeats, `steamLibrary` does not — so it
+    /// is worth driving over a real request rather than calling the handler.
+    async fn serve(server: &TestServer) -> String {
+        let app = crate::router(server.state.clone()).with_state(server.state.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a free port");
+        let base = format!(
+            "http://{}",
+            listener.local_addr().expect("the bound address")
+        );
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("the test server");
+        });
+
+        base
+    }
+
+    fn client() -> reqwest::Client {
+        /* The proxy this may run behind has no business intercepting loopback. */
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("an http client")
+    }
+
+    async fn sync_game(
+        client: &reqwest::Client,
+        base: &str,
+        object_id: &str,
+        shop: &str,
+        has_active_steam_import: bool,
+        unlocked: usize,
+    ) {
+        let achievements: Vec<Value> = (0..unlocked)
+            .map(|index| json!({ "name": format!("{object_id}_ACH_{index}"), "unlockTime": 100 }))
+            .collect();
+
+        let response = client
+            .put(format!("{base}/profile/games/achievements"))
+            .bearer_auth(TOKEN)
+            .json(&json!({
+                "id": format!("remote-{object_id}"),
+                "objectId": object_id,
+                "shop": shop,
+                "hasActiveSteamImport": has_active_steam_import,
+                "achievements": achievements,
+            }))
+            .send()
+            .await
+            .expect("a response");
+
+        assert_eq!(response.status(), 200, "sync of {object_id}");
+    }
+
+    async fn unlocked_sum(client: &reqwest::Client, base: &str, query: &str) -> Value {
+        let response = client
+            .get(format!("{base}/profile/stats/alice{query}"))
+            .bearer_auth(TOKEN)
+            .send()
+            .await
+            .expect("a response");
+
+        assert_eq!(response.status(), 200, "stats for {query}");
+
+        response.json::<Value>().await.expect("a stats body")["unlockedAchievementSum"].clone()
+    }
+
+    /// The launcher's profile tabs each send their own filter, and the
+    /// achievement total has to follow the tab the way the rest of the stats
+    /// do — including "Steam library", which only this server's own record of
+    /// the import can answer.
+    #[tokio::test]
+    async fn the_total_follows_the_tab_the_profile_is_showing() {
+        let server = TestServer::start().await;
+        authorize(&server).await;
+        let base = serve(&server).await;
+        let client = client();
+
+        sync_game(&client, &base, "440", "steam", false, 3).await;
+        sync_game(&client, &base, "570", "steam", true, 5).await;
+        sync_game(&client, &base, "snes-1", "launchbox", false, 2).await;
+
+        assert_eq!(unlocked_sum(&client, &base, "").await, json!(10));
+        assert_eq!(
+            unlocked_sum(&client, &base, "?shop=steam&shop=launchbox").await,
+            json!(10)
+        );
+        assert_eq!(unlocked_sum(&client, &base, "?shop=steam").await, json!(8));
+        assert_eq!(
+            unlocked_sum(&client, &base, "?shop=launchbox").await,
+            json!(2)
+        );
+        assert_eq!(
+            unlocked_sum(&client, &base, "?shop=steam&steamLibrary=true").await,
+            json!(5)
+        );
+    }
+
+    /// A sync that doesn't mention the import — the souvenir worker's, when
+    /// it can't read the game — must not erase what a previous one recorded.
+    #[tokio::test]
+    async fn a_sync_without_the_flag_keeps_the_stored_one() {
+        let server = TestServer::start().await;
+        authorize(&server).await;
+        let base = serve(&server).await;
+        let client = client();
+
+        sync_game(&client, &base, "570", "steam", true, 1).await;
+
+        let response = client
+            .put(format!("{base}/profile/games/achievements"))
+            .bearer_auth(TOKEN)
+            .json(&json!({
+                "id": "remote-570",
+                "achievements": [{ "name": "570_ACH_1", "unlockTime": 200 }],
+            }))
+            .send()
+            .await
+            .expect("a response");
+        assert_eq!(response.status(), 200);
+
+        assert_eq!(
+            unlocked_sum(&client, &base, "?shop=steam&steamLibrary=true").await,
+            json!(2)
+        );
+    }
 
     #[test]
     fn merge_keeps_earliest_unlock_and_unions_names() {
@@ -414,6 +631,59 @@ mod tests {
         let (most_recent, _) = recent_game("steam".into(), "440".into(), &legacy).expect("game");
 
         assert_eq!(most_recent, 1700);
+    }
+
+    #[test]
+    fn counts_every_game_when_no_tab_filter_is_sent() {
+        assert!(counts_toward_stats(Some("steam"), None, &[], false));
+        assert!(counts_toward_stats(None, None, &[], false));
+    }
+
+    #[test]
+    fn counts_only_the_shops_the_tab_asks_for() {
+        let classics = vec!["launchbox".to_string()];
+
+        assert!(counts_toward_stats(
+            Some("launchbox"),
+            None,
+            &classics,
+            false
+        ));
+        assert!(!counts_toward_stats(Some("steam"), None, &classics, false));
+    }
+
+    /// The default tab sends both shops, and a row from before the launcher
+    /// keyed achievements by game has no shop to match — counting it keeps
+    /// that total the same as it was before the tabs existed.
+    #[test]
+    fn counts_a_row_that_predates_game_keys() {
+        let all = vec!["steam".to_string(), "launchbox".to_string()];
+
+        assert!(counts_toward_stats(None, None, &all, false));
+    }
+
+    #[test]
+    fn steam_library_counts_only_imported_games() {
+        let steam = vec!["steam".to_string()];
+
+        assert!(counts_toward_stats(Some("steam"), Some(true), &steam, true));
+        assert!(!counts_toward_stats(
+            Some("steam"),
+            Some(false),
+            &steam,
+            true
+        ));
+        /* Not synced since the flag existed: unknown, so not claimed. */
+        assert!(!counts_toward_stats(Some("steam"), None, &steam, true));
+    }
+
+    /// The PC and All tabs don't exclude imported games — the launcher shows
+    /// them there too.
+    #[test]
+    fn an_imported_game_still_counts_outside_the_steam_tab() {
+        let pc = vec!["steam".to_string()];
+
+        assert!(counts_toward_stats(Some("steam"), Some(true), &pc, false));
     }
 
     /// The same achievement read from different sources can differ in
