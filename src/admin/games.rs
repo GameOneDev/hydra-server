@@ -98,12 +98,18 @@ async fn list(
          GROUP BY t.shop, t.object_id"
     );
 
-    let count_sql = format!("SELECT COUNT(*) FROM ({grouped})");
-    let mut count = sqlx::query_scalar::<_, i64>(&count_sql);
+    /* Total and how many of it the panel can only show as a raw shop id:
+    the screen says so in its own header rather than leaving the operator to
+    count warning pills a page at a time. */
+    let count_sql = format!(
+        "SELECT COUNT(*), SUM(CASE WHEN {unresolved} THEN 1 ELSE 0 END) FROM ({grouped})",
+        unresolved = metadata::unresolved_name("game_name"),
+    );
+    let mut count = sqlx::query_as::<_, (i64, Option<i64>)>(&count_sql);
     for value in &binds {
         count = count.bind(value);
     }
-    let total = count.fetch_one(&state.pool).await?;
+    let (total, unnamed) = count.fetch_one(&state.pool).await?;
 
     let order = super::order_by(
         &[
@@ -147,7 +153,10 @@ async fn list(
         })
         .collect();
 
-    Ok(Json(paging.envelope(games, total)))
+    let mut envelope = paging.envelope(games, total);
+    envelope["unnamed"] = json!(unnamed.unwrap_or(0));
+
+    Ok(Json(envelope))
 }
 
 /// GET /admin/api/games/{shop}/{objectId} — one game and everyone who has
@@ -227,21 +236,14 @@ async fn detail(
     })))
 }
 
-/// POST /admin/api/games/{shop}/{objectId}/refresh — drop the cached
-/// metadata and look it up again, for the game whose name arrived wrong or
-/// never arrived at all.
+/// POST /admin/api/games/{shop}/{objectId}/refresh — ask the store again,
+/// for the game whose name arrived wrong or never arrived at all.
 async fn refresh(
     State(state): State<AppState>,
     _admin: AdminSession,
     Path((shop, object_id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    sqlx::query("DELETE FROM game_metadata WHERE shop = ? AND object_id = ?")
-        .bind(&shop)
-        .bind(&object_id)
-        .execute(&state.pool)
-        .await?;
-
-    let meta = metadata::resolve(&state, &shop, &object_id).await;
+    let meta = metadata::refresh(&state, &shop, &object_id).await;
 
     Ok(Json(json!({
         "shop": shop,
@@ -250,4 +252,65 @@ async fn refresh(
         "coverUrl": meta.cover_url,
         "resolved": meta.name.is_some(),
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::TestServer;
+
+    /// A game with playtime, and whatever the metadata cache holds for it:
+    /// `None` for a game never looked up, `Some` for one that was.
+    async fn a_game(server: &TestServer, object_id: &str, name: Option<&str>) {
+        let now = chrono::Utc::now().to_rfc3339();
+        server
+            .execute(&format!(
+                "INSERT INTO playtime_daily (user_id, day, shop, object_id, seconds, updated_at)
+                 VALUES ('alice', '2026-01-01', 'steam', '{object_id}', 60, '{now}')"
+            ))
+            .await;
+
+        if let Some(name) = name {
+            server
+                .execute(&format!(
+                    "INSERT INTO game_metadata (shop, object_id, name, fetched_at)
+                     VALUES ('steam', '{object_id}', '{name}', '{now}')"
+                ))
+                .await;
+        }
+    }
+
+    async fn listing(server: &TestServer) -> Value {
+        let Json(value) = list(
+            State(server.state.clone()),
+            AdminSession { expires_at: 0 },
+            Query(ListQuery {
+                q: None,
+                shop: None,
+                sort: None,
+                dir: None,
+                page: None,
+                per_page: None,
+            }),
+        )
+        .await
+        .expect("the listing");
+
+        value
+    }
+
+    #[tokio::test]
+    async fn the_listing_counts_the_games_it_can_only_show_as_an_id() {
+        let server = TestServer::start().await;
+        a_game(&server, "1", Some("A Game")).await;
+        a_game(&server, "2", None).await;
+        /* Cached, looked up, and still nameless — the store answered with
+        nothing usable. The screen shows this one as its id too. */
+        a_game(&server, "3", Some("  ")).await;
+
+        let data = listing(&server).await;
+
+        assert_eq!(data["total"], 3);
+        assert_eq!(data["unnamed"], 2);
+    }
 }

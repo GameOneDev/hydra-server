@@ -164,14 +164,7 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
     /* A game counts once no matter how many ways it shows up here. */
     let games: i64 = scalar(
         &state,
-        "SELECT COUNT(*) FROM (
-             SELECT shop, object_id FROM cloud_save_snapshots
-             UNION SELECT shop, object_id FROM artifacts
-             UNION SELECT shop, object_id FROM playtime_daily
-             UNION SELECT shop, object_id FROM game_artwork
-             UNION SELECT shop, object_id FROM game_achievements WHERE shop IS NOT NULL
-             UNION SELECT shop, object_id FROM souvenirs WHERE shop IS NOT NULL
-         )",
+        &format!("SELECT COUNT(*) FROM ({})", crate::games::KNOWN_GAME_IDS),
     )
     .await?;
 

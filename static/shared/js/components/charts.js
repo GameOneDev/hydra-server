@@ -347,7 +347,10 @@ export function heatmap(entries, { aggregate = false } = {}) {
                   : []),
                 ...(entry?.games ?? [])
                   .slice(0, 3)
-                  .map((game) => [game.name || `${game.shop}/${game.objectId}`, fmt.duration(game.seconds)]),
+                  .map((game) => [
+                    fmt.isGameNamed(game) ? game.name.trim() : `${game.shop}/${game.objectId}`,
+                    fmt.duration(game.seconds),
+                  ]),
               ]),
             ),
           );

@@ -31,7 +31,14 @@ const games = {
       perPage: 25,
     });
 
-    ctx.setHeader({ title: "Games", subtitle: fmt.plural(data.total, "game") });
+    /* The count of games with no name belongs next to the total: the warning
+       pills alone only say how many are on this page. */
+    ctx.setHeader({
+      title: "Games",
+      subtitle: data.unnamed
+        ? `${fmt.plural(data.total, "game")} · ${fmt.number(data.unnamed)} without a name`
+        : fmt.plural(data.total, "game"),
+    });
 
     return card({
       body: h(
@@ -89,7 +96,7 @@ const games = {
               label: "",
               class: "actions",
               render: (row) =>
-                row.game.name ? null : pill("name unresolved", "warning"),
+                fmt.isGameNamed(row.game) ? null : pill("name unresolved", "warning"),
             },
           ],
           rows: data.rows,
@@ -148,7 +155,9 @@ games.detail = {
             { class: "stack", style: { flex: 1, minWidth: 0 } },
             h("strong", { style: { fontSize: "16px" }, text: fmt.gameName(game) }),
             h("span", { class: "muted mono", text: fmt.gameSub(game) }),
-            game.name ? null : h("span", {}, pill("no name from the store yet", "warning")),
+            fmt.isGameNamed(game)
+              ? null
+              : h("span", {}, pill("no name from the store yet", "warning")),
           ),
           h("button", { class: "btn", text: "Back to games", onclick: () => navigate("/games") }),
           h("button", {

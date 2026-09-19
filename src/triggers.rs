@@ -124,19 +124,18 @@ impl Metric {
                 .unwrap_or(0);
                 snapshots + souvenirs
             }
-            Metric::UnresolvedGames => sqlx::query_scalar(
-                "SELECT COUNT(*) FROM (
-                     SELECT DISTINCT t.shop, t.object_id FROM (
-                         SELECT shop, object_id FROM cloud_save_snapshots
-                         UNION SELECT shop, object_id FROM artifacts
-                         UNION SELECT shop, object_id FROM playtime_daily
-                         UNION SELECT shop, object_id FROM game_artwork
-                     ) t
-                     LEFT JOIN game_metadata g
-                            ON g.shop = t.shop AND g.object_id = t.object_id
-                     WHERE g.name IS NULL
-                 )",
-            )
+            /* The same games the refresh job would work on, counted the
+            same way: a threshold that fires the job has to agree with it
+            about which games have no name. */
+            Metric::UnresolvedGames => sqlx::query_scalar(&format!(
+                "SELECT COUNT(*)
+                 FROM ({known}) t
+                 LEFT JOIN game_metadata g
+                        ON g.shop = t.shop AND g.object_id = t.object_id
+                 WHERE {unresolved}",
+                known = crate::games::KNOWN_GAME_IDS,
+                unresolved = crate::games::unresolved_name("g.name"),
+            ))
             .fetch_one(&state.pool)
             .await
             .unwrap_or(0),
@@ -525,6 +524,33 @@ pub async fn condition_holds(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::TestServer;
+
+    /// The threshold that fires the refresh job counts what that job would
+    /// work on. A game the server only knows from an achievement sync is
+    /// still a game the panel shows as a raw id.
+    #[tokio::test]
+    async fn the_unresolved_threshold_sees_every_game_the_refresh_would() {
+        let server = TestServer::start().await;
+        server
+            .execute(
+                "INSERT INTO game_achievements
+                   (user_id, remote_game_id, shop, object_id, updated_at)
+                 VALUES ('alice', '1', 'steam', '1238810', '2026-01-01T00:00:00+00:00')",
+            )
+            .await;
+
+        assert_eq!(Metric::UnresolvedGames.measure(&server.state).await, 1);
+
+        server
+            .execute(
+                "INSERT INTO game_metadata (shop, object_id, name, fetched_at)
+                 VALUES ('steam', '1238810', 'A Game', '2026-01-01T00:00:00+00:00')",
+            )
+            .await;
+
+        assert_eq!(Metric::UnresolvedGames.measure(&server.state).await, 0);
+    }
 
     fn at(time: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(time)
