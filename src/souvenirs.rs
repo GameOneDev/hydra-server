@@ -20,6 +20,7 @@ use crate::auth::CurrentUser;
 use crate::error::{ApiError, ApiResult};
 use crate::events::Event;
 use crate::games;
+use crate::query::shops_from_query;
 use crate::state::AppState;
 use crate::storage;
 use axum::extract::{Path, Query, RawQuery, State};
@@ -472,19 +473,6 @@ struct ProfileSouvenir {
     game_icon_url: Option<String>,
     like_count: i64,
     liked_by_me: bool,
-}
-
-/// `shop` may be repeated (`?shop=steam&shop=launchbox`), which the typed
-/// extractor collapses, so it is read off the raw query string.
-fn shops_from_query(raw: Option<&str>) -> Vec<String> {
-    let Some(raw) = raw else { return Vec::new() };
-
-    raw.split('&')
-        .filter_map(|pair| pair.split_once('='))
-        .filter(|(key, _)| *key == "shop")
-        .map(|(_, value)| value.trim().to_lowercase())
-        .filter(|value| !value.is_empty())
-        .collect()
 }
 
 /// Lets the launcher say "hidden" rather than "none yet". `FRIENDS` reads as
@@ -1154,16 +1142,6 @@ mod tests {
         ]);
 
         assert_eq!(names, vec!["ACH_WIN", "ACH_LOSE"]);
-    }
-
-    #[test]
-    fn repeated_shop_parameters_are_all_read() {
-        assert_eq!(
-            shops_from_query(Some("take=24&shop=steam&shop=launchbox&sortBy=recent")),
-            vec!["steam", "launchbox"]
-        );
-        assert!(shops_from_query(Some("take=24")).is_empty());
-        assert!(shops_from_query(None).is_empty());
     }
 
     #[test]

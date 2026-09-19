@@ -414,7 +414,14 @@ async function tabContent(tab, { id, ctx, library }) {
     return simpleTable(
       ["Game", "Unlocked", "Synced"],
       library.achievements.map((entry) => [
-        gameCell(entry.game),
+        h(
+          "div",
+          { class: "row", style: { gap: "8px" } },
+          gameCell(entry.game),
+          /* Where these unlocks came from: the launcher's Steam integration
+             imported the game, rather than the player adding it in Hydra. */
+          entry.hasActiveSteamImport ? pill("Steam import", "accent") : null,
+        ),
         h(
           "div",
           { class: "row", style: { gap: "8px" } },

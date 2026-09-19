@@ -293,6 +293,7 @@ async fn library(
 ) -> ApiResult<Json<Value>> {
     let achievements = sqlx::query(
         "SELECT ga.remote_game_id, ga.shop, ga.object_id, ga.updated_at,
+                ga.has_active_steam_import,
                 json_array_length(ga.achievements) AS total,
                 (SELECT COUNT(*) FROM json_each(ga.achievements) entry
                   WHERE json_extract(entry.value, '$.unlockTime') IS NOT NULL
@@ -358,6 +359,11 @@ async fn library(
             "game": super::game_ref(row),
             "total": row.get::<i64, _>("total"),
             "unlocked": row.get::<i64, _>("unlocked"),
+            /* Null on a game that hasn't synced since the column existed,
+               which the panel shows the same as not imported. */
+            "hasActiveSteamImport": row
+                .get::<Option<bool>, _>("has_active_steam_import")
+                .unwrap_or(false),
             "updatedAt": row.get::<String, _>("updated_at"),
         })).collect::<Vec<_>>(),
         "artwork": artwork.iter().map(|row| json!({

@@ -390,7 +390,16 @@ Implements the endpoints the launcher routes to a self-hosted cloud server:
   `DELETE|PUT|PATCH /profile/games/artifacts/{id}` (the launcher renames with
   PUT), `PUT …/{id}/freeze|unfreeze`
 - `PUT /profile/games/achievements` (union merge by achievement name, earliest
-  unlock wins), `DELETE /profile/games/achievements/{remoteGameId}`
+  unlock wins), `DELETE /profile/games/achievements/{remoteGameId}`. The
+  launcher also sends `hasActiveSteamImport` per game, which is the only way
+  this server can tell what its Steam integration brought in; a payload
+  without it leaves the stored value alone
+- `GET /profile/stats/{userId}` — the profile's achievement total, which the
+  official API computes for subscribers only. Takes the same filter as the
+  launcher's profile tabs (`?shop=steam&shop=launchbox`, and
+  `?steamLibrary=true` for the Steam library tab), so the number follows the
+  tab; null when this server has no achievements for that user, so nothing
+  renders a misleading zero
 - `GET /profile/achievements/{userId}` — recently unlocked achievements for a
   profile, so members show recent activity the official API only compares for
   subscribers. Names and unlock times only; the launcher joins the public
