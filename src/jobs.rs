@@ -85,7 +85,7 @@ pub const JOBS: &[Job] = &[
     Job {
         id: "refresh-metadata",
         title: "Refresh game metadata",
-        description: "Re-resolve names and cover art for games the store lookup never answered for. One network round trip per game, so it works through a bounded batch at a time.",
+        description: "Look up names and cover art again for every game the panel can only show as a raw shop id. One network round trip per game, so it takes a batch at a time, least recently tried first, and works a long backlog down over several runs.",
         schedulable: true,
         danger: false,
         default_every: 1,
@@ -341,40 +341,80 @@ async fn delete_retained_versions(state: &AppState) -> ApiResult<Value> {
     }))
 }
 
+/// How many store lookups one run makes. Each is a network round trip, so a
+/// long backlog is worked through over several runs instead of one burst.
+const METADATA_BATCH: usize = 50;
+
 async fn refresh_metadata(state: &AppState) -> ApiResult<Value> {
-    let pending: Vec<(String, String)> = sqlx::query_as(
-        "SELECT DISTINCT t.shop, t.object_id FROM (
-             SELECT shop, object_id FROM cloud_save_snapshots
-             UNION SELECT shop, object_id FROM artifacts
-             UNION SELECT shop, object_id FROM playtime_daily
-             UNION SELECT shop, object_id FROM game_artwork
-         ) t
+    /* Least recently attempted first, games never attempted at all ahead of
+    those: a fixed batch off an unordered query would re-ask the same ids
+    every run and never reach the rest of the backlog.
+
+    All of them rather than a batch-sized page, because what the run reports
+    is the point of this job — an id pair is two short strings, and the batch
+    below is what bounds the network. */
+    let unnamed: Vec<(String, String)> = sqlx::query_as(&format!(
+        "SELECT t.shop, t.object_id
+         FROM ({known}) t
          LEFT JOIN game_metadata g ON g.shop = t.shop AND g.object_id = t.object_id
-         WHERE g.name IS NULL LIMIT 50",
-    )
+         WHERE {unresolved}
+         ORDER BY COALESCE(g.fetched_at, '') ASC, t.shop ASC, t.object_id ASC",
+        known = games::KNOWN_GAME_IDS,
+        unresolved = games::unresolved_name("g.name"),
+    ))
     .fetch_all(&state.pool)
     .await?;
 
-    let mut resolved = 0usize;
-    for (shop, object_id) in &pending {
-        sqlx::query("DELETE FROM game_metadata WHERE shop = ? AND object_id = ?")
-            .bind(shop)
-            .bind(object_id)
-            .execute(&state.pool)
-            .await?;
+    /* Ids no store answers for — a shop with no public endpoint, or an id
+    that isn't a Steam app id. Asking again would spend the batch to learn
+    nothing, so they are reported rather than retried. */
+    let (lookupable, unsupported): (Vec<_>, Vec<_>) = unnamed
+        .iter()
+        .partition(|(shop, object_id)| games::is_lookupable(shop, object_id));
 
-        if games::resolve(state, shop, object_id).await.name.is_some() {
+    let batch = &lookupable[..lookupable.len().min(METADATA_BATCH)];
+    let mut resolved = 0usize;
+    for (shop, object_id) in batch {
+        if games::refresh(state, shop, object_id).await.name.is_some() {
             resolved += 1;
         }
     }
 
+    let waiting = lookupable.len() - batch.len();
+    let remaining = unnamed.len() - resolved;
+
+    let summary = if unnamed.is_empty() {
+        "Every game already has a name.".to_string()
+    } else if remaining == 0 {
+        format!(
+            "Looked up {} game(s), resolved {resolved}. Every game has a name now.",
+            batch.len()
+        )
+    } else {
+        let mut summary = format!(
+            "Looked up {} game(s), resolved {resolved}. {remaining} still without a name.",
+            batch.len()
+        );
+        if waiting > 0 {
+            summary.push_str(&format!(" {waiting} more to try on the next run."));
+        }
+        if !unsupported.is_empty() {
+            summary.push_str(&format!(
+                " {} of those are ids no public store answers for.",
+                unsupported.len()
+            ));
+        }
+        summary
+    };
+
     Ok(json!({
-        "summary": match pending.len() {
-            0 => "Every game already has a name.".to_string(),
-            n => format!("Looked up {n} game(s), resolved {resolved}."),
-        },
-        "attempted": pending.len(),
+        "summary": summary,
+        "attempted": batch.len(),
         "resolved": resolved,
+        "unnamed": unnamed.len(),
+        "remaining": remaining,
+        "waiting": waiting,
+        "unsupported": unsupported.len(),
     }))
 }
 
@@ -441,6 +481,122 @@ pub async fn database_bytes(state: &AppState) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::TestServer;
+
+    /// A game the server holds something for, in the table that something
+    /// arrived in. Every shop here is one with no public lookup, so the job
+    /// counts the game without making a network call.
+    async fn a_game_from(server: &TestServer, table: &str, shop: &str, object_id: &str) {
+        let now = Utc::now().to_rfc3339();
+        let sql = match table {
+            "game_achievements" => format!(
+                "INSERT INTO game_achievements (user_id, remote_game_id, shop, object_id, updated_at)
+                 VALUES ('alice', '{object_id}', '{shop}', '{object_id}', '{now}')"
+            ),
+            "souvenirs" => format!(
+                "INSERT INTO souvenirs
+                   (id, user_id, client_id, shop, object_id, image_key, captured_at,
+                    created_at, updated_at)
+                 VALUES ('s-{object_id}', 'alice', 'c-{object_id}', '{shop}', '{object_id}',
+                         'k-{object_id}', 0, '{now}', '{now}')"
+            ),
+            "emulation_saves" => format!(
+                "INSERT INTO emulation_saves
+                   (id, user_id, platform, emulator, save_identity, shop, object_id,
+                    created_at, updated_at)
+                 VALUES ('e-{object_id}', 'alice', 'ps2', 'pcsx2', 'slot1', '{shop}',
+                         '{object_id}', '{now}', '{now}')"
+            ),
+            "playtime_daily" => format!(
+                "INSERT INTO playtime_daily (user_id, day, shop, object_id, seconds, updated_at)
+                 VALUES ('alice', '2026-01-01', '{shop}', '{object_id}', 60, '{now}')"
+            ),
+            other => panic!("no seed for {other}"),
+        };
+
+        server.execute(&sql).await;
+    }
+
+    /// What the metadata cache already holds for a game.
+    async fn a_cached_name(server: &TestServer, shop: &str, object_id: &str, name: &str) {
+        server
+            .execute(&format!(
+                "INSERT INTO game_metadata (shop, object_id, name, fetched_at)
+                 VALUES ('{shop}', '{object_id}', '{name}', '{}')",
+                Utc::now().to_rfc3339()
+            ))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn the_refresh_counts_games_from_every_table_they_arrive_in() {
+        let server = TestServer::start().await;
+
+        /* None of these reach the games list through a cloud save, and the
+        job used to look no further than the tables that do. */
+        a_game_from(&server, "game_achievements", "epic", "achievements-only").await;
+        a_game_from(&server, "souvenirs", "epic", "souvenirs-only").await;
+        a_game_from(&server, "emulation_saves", "epic", "emulation-only").await;
+
+        let report = refresh_metadata(&server.state).await.expect("the refresh");
+
+        assert_eq!(report["unnamed"], 3);
+        assert_eq!(report["unsupported"], 3);
+        assert_ne!(
+            report["summary"].as_str().expect("a summary"),
+            "Every game already has a name.",
+            "three games have no name"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blank_cached_name_is_no_name() {
+        let server = TestServer::start().await;
+        a_game_from(&server, "playtime_daily", "epic", "blank").await;
+        a_cached_name(&server, "epic", "blank", "   ").await;
+
+        let report = refresh_metadata(&server.state).await.expect("the refresh");
+
+        /* The panel falls back to the object id for a blank name exactly as
+        it does for a missing one, so the job has to agree with it. */
+        assert_eq!(report["unnamed"], 1);
+    }
+
+    #[tokio::test]
+    async fn a_named_game_is_left_alone() {
+        let server = TestServer::start().await;
+        a_game_from(&server, "playtime_daily", "epic", "named").await;
+        a_cached_name(&server, "epic", "named", "A Game").await;
+
+        let report = refresh_metadata(&server.state).await.expect("the refresh");
+
+        assert_eq!(report["unnamed"], 0);
+        assert_eq!(report["attempted"], 0);
+        assert_eq!(report["summary"], "Every game already has a name.");
+    }
+
+    #[tokio::test]
+    async fn ids_no_store_can_answer_for_are_reported_not_retried() {
+        let server = TestServer::start().await;
+        a_game_from(&server, "playtime_daily", "gog", "1234").await;
+        a_game_from(&server, "playtime_daily", "steam", "not-an-app-id").await;
+
+        let report = refresh_metadata(&server.state).await.expect("the refresh");
+
+        /* Neither is a lookup this server can make, so neither costs a slot
+        in the batch — and the summary says so instead of implying the next
+        run might do better. */
+        assert_eq!(report["attempted"], 0);
+        assert_eq!(report["unsupported"], 2);
+        assert!(
+            report["summary"]
+                .as_str()
+                .expect("a summary")
+                .contains("no public store answers for"),
+            "{}",
+            report["summary"]
+        );
+    }
 
     #[test]
     fn every_job_has_a_distinct_id() {

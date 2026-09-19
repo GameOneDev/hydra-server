@@ -104,10 +104,15 @@ export function shortHash(hash = "") {
   return hash.slice(0, 10);
 }
 
+/** Whether the store ever answered with a name for this game. */
+export function isGameNamed(game) {
+  return Boolean(game?.name?.trim());
+}
+
 /** Game display name, falling back to the raw id the launcher sent. */
 export function gameName(game) {
   if (!game) return "Unknown game";
-  return game.name || game.objectId || "Unknown game";
+  return (isGameNamed(game) && game.name.trim()) || game.objectId || "Unknown game";
 }
 
 export function gameSub(game) {
