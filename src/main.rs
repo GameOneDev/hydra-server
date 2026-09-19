@@ -22,6 +22,7 @@ mod metrics;
 mod playtime;
 mod portal;
 mod presence;
+mod query;
 mod ratelimit;
 mod schedule;
 mod settings;
