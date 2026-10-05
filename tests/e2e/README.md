@@ -44,6 +44,11 @@ so run it by hand when touching `src/cloud_saves.rs` or `src/storage.rs`.
 Start from an empty `HYDRA_SERVER_DATA_DIR`: the first test uploads at
 `baseVersion: 0`, which only holds when the game has no snapshot yet.
 
+`cloud-save-state-metadata.test.ts` runs the same way, against the same server
+(it uses its own game and user). It checks that an emulator save state's
+`stateMetadata` survives the round trip — needed from launcher 4.1.6, whose
+validators reject any key they don't expect on the files they read back.
+
 ## What it covers
 
 - `prepare-snapshot` responses pass `validatePrepareResponse`, including the

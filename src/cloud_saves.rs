@@ -66,6 +66,40 @@ fn checksum_header(hash: &str) -> ApiResult<String> {
 // Wire types
 // ---------------------------------------------------------------------------
 
+/// What produced an emulator save state (launcher 4.1.6+), so a restore can
+/// put it back where it loads. Only on state files; absent everywhere else,
+/// and absent — not null — on the wire, since the launcher checks the exact
+/// key set of every file it reads back.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StateMetadata {
+    pub emulator_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_platform: Option<String>,
+}
+
+/// The launcher's own rule for a state tag: a 1–255 character emulator id
+/// and, where present, 1–255 character core, version and platform. Anything
+/// else would be stored only to be rejected by the launcher on restore.
+/// Lengths count UTF-16 units, as JavaScript's `length` does.
+fn valid_state_metadata(metadata: &StateMetadata) -> bool {
+    let within = |value: &str| (1..=255).contains(&value.encode_utf16().count());
+
+    within(&metadata.emulator_id)
+        && [
+            &metadata.core_id,
+            &metadata.version,
+            &metadata.host_platform,
+        ]
+        .into_iter()
+        .flatten()
+        .all(|value| within(value))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotFileInput {
@@ -75,6 +109,8 @@ pub struct SnapshotFileInput {
     pub hash: String,
     pub size_bytes: i64,
     pub last_modified_at: String,
+    #[serde(default)]
+    pub state_metadata: Option<StateMetadata>,
 }
 
 #[derive(Deserialize)]
@@ -208,6 +244,8 @@ pub struct ManifestFile {
     pub hash: String,
     pub size_bytes: i64,
     pub last_modified_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_metadata: Option<StateMetadata>,
 }
 
 #[derive(Serialize)]
@@ -219,8 +257,8 @@ pub struct RestoreManifestResponse {
     pub files: Vec<ManifestFile>,
 }
 
-/// Exactly the manifest file plus a download URL — the launcher asserts the
-/// object has precisely seven keys.
+/// Exactly the manifest file plus a download URL — the launcher rejects any
+/// key it doesn't expect, so `stateMetadata` appears only on state files.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadUrlFile {
@@ -230,6 +268,8 @@ pub struct DownloadUrlFile {
     pub hash: String,
     pub size_bytes: i64,
     pub last_modified_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_metadata: Option<StateMetadata>,
     pub download_url: String,
 }
 
@@ -285,6 +325,13 @@ pub async fn prepare_snapshot(
         }
         if file.raw_path.is_empty() || file.relative_path.is_empty() {
             return Err(ApiError::bad_request("invalid file path"));
+        }
+        if file
+            .state_metadata
+            .as_ref()
+            .is_some_and(|metadata| !valid_state_metadata(metadata))
+        {
+            return Err(ApiError::bad_request("invalid state metadata"));
         }
         if !seen.insert((
             file.variant_id.as_str(),
@@ -411,8 +458,8 @@ pub async fn prepare_snapshot(
         sqlx::query(
             "INSERT INTO cloud_save_snapshot_files
                (snapshot_id, variant_id, raw_path, relative_path, hash,
-                size_in_bytes, last_modified_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+                size_in_bytes, last_modified_at, state_metadata)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&snapshot_id)
         .bind(&file.variant_id)
@@ -421,6 +468,11 @@ pub async fn prepare_snapshot(
         .bind(&file.hash)
         .bind(file.size_bytes)
         .bind(&file.last_modified_at)
+        .bind(
+            file.state_metadata
+                .as_ref()
+                .and_then(|metadata| serde_json::to_string(metadata).ok()),
+        )
         .execute(&mut *tx)
         .await?;
     }
@@ -1049,6 +1101,7 @@ pub async fn snapshot_download_urls(
                     hash: file.hash,
                     size_bytes: file.size_bytes,
                     last_modified_at: file.last_modified_at,
+                    state_metadata: file.state_metadata,
                     download_url: url,
                 }
             })
@@ -1078,7 +1131,8 @@ async fn fetch_committed(
 
 async fn fetch_manifest_files(state: &AppState, snapshot_id: &str) -> ApiResult<Vec<ManifestFile>> {
     let rows = sqlx::query(
-        "SELECT variant_id, raw_path, relative_path, hash, size_in_bytes, last_modified_at
+        "SELECT variant_id, raw_path, relative_path, hash, size_in_bytes, last_modified_at,
+                state_metadata
          FROM cloud_save_snapshot_files WHERE snapshot_id = ?",
     )
     .bind(snapshot_id)
@@ -1094,6 +1148,11 @@ async fn fetch_manifest_files(state: &AppState, snapshot_id: &str) -> ApiResult<
             hash: row.get("hash"),
             size_bytes: row.get("size_in_bytes"),
             last_modified_at: row.get("last_modified_at"),
+            /* Only ever written from a validated tag, so a row that won't
+            parse is corruption — dropped rather than failing the restore. */
+            state_metadata: row
+                .get::<Option<String>, _>("state_metadata")
+                .and_then(|json| serde_json::from_str(&json).ok()),
         })
         .collect())
 }
@@ -1370,6 +1429,7 @@ mod tests {
             hash: "b".repeat(64),
             size_bytes: 14,
             last_modified_at: "2026-08-01T10:00:00Z".into(),
+            state_metadata: None,
             download_url: "http://example.test/storage/token".into(),
         })
         .unwrap();
@@ -1387,6 +1447,50 @@ mod tests {
                 "variantId"
             ]
         );
+    }
+
+    /// A state file gains exactly one key, and its tag carries only the
+    /// fields the emulator set — the launcher reads both back strictly.
+    #[test]
+    fn a_state_file_carries_its_tag_and_nothing_else() {
+        let value = serde_json::to_value(DownloadUrlFile {
+            variant_id: "a".repeat(64),
+            raw_path: "<emulator>/retroarch-v2/states".into(),
+            relative_path: "game.state1".into(),
+            hash: "b".repeat(64),
+            size_bytes: 14,
+            last_modified_at: "2026-08-01T10:00:00Z".into(),
+            state_metadata: Some(StateMetadata {
+                emulator_id: "retroarch".into(),
+                core_id: Some("snes9x".into()),
+                version: None,
+                host_platform: None,
+            }),
+            download_url: "http://example.test/storage/token".into(),
+        })
+        .unwrap();
+
+        assert_eq!(value.as_object().unwrap().len(), 8);
+        assert_eq!(
+            value["stateMetadata"],
+            json!({ "emulatorId": "retroarch", "coreId": "snes9x" })
+        );
+    }
+
+    #[test]
+    fn a_state_tag_follows_the_launchers_length_rules() {
+        let tag = |emulator_id: &str, core_id: Option<&str>| StateMetadata {
+            emulator_id: emulator_id.into(),
+            core_id: core_id.map(Into::into),
+            version: None,
+            host_platform: None,
+        };
+
+        assert!(valid_state_metadata(&tag("retroarch", None)));
+        assert!(valid_state_metadata(&tag("rpcs3", Some("0.0.34"))));
+        assert!(!valid_state_metadata(&tag("", None)));
+        assert!(!valid_state_metadata(&tag("retroarch", Some(""))));
+        assert!(!valid_state_metadata(&tag(&"x".repeat(256), None)));
     }
 
     #[test]

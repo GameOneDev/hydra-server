@@ -434,7 +434,7 @@ Implements the endpoints the launcher routes to a self-hosted cloud server:
 ### Cloud Save V2
 
 Launcher 4.1.0 replaced the tarball-per-backup flow with per-file snapshots for
-Steam games. A save is a manifest of files, each content-addressed by SHA-256:
+Steam games, and 4.1.6 extended them to RetroArch and RPCS3 games. A save is a manifest of files, each content-addressed by SHA-256:
 
 - `POST /profile/cloud-saves/prepare-snapshot` — registers the manifest and
   returns a presigned PUT for each blob the server doesn't already hold
@@ -465,6 +465,12 @@ Notable behaviour:
   can never hold the wrong bytes.
 - **Garbage collection.** Blobs are deleted once no manifest references them;
   abandoned uploads are swept after 24 hours.
+- **Emulator save states.** Launcher 4.1.6 also syncs RetroArch and RPCS3
+  saves through V2, and tags each save state with what produced it
+  (`stateMetadata`: emulator, core, version, host platform) so a restore puts
+  it back where it loads. The tag is stored with the file and returned on the
+  manifest and download URLs; a malformed one is refused at prepare. A server
+  older than 4.1.6 drops it.
 
 The legacy artifact endpoints stay in place — the launcher still uses them for
 non-Steam games and for older clients.
