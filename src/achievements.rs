@@ -339,6 +339,18 @@ fn recent_game(shop: String, object_id: String, achievements: &[Value]) -> Optio
     ))
 }
 
+/// GET /profile/achievements/combined — official Hydra's linked Steam and
+/// Epic view, new in launcher 4.2.0. It is built from the official catalogue's
+/// game grouping, which this server doesn't have.
+///
+/// Routed on its own so it isn't read as the profile of a user called
+/// "combined": that answered 200 with no `achievements` list, and a launcher
+/// that sent it here crashed on it. On a 404 the launcher shows the game's own
+/// list instead.
+pub async fn combined_unavailable() -> ApiError {
+    ApiError::not_found("combined achievements are served by official Hydra")
+}
+
 /// GET /profile/achievements/{userId} — recently unlocked achievements.
 ///
 /// The official API only compares achievements for subscribers, so profiles
@@ -420,6 +432,14 @@ mod tests {
     use crate::testing::TestServer;
 
     const TOKEN: &str = "alices-access-token";
+
+    /// Launcher 4.2.0's linked Steam/Epic view isn't served here, and must not
+    /// be read as the profile of a user called "combined".
+    #[tokio::test]
+    async fn the_combined_view_is_left_to_official_hydra() {
+        let error = combined_unavailable().await;
+        assert_eq!(error.status, axum::http::StatusCode::NOT_FOUND);
+    }
 
     /// A token the auth extractor accepts. Seeding the cache is what the
     /// first verified request would leave behind, and keeps the test off the

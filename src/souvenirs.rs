@@ -34,6 +34,9 @@ use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU64;
 use uuid::Uuid;
 
+/// The code the launcher reads as "keep the achievements, drop the picture".
+const SOUVENIR_LIMIT_REACHED: &str = "achievements/souvenir-limit-reached";
+
 const MAX_SOUVENIR_BYTES: i64 = 20 * 1024 * 1024;
 
 const ALLOWED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp"];
@@ -195,7 +198,18 @@ pub async fn authorize(
     /* Against the declared length: the file doesn't exist yet, and the real
     size is recorded once the upload lands — which is also where the bytes
     are held to this. */
-    storage::check_quota(state, user_id, length).await?;
+    /* A full account answers with the launcher's own souvenir-limit code, so
+    it files the achievements without the picture straight away rather than
+    counting the refusal toward its retry cap. */
+    storage::check_quota(state, user_id, length)
+        .await
+        .map_err(|error| {
+            if error.status == StatusCode::PAYLOAD_TOO_LARGE {
+                error.with_extra(serde_json::json!({ "code": SOUVENIR_LIMIT_REACHED }))
+            } else {
+                error
+            }
+        })?;
 
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
@@ -1123,6 +1137,41 @@ pub async fn sweep_abandoned(state: &AppState, cutoff: &str) -> ApiResult<usize>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A full account gets the code the launcher reads as "file the
+    /// achievements without the picture", not a refusal it keeps retrying.
+    #[tokio::test]
+    async fn a_full_account_is_told_to_drop_the_picture() {
+        let server = crate::testing::TestServer::start().await;
+        server
+            .limits(
+                "alice",
+                crate::limits::Overrides {
+                    max_bytes_per_user: Some(10),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let error = authorize(
+            &server.state,
+            "alice",
+            AuthorizeRequest {
+                image_ext: "jpg",
+                image_length: 1_000,
+                client_id: Some("capture-1"),
+                remote_game_id: Some("game-1"),
+            },
+        )
+        .await
+        .expect_err("over quota");
+
+        assert_eq!(error.status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            error.extra.expect("a code")["code"],
+            "achievements/souvenir-limit-reached"
+        );
+    }
 
     #[test]
     fn image_keys_are_scoped_to_their_owner() {

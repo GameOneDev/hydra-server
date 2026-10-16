@@ -400,6 +400,10 @@ Implements the endpoints the launcher routes to a self-hosted cloud server:
   `?steamLibrary=true` for the Steam library tab), so the number follows the
   tab; null when this server has no achievements for that user, so nothing
   renders a misleading zero
+- `GET /profile/achievements/combined` — launcher 4.2.0's linked Steam/Epic
+  view, built from the official catalogue. Always `404` here: it belongs to
+  the official API, and the route exists so it isn't read as a user called
+  "combined"
 - `GET /profile/achievements/{userId}` — recently unlocked achievements for a
   profile, so members show recent activity the official API only compares for
   subscribers. Names and unlock times only; the launcher joins the public
@@ -434,7 +438,8 @@ Implements the endpoints the launcher routes to a self-hosted cloud server:
 ### Cloud Save V2
 
 Launcher 4.1.0 replaced the tarball-per-backup flow with per-file snapshots for
-Steam games, and 4.1.6 extended them to RetroArch and RPCS3 games. A save is a manifest of files, each content-addressed by SHA-256:
+Steam games, 4.1.6 extended them to RetroArch and RPCS3 games, and 4.2.0 to
+Epic Games. A save is a manifest of files, each content-addressed by SHA-256:
 
 - `POST /profile/cloud-saves/prepare-snapshot` — registers the manifest and
   returns a presigned PUT for each blob the server doesn't already hold
@@ -465,6 +470,16 @@ Notable behaviour:
   can never hold the wrong bytes.
 - **Garbage collection.** Blobs are deleted once no manifest references them;
   abandoned uploads are swept after 24 hours.
+- **Epic Games (4.2.0).** Epic games sync as `shop=epic` with a
+  `namespace:catalogItemId` object id, one opaque folder per Epic account.
+  The server advertises `cloud-saves-v2-epic`, and the launcher keeps Epic V2
+  off on servers that don't — they refuse the shop. Epic's own cloud saves
+  (through Legendary) and Epic achievements never come here; they go to Epic
+  and the official API.
+- **Re-preparing a commit.** A commit whose pending snapshot was swept, or
+  whose blobs never all arrived, answers with
+  `game/cloud-save-pending-snapshot-not-found` or `…-incomplete` in `code`,
+  which is what makes the launcher prepare the upload again.
 - **Emulator save states.** Launcher 4.1.6 also syncs RetroArch and RPCS3
   saves through V2, and tags each save state with what produced it
   (`stateMetadata`: emulator, core, version, host platform) so a restore puts
@@ -495,7 +510,11 @@ same key (`status: "claimed"` once the bytes are here), and re-syncing returns
 the same souvenir id. Failures answer with the codes the launcher's retry policy
 knows — `achievements/souvenir-conflict` plus a `reason`, or
 `achievements/souvenir-upload-incomplete` — so a souvenir that only needs
-another attempt gets one instead of being dropped.
+another attempt gets one instead of being dropped. A full account is refused
+with `achievements/souvenir-limit-reached`, which the launcher reads as "sync
+the achievements without the picture": since 4.2.0 it gives up on a souvenir
+after 20 refusals it doesn't recognise, and a quota refusal is no reason to
+spend them.
 
 Notable behaviour:
 
@@ -549,7 +568,7 @@ for someone who already has it.
 `GET /capabilities` (unauthenticated) reports what this build supports:
 
 ```json
-{ "name": "hydra-server", "version": "4.1.3", "features": ["cloud-saves-v2", "souvenirs", "..."] }
+{ "name": "hydra-server", "version": "4.2.0", "features": ["cloud-saves-v2", "cloud-saves-v2-epic", "souvenirs", "..."] }
 ```
 
 The launcher checks this before enabling a feature whose endpoints might not

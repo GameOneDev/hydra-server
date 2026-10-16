@@ -29,7 +29,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
@@ -38,14 +38,20 @@ use uuid::Uuid;
 /// upload that dies midway would otherwise pin its blobs forever.
 const PENDING_SNAPSHOT_TTL_SECONDS: i64 = 24 * 60 * 60;
 
+/// Codes a failed commit carries so the launcher prepares the snapshot again
+/// instead of giving up — what it does after the sweep above, or when a blob
+/// upload never landed.
+const PENDING_SNAPSHOT_NOT_FOUND: &str = "game/cloud-save-pending-snapshot-not-found";
+const PENDING_SNAPSHOT_INCOMPLETE: &str = "game/cloud-save-pending-snapshot-incomplete";
+
 fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// The launcher only ever syncs these two shops, and its restore-manifest
-/// validator rejects anything else outright.
+/// The shops the launcher syncs through Cloud Save V2 — Epic since 4.2.0 —
+/// and the only ones its restore-manifest validator accepts back.
 fn valid_shop(shop: &str) -> bool {
-    matches!(shop, "steam" | "launchbox")
+    matches!(shop, "steam" | "epic" | "launchbox")
 }
 
 /// A version a commit replaced and the server kept. No sync reads one, which
@@ -541,7 +547,10 @@ pub async fn commit_snapshot(
     .bind(user_id)
     .fetch_optional(&state.pool)
     .await?
-    .ok_or_else(|| ApiError::not_found("pending snapshot not found"))?;
+    .ok_or_else(|| {
+        ApiError::not_found("pending snapshot not found")
+            .with_extra(json!({ "code": PENDING_SNAPSHOT_NOT_FOUND }))
+    })?;
 
     let shop: String = snapshot.get("shop");
     let object_id: String = snapshot.get("object_id");
@@ -564,14 +573,16 @@ pub async fn commit_snapshot(
         let key = storage::cloud_save_blob_key(user_id, &hash);
         let path = storage::storage_path(&state, &key);
 
-        let metadata = tokio::fs::metadata(&path)
-            .await
-            .map_err(|_| ApiError::bad_request("a snapshot file was never uploaded"))?;
+        let metadata = tokio::fs::metadata(&path).await.map_err(|_| {
+            ApiError::bad_request("a snapshot file was never uploaded")
+                .with_extra(json!({ "code": PENDING_SNAPSHOT_INCOMPLETE }))
+        })?;
 
         if metadata.len() as i64 != expected {
-            return Err(ApiError::bad_request(
-                "an uploaded snapshot file has an unexpected size",
-            ));
+            return Err(
+                ApiError::bad_request("an uploaded snapshot file has an unexpected size")
+                    .with_extra(json!({ "code": PENDING_SNAPSHOT_INCOMPLETE })),
+            );
         }
 
         /* The bytes were hash-verified during upload, so registering the blob
@@ -1532,8 +1543,9 @@ mod tests {
     }
 
     #[test]
-    fn only_steam_and_launchbox_are_accepted() {
+    fn only_the_shops_the_launcher_syncs_are_accepted() {
         assert!(valid_shop("steam"));
+        assert!(valid_shop("epic"));
         assert!(valid_shop("launchbox"));
         assert!(!valid_shop("custom"));
         assert!(!valid_shop(""));
@@ -1741,6 +1753,157 @@ mod tests {
         assert_eq!(
             storage::used_bytes(&server.state, "alice").await.unwrap(),
             0
+        );
+    }
+
+    /// What launcher 4.2.0 uploads for an Epic game: a `namespace:catalogItemId`
+    /// object id, one opaque folder per Epic account, and a Ludusavi path
+    /// ending in that account's folder.
+    fn an_epic_save(hash: &str) -> PrepareSnapshotRequest {
+        PrepareSnapshotRequest {
+            shop: "epic".to_string(),
+            object_id: "fn:4fe75bbc5a674f4f9b356b5c90567da5".to_string(),
+            platform: Some("win32".to_string()),
+            hostname: Some("desk".to_string()),
+            snapshot_hash: "c".repeat(64),
+            base_version: 0,
+            custom_path_raw_paths: vec![],
+            variants: vec![json!({
+                "id": "d".repeat(64),
+                "kind": "opaque-folder",
+                "concreteFolderId": "0123456789abcdef0123456789abcdef",
+            })],
+            files: vec![SnapshotFileInput {
+                variant_id: "d".repeat(64),
+                raw_path: "<winLocalAppData>/FortniteGame/Saved/<storeUserId>".to_string(),
+                relative_path: "ClientSettings.Sav".to_string(),
+                hash: hash.to_string(),
+                size_bytes: 3,
+                last_modified_at: "2026-10-01T00:00:00Z".to_string(),
+                state_metadata: None,
+            }],
+        }
+    }
+
+    fn the_epic_game() -> GameQuery {
+        GameQuery {
+            shop: "epic".to_string(),
+            object_id: "fn:4fe75bbc5a674f4f9b356b5c90567da5".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_epic_save_round_trips() {
+        let server = TestServer::start().await;
+        let hash = "e".repeat(64);
+
+        let prepared = prepare_snapshot(
+            State(server.state.clone()),
+            server.user("alice"),
+            Json(an_epic_save(&hash)),
+        )
+        .await
+        .expect("an Epic game is accepted")
+        .0;
+
+        let path =
+            storage::storage_path(&server.state, &storage::cloud_save_blob_key("alice", &hash));
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("the blob dir");
+        std::fs::write(&path, b"abc").expect("the blob");
+
+        let committed = commit_snapshot(
+            State(server.state.clone()),
+            server.user("alice"),
+            Json(CommitSnapshotRequest {
+                pending_snapshot_id: prepared.pending_snapshot_id,
+            }),
+        )
+        .await
+        .expect("the commit")
+        .0;
+
+        let listed = list_snapshots(
+            State(server.state.clone()),
+            server.user("alice"),
+            Query(the_epic_game()),
+        )
+        .await
+        .expect("the listing")
+        .0;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, committed.snapshot_id);
+
+        let manifest = restore_manifest(
+            State(server.state.clone()),
+            server.user("alice"),
+            Query(SnapshotQuery {
+                snapshot_id: committed.snapshot_id,
+            }),
+        )
+        .await
+        .expect("the manifest")
+        .0;
+        assert_eq!(manifest.snapshot.shop, "epic");
+        assert_eq!(manifest.variants[0]["kind"], "opaque-folder");
+        assert_eq!(
+            manifest.files[0].raw_path,
+            "<winLocalAppData>/FortniteGame/Saved/<storeUserId>"
+        );
+
+        delete_snapshots(
+            State(server.state.clone()),
+            server.user("alice"),
+            Query(the_epic_game()),
+        )
+        .await
+        .expect("an Epic save can be deleted");
+    }
+
+    /// The launcher prepares again only when a failed commit carries one of
+    /// these codes — after the pending sweep, or when a blob never arrived.
+    #[tokio::test]
+    async fn a_failed_commit_tells_the_launcher_to_prepare_again() {
+        let server = TestServer::start().await;
+
+        let Err(missing) = commit_snapshot(
+            State(server.state.clone()),
+            server.user("alice"),
+            Json(CommitSnapshotRequest {
+                pending_snapshot_id: "swept".to_string(),
+            }),
+        )
+        .await
+        else {
+            panic!("no such pending snapshot");
+        };
+        assert_eq!(
+            missing.extra.expect("a code")["code"],
+            "game/cloud-save-pending-snapshot-not-found"
+        );
+
+        let prepared = prepare_snapshot(
+            State(server.state.clone()),
+            server.user("alice"),
+            Json(an_epic_save(&"f".repeat(64))),
+        )
+        .await
+        .expect("the prepare")
+        .0;
+
+        let Err(incomplete) = commit_snapshot(
+            State(server.state.clone()),
+            server.user("alice"),
+            Json(CommitSnapshotRequest {
+                pending_snapshot_id: prepared.pending_snapshot_id,
+            }),
+        )
+        .await
+        else {
+            panic!("the blob never arrived");
+        };
+        assert_eq!(
+            incomplete.extra.expect("a code")["code"],
+            "game/cloud-save-pending-snapshot-incomplete"
         );
     }
 }
