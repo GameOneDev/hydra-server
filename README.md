@@ -153,8 +153,9 @@ per-game limit) or deleted.
 
 **Games** — the same data pivoted by game: who plays it, what they store, how
 long they have played, which custom art they picked. Names and covers resolve
-from the Steam store and cache; a game whose lookup failed can be retried from
-its own page.
+from the Steam store for Steam games and from the official API's public
+catalogue for Epic games, and are cached; a game whose lookup failed can be
+retried from its own page.
 
 **Storage** — usage measured from disk rather than the database, per area,
 next to what the database expects, so drift is visible. The integrity scan
