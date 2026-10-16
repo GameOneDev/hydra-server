@@ -142,6 +142,9 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
     .fetch_one(&state.pool)
     .await?;
     let souvenir_reports: i64 = scalar(&state, "SELECT COUNT(*) FROM souvenir_reports").await?;
+    /* Pictures with a report nobody has acted on yet. Handled ones stay on
+    the Reports screen, out of the alert. */
+    let open_reports = super::reports::open_total(&state).await?;
 
     let achievement_games: i64 = scalar(&state, "SELECT COUNT(*) FROM game_achievements").await?;
     let achievements_unlocked: i64 = scalar(
@@ -277,12 +280,12 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
             "action": { "label": "Run the sweep", "route": "#/maintenance" },
         }));
     }
-    if souvenir_reports > 0 {
+    if open_reports > 0 {
         alerts.push(json!({
             "level": "warning",
-            "title": format!("{souvenir_reports} souvenir(s) reported by players"),
-            "detail": "Someone flagged a screenshot on a profile. The report says who, why and which picture.",
-            "action": { "label": "Read the reports", "route": "#/events?kind=souvenir.reported" },
+            "title": format!("{open_reports} reported souvenir(s) waiting for a decision"),
+            "detail": "Players flagged a screenshot on a profile. Look at the picture and the reasons, then dismiss the reports, hide the picture or delete it.",
+            "action": { "label": "Review reports", "route": "#/reports" },
         }));
     }
     if missing_blobs > 0 {
@@ -362,6 +365,7 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
             "total": souvenirs,
             "stuck": stuck_souvenirs,
             "reports": souvenir_reports,
+            "openReports": open_reports,
             "bytes": souvenir_bytes,
         },
         "library": { "games": games, "playtimeSeconds": playtime_seconds, "downloadSources": download_sources },

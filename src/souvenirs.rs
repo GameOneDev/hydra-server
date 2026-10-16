@@ -1042,6 +1042,27 @@ pub async fn delete(
 /// Shared with the portal, so ownership is re-checked here rather than at
 /// either call site. Returns the bytes freed.
 pub async fn delete_owned(state: &AppState, user_id: &str, souvenir_id: &str) -> ApiResult<i64> {
+    let freed = remove(state, user_id, souvenir_id).await?;
+
+    crate::events::record(
+        state,
+        Event::sync(
+            "souvenir.deleted",
+            user_id,
+            "Deleted an achievement souvenir",
+        )
+        .detail(json!({ "souvenirId": souvenir_id }))
+        .size(freed),
+    )
+    .await;
+
+    Ok(freed)
+}
+
+/// Deletes one of `user_id`'s souvenirs and its picture, recording nothing:
+/// the owner and an operator acting on a report log it differently. Returns
+/// the bytes freed.
+pub async fn remove(state: &AppState, user_id: &str, souvenir_id: &str) -> ApiResult<i64> {
     let row =
         sqlx::query("SELECT image_key, size_in_bytes FROM souvenirs WHERE id = ? AND user_id = ?")
             .bind(souvenir_id)
@@ -1059,21 +1080,7 @@ pub async fn delete_owned(state: &AppState, user_id: &str, souvenir_id: &str) ->
     let key: String = row.get("image_key");
     storage::delete_object(state, &key).await;
 
-    let freed: i64 = row.get("size_in_bytes");
-
-    crate::events::record(
-        state,
-        Event::sync(
-            "souvenir.deleted",
-            user_id,
-            "Deleted an achievement souvenir",
-        )
-        .detail(json!({ "souvenirId": souvenir_id }))
-        .size(freed),
-    )
-    .await;
-
-    Ok(freed)
+    Ok(row.get("size_in_bytes"))
 }
 
 // ---------------------------------------------------------------------------

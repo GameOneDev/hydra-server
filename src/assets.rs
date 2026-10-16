@@ -49,6 +49,7 @@ const ASSETS: &[(&str, &str)] = assets![
     "admin/js/views/user.js",
     "admin/js/views/saves.js",
     "admin/js/views/games.js",
+    "admin/js/views/reports.js",
     "admin/js/views/storage.js",
     "admin/js/views/maintenance.js",
     "admin/js/views/schedule.js",

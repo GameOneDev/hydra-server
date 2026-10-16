@@ -112,7 +112,7 @@ overridden for a single account on that user's page in the panel — see
 ### Admin panel
 
 Open `https://your-server/admin` and sign in with `HYDRA_ADMIN_PASSWORD`. The
-panel is a full operations console for the server, in ten screens.
+panel is a full operations console for the server, in eleven screens.
 
 **Overview** — headline totals (users, storage, cloud saves, backups), a
 30-day activity chart, a live feed of what the server has been doing, the
@@ -156,6 +156,17 @@ long they have played, which custom art they picked. Names and covers resolve
 from the Steam store for Steam games and from the official API's public
 catalogue for Epic games, and are cached; a game whose lookup failed can be
 retried from its own page.
+
+**Reports** — souvenirs players reported, one row per picture however many
+people flagged it: the owner, the game, the reasons, and every report with
+who sent it and what they wrote, next to the picture itself. Each picture
+gets one decision — **Dismiss** (nothing wrong), **Hide** (made private, off
+the owner's profile for everyone else) or **Delete** (picture and file gone,
+the owner's quota freed) — and **Reopen** undoes a decision made too fast.
+Open reports drive the Overview alert and the count beside the screen;
+handled ones move to *Resolved*. Every decision is recorded in *History*.
+Hiding is the gentle option: the owner can make the picture public again
+from the launcher, which is what *Delete* is for.
 
 **Storage** — usage measured from disk rather than the database, per area,
 next to what the database expects, so drift is visible. The integrity scan
@@ -549,9 +560,10 @@ Notable behaviour:
   it shows up instead.
 - **Likes and reports.** Any member can like another's souvenir (one POST
   toggles) or report it. A report is recorded and raised as a warning in the
-  event log with who, why and which picture — the History screen and the
-  Overview alert are how an operator sees it, and the record outlives the
-  souvenir being deleted. Reports are capped at 30 per person per hour.
+  event log with who, why and which picture, and waits on the *Reports*
+  screen until an operator dismisses it, hides the picture or deletes it.
+  The record outlives the souvenir being deleted. Reports are capped at 30
+  per person per hour.
 - **Two things this server can't know.** Achievement display names, icons and
   points come from the public catalogue, so souvenirs are served with raw
   achievement names and the launcher joins the catalogue for the rest — the same

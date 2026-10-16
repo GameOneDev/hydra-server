@@ -15,6 +15,7 @@ export const NAV = [
     { route: "/saves", label: "Saves", icon: "saves", count: (data) =>
         (data?.cloudSaves?.committed ?? 0) + (data?.backups?.total ?? 0) + (data?.emulationSaves?.total ?? 0) },
     { route: "/games", label: "Games", icon: "games", count: (data) => data?.library?.games },
+    { route: "/reports", label: "Reports", icon: "flag", count: (data) => data?.souvenirs?.openReports || null },
     { route: "/events", label: "History", icon: "clock" },
   ] },
   { group: "Operate", items: [

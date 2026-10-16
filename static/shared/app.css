@@ -589,6 +589,47 @@ table.sub td { padding: 7px 14px; border-top: 1px solid var(--border); }
 
 .cover.lg { width: 116px; height: 54px; }
 
+/* A reported souvenir: big enough to judge at a glance, full size a click
+   away. */
+.report-shot {
+  display: block;
+  width: 72px;
+  height: 40px;
+  border-radius: 5px;
+  object-fit: cover;
+  background: var(--surface-3);
+}
+.report-shot.lg { width: 320px; height: 180px; }
+.report-shot.missing {
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.report-detail {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 16px;
+  padding: 6px 4px 10px;
+}
+.report-entry {
+  display: grid;
+  gap: 6px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.report-entry:last-child { border-bottom: 0; }
+.report-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-2);
+}
+@media (max-width: 720px) {
+  .report-detail { grid-template-columns: 1fr; }
+  .report-shot.lg { width: 100%; height: auto; aspect-ratio: 16 / 9; }
+}
+
 /* -------------------------------------------------------------- indicators */
 
 .pill {
