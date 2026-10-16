@@ -118,6 +118,42 @@ fn parse_names(raw: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
 }
 
+/// One game's souvenir pictures, by upper-cased achievement name. Private
+/// ones only for their owner.
+pub(crate) async fn images_by_achievement(
+    state: &AppState,
+    user_id: &str,
+    shop: &str,
+    object_id: &str,
+    include_private: bool,
+) -> ApiResult<HashMap<String, String>> {
+    let mut images = sqlx::query(
+        "SELECT achievement_names, image_key, visibility FROM souvenirs
+         WHERE user_id = ? AND shop = ? AND object_id = ?
+           AND status = 'ready' AND is_uploaded = 1
+         ORDER BY captured_at ASC",
+    )
+    .bind(user_id)
+    .bind(shop)
+    .bind(object_id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    if !include_private {
+        images.retain(|row| row.get::<String, _>("visibility") == "PUBLIC");
+    }
+
+    let mut image_by_name = HashMap::new();
+    for image in &images {
+        let key: String = image.get("image_key");
+        for name in parse_names(&image.get::<String, _>("achievement_names")) {
+            image_by_name.insert(name, public_url(state, &key));
+        }
+    }
+
+    Ok(image_by_name)
+}
+
 // ---------------------------------------------------------------------------
 // Upload authorization
 // ---------------------------------------------------------------------------
@@ -752,29 +788,8 @@ pub async fn user_game_achievements(
     let achievements: Vec<Value> =
         serde_json::from_str(&row.get::<String, _>("achievements")).unwrap_or_default();
 
-    let mut images = sqlx::query(
-        "SELECT achievement_names, image_key, visibility FROM souvenirs
-         WHERE user_id = ? AND shop = ? AND object_id = ?
-           AND status = 'ready' AND is_uploaded = 1
-         ORDER BY captured_at ASC",
-    )
-    .bind(&user_id)
-    .bind(&shop)
-    .bind(&object_id)
-    .fetch_all(&state.pool)
-    .await?;
-
-    if !is_owner {
-        images.retain(|row| row.get::<String, _>("visibility") == "PUBLIC");
-    }
-
-    let mut image_by_name: HashMap<String, String> = HashMap::new();
-    for image in &images {
-        let key: String = image.get("image_key");
-        for name in parse_names(&image.get::<String, _>("achievement_names")) {
-            image_by_name.insert(name, public_url(&state, &key));
-        }
-    }
+    let image_by_name =
+        images_by_achievement(&state, &user_id, &shop, &object_id, is_owner).await?;
 
     let items: Vec<Value> = achievements
         .iter()

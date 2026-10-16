@@ -412,10 +412,12 @@ Implements the endpoints the launcher routes to a self-hosted cloud server:
   `?steamLibrary=true` for the Steam library tab), so the number follows the
   tab; null when this server has no achievements for that user, so nothing
   renders a misleading zero
-- `GET /profile/achievements/combined` — launcher 4.2.0's linked Steam/Epic
-  view, built from the official catalogue. Always `404` here: it belongs to
-  the official API, and the route exists so it isn't read as a user called
-  "combined"
+- `GET /profile/achievements/combined?shop=&objectId=&language=` — launcher
+  4.2.0's linked Steam/Epic achievement list, rebuilt here for when official
+  Hydra won't answer it (see [Combined Steam/Epic achievements](#combined-steamepic-achievements))
+- `PUT /profile/game-links` — which of the caller's Steam and Epic games are
+  the same title, as the official catalogue links them; the launcher sends
+  its whole set after every library sync
 - `GET /profile/achievements/{userId}` — recently unlocked achievements for a
   profile, so members show recent activity the official API only compares for
   subscribers. Names and unlock times only; the launcher joins the public
@@ -575,6 +577,31 @@ Souvenir images are served from `GET /images/souvenirs/…` under an unguessable
 name, like banners and custom artwork: hiding a souvenir removes it from the
 profile and from the achievement list, but does not make its URL stop working
 for someone who already has it.
+
+### Combined Steam/Epic achievements
+
+Launcher 4.2.0 shows one achievement list for a game owned on both Steam and
+Epic, built by official Hydra from its catalogue. The launcher asks official
+Hydra first and comes here only when that gave it nothing — the official view
+may be for subscribers only — so where it is available, it wins.
+
+This server rebuilds it from three things:
+
+- **Which games go together.** The official profile tells the launcher which
+  Steam app and Epic item are one title (`canonicalId`), and the launcher
+  passes that on through `PUT /profile/game-links`. A game linked to nothing
+  answers `404`, and the launcher shows its own list as before.
+- **Which achievements are the same one.** Matched by display name, ignoring
+  case and punctuation, in order: the second "Chapter Complete" on Steam pairs
+  with the second one on Epic. Official Hydra has its own mapping; this is the
+  approximation. An achievement whose stores name it differently shows as two
+  rows rather than pairing with the wrong one.
+- **Names, icons and points** from the official catalogue, fetched with the
+  caller's own access token and cached for six hours. Unlock times and
+  souvenir pictures are this server's own — Steam unlocks from the regular
+  sync, Epic ones from the launcher's Epic mirror.
+
+Advertised as `achievements-combined`.
 
 ### Capabilities
 

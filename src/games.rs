@@ -346,8 +346,10 @@ mod tests {
     async fn every_table_holding_a_game_id_is_covered_or_deliberately_not() {
         /* game_metadata is the cache itself; events are a pruned log of
         things that may no longer exist, and a hidden game is a preference
-        the panel never shows a name for. */
-        const EXCLUDED: &[&str] = &["game_metadata", "events", "hidden_games"];
+        the panel never shows a name for; a game link is the library's own
+        record of which copies go together, kept for every game the user
+        owns rather than for anything stored here. */
+        const EXCLUDED: &[&str] = &["game_metadata", "events", "hidden_games", "game_links"];
 
         let server = TestServer::start().await;
         let tables: Vec<String> = sqlx::query_scalar(
