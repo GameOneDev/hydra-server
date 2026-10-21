@@ -42,7 +42,7 @@ fn achievement_name(achievement: &Value) -> Option<&str> {
 /// The launcher's `UnlockedAchievement` calls this field `unlockTime`.
 /// `unlockedAt` is accepted too so anything already stored under the older
 /// name keeps working.
-fn unlock_time(achievement: &Value) -> Option<i64> {
+pub(crate) fn unlock_time(achievement: &Value) -> Option<i64> {
     achievement
         .get("unlockTime")
         .or_else(|| achievement.get("unlockedAt"))

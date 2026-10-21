@@ -34,11 +34,12 @@ fn validate_kind(kind: &str) -> ApiResult<()> {
 }
 
 /// Shop/object ids only ever reach the database, but keeping them short and
-/// printable stops a malformed launcher from bloating rows.
+/// printable stops a malformed launcher from bloating rows. 255 is the
+/// launcher's own cap, which Epic's `namespace:catalogItemId` ids can reach.
 fn validate_game(shop: &str, object_id: &str) -> ApiResult<()> {
     let sane = |value: &str| {
         !value.is_empty()
-            && value.len() <= 128
+            && value.len() <= 255
             && value.chars().all(|c| !c.is_control() && !c.is_whitespace())
     };
 

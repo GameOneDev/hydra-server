@@ -50,12 +50,34 @@ pub fn unresolved_name(column: &str) -> String {
 
 /// Whether this server has any way to put a name to an id.
 ///
-/// Only Steam publishes a per-id endpoint, and only for numeric app ids.
-/// Everything else keeps showing the raw shop/object id however often it is
-/// asked for, so the refresh job counts those separately instead of
-/// spending its batch re-asking questions with no answer.
+/// Steam publishes a per-id endpoint for numeric app ids. Epic games are
+/// named by the official API's public catalogue, for the
+/// `namespace:catalogItemId` ids the launcher gives them. Everything else
+/// keeps showing the raw shop/object id however often it is asked for, so the
+/// refresh job counts those separately instead of spending its batch
+/// re-asking questions with no answer.
 pub fn is_lookupable(shop: &str, object_id: &str) -> bool {
-    shop == "steam" && !object_id.is_empty() && object_id.chars().all(|c| c.is_ascii_digit())
+    match shop {
+        "steam" => !object_id.is_empty() && object_id.chars().all(|c| c.is_ascii_digit()),
+        "epic" => is_epic_object_id(object_id),
+        _ => false,
+    }
+}
+
+/// `namespace:catalogItemId`, both parts plain enough to go into a URL path
+/// as they are.
+fn is_epic_object_id(object_id: &str) -> bool {
+    let plain = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    };
+
+    object_id.len() <= 255
+        && object_id
+            .split_once(':')
+            .is_some_and(|(namespace, item)| plain(namespace) && plain(item))
 }
 
 /// Cached lookup of a game's display metadata by shop/object id.
@@ -165,7 +187,54 @@ async fn fetch(state: &AppState, shop: &str, object_id: &str) -> GameMetadata {
         return GameMetadata::default();
     }
 
-    fetch_steam(state, object_id).await
+    match shop {
+        "epic" => fetch_epic(state, object_id).await,
+        _ => fetch_steam(state, object_id).await,
+    }
+}
+
+/// Epic titles and art from the official API's public game assets — the same
+/// unauthenticated call the launcher makes for a game page.
+async fn fetch_epic(state: &AppState, object_id: &str) -> GameMetadata {
+    let base = state.config.official_api_url.trim_end_matches('/');
+    if base.is_empty() {
+        return GameMetadata::default();
+    }
+
+    let url = format!("{base}/games/epic/{object_id}/assets");
+
+    match state.http.get(&url).send().await {
+        Ok(response) if response.status().is_success() => response
+            .json::<serde_json::Value>()
+            .await
+            .map(|body| epic_metadata(&body))
+            .unwrap_or_default(),
+        Ok(response) => {
+            tracing::warn!(
+                "official API returned {} for Epic game {object_id}",
+                response.status()
+            );
+            GameMetadata::default()
+        }
+        Err(err) => {
+            tracing::warn!("Epic game lookup failed for {object_id}: {err}");
+            GameMetadata::default()
+        }
+    }
+}
+
+/// The launcher's `ShopAssets`: a title, and whichever cover-shaped image the
+/// catalogue has for the game.
+fn epic_metadata(body: &serde_json::Value) -> GameMetadata {
+    let text = |key: &str| nonblank(body.get(key)?.as_str().map(str::to_string));
+
+    GameMetadata {
+        name: text("title"),
+        cover_url: text("coverImageUrl")
+            .or_else(|| text("libraryImageUrl"))
+            .or_else(|| text("libraryHeroImageUrl"))
+            .or_else(|| text("iconUrl")),
+    }
 }
 
 async fn fetch_steam(state: &AppState, app_id: &str) -> GameMetadata {
@@ -230,12 +299,37 @@ mod tests {
     }
 
     #[test]
-    fn only_numeric_steam_ids_can_be_looked_up() {
+    fn steam_app_ids_and_epic_catalogue_ids_can_be_looked_up() {
         assert!(is_lookupable("steam", "1238810"));
         assert!(!is_lookupable("steam", ""));
         assert!(!is_lookupable("steam", "not-an-app-id"));
-        /* No other shop publishes an endpoint to ask. */
+
+        assert!(is_lookupable("epic", "fn:4fe75bbc5a674f4f9b356b5c90567da5"));
         assert!(!is_lookupable("epic", "1238810"));
+        assert!(!is_lookupable("epic", "fn:"));
+        assert!(!is_lookupable("epic", "fn:a/b"));
+        assert!(!is_lookupable("epic", "fn:a:b"));
+
+        /* No other shop publishes an endpoint to ask. */
+        assert!(!is_lookupable("launchbox", "1238810"));
+    }
+
+    #[test]
+    fn epic_assets_give_a_title_and_the_best_cover_there_is() {
+        let metadata = epic_metadata(&serde_json::json!({
+            "title": "Fortnite",
+            "coverImageUrl": null,
+            "libraryImageUrl": "https://cdn.example/portrait.jpg",
+            "iconUrl": "https://cdn.example/icon.png",
+        }));
+        assert_eq!(metadata.name.as_deref(), Some("Fortnite"));
+        assert_eq!(
+            metadata.cover_url.as_deref(),
+            Some("https://cdn.example/portrait.jpg")
+        );
+
+        let empty = epic_metadata(&serde_json::json!({ "title": "  " }));
+        assert!(empty.name.is_none() && empty.cover_url.is_none());
     }
 
     #[test]
@@ -252,8 +346,10 @@ mod tests {
     async fn every_table_holding_a_game_id_is_covered_or_deliberately_not() {
         /* game_metadata is the cache itself; events are a pruned log of
         things that may no longer exist, and a hidden game is a preference
-        the panel never shows a name for. */
-        const EXCLUDED: &[&str] = &["game_metadata", "events", "hidden_games"];
+        the panel never shows a name for; a game link is the library's own
+        record of which copies go together, kept for every game the user
+        owns rather than for anything stored here. */
+        const EXCLUDED: &[&str] = &["game_metadata", "events", "hidden_games", "game_links"];
 
         let server = TestServer::start().await;
         let tables: Vec<String> = sqlx::query_scalar(
@@ -298,8 +394,9 @@ mod tests {
         let server = TestServer::start().await;
         cached_row(&server, "", COVER).await;
 
-        /* 'epic' has no lookup, so this refresh comes back with nothing —
-        which is no reason to lose the art the panel is already showing. */
+        /* 'game' is no Epic catalogue id, so this refresh comes back with
+        nothing — which is no reason to lose the art the panel is already
+        showing. */
         let metadata = refresh(&server.state, "epic", "game").await;
 
         assert_eq!(metadata.cover_url.as_deref(), Some(COVER));

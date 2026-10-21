@@ -34,6 +34,9 @@ use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU64;
 use uuid::Uuid;
 
+/// The code the launcher reads as "keep the achievements, drop the picture".
+const SOUVENIR_LIMIT_REACHED: &str = "achievements/souvenir-limit-reached";
+
 const MAX_SOUVENIR_BYTES: i64 = 20 * 1024 * 1024;
 
 const ALLOWED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp"];
@@ -113,6 +116,42 @@ fn normalize_names(names: &[String]) -> Vec<String> {
 
 fn parse_names(raw: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
+}
+
+/// One game's souvenir pictures, by upper-cased achievement name. Private
+/// ones only for their owner.
+pub(crate) async fn images_by_achievement(
+    state: &AppState,
+    user_id: &str,
+    shop: &str,
+    object_id: &str,
+    include_private: bool,
+) -> ApiResult<HashMap<String, String>> {
+    let mut images = sqlx::query(
+        "SELECT achievement_names, image_key, visibility FROM souvenirs
+         WHERE user_id = ? AND shop = ? AND object_id = ?
+           AND status = 'ready' AND is_uploaded = 1
+         ORDER BY captured_at ASC",
+    )
+    .bind(user_id)
+    .bind(shop)
+    .bind(object_id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    if !include_private {
+        images.retain(|row| row.get::<String, _>("visibility") == "PUBLIC");
+    }
+
+    let mut image_by_name = HashMap::new();
+    for image in &images {
+        let key: String = image.get("image_key");
+        for name in parse_names(&image.get::<String, _>("achievement_names")) {
+            image_by_name.insert(name, public_url(state, &key));
+        }
+    }
+
+    Ok(image_by_name)
 }
 
 // ---------------------------------------------------------------------------
@@ -195,7 +234,18 @@ pub async fn authorize(
     /* Against the declared length: the file doesn't exist yet, and the real
     size is recorded once the upload lands — which is also where the bytes
     are held to this. */
-    storage::check_quota(state, user_id, length).await?;
+    /* A full account answers with the launcher's own souvenir-limit code, so
+    it files the achievements without the picture straight away rather than
+    counting the refusal toward its retry cap. */
+    storage::check_quota(state, user_id, length)
+        .await
+        .map_err(|error| {
+            if error.status == StatusCode::PAYLOAD_TOO_LARGE {
+                error.with_extra(serde_json::json!({ "code": SOUVENIR_LIMIT_REACHED }))
+            } else {
+                error
+            }
+        })?;
 
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
@@ -738,29 +788,8 @@ pub async fn user_game_achievements(
     let achievements: Vec<Value> =
         serde_json::from_str(&row.get::<String, _>("achievements")).unwrap_or_default();
 
-    let mut images = sqlx::query(
-        "SELECT achievement_names, image_key, visibility FROM souvenirs
-         WHERE user_id = ? AND shop = ? AND object_id = ?
-           AND status = 'ready' AND is_uploaded = 1
-         ORDER BY captured_at ASC",
-    )
-    .bind(&user_id)
-    .bind(&shop)
-    .bind(&object_id)
-    .fetch_all(&state.pool)
-    .await?;
-
-    if !is_owner {
-        images.retain(|row| row.get::<String, _>("visibility") == "PUBLIC");
-    }
-
-    let mut image_by_name: HashMap<String, String> = HashMap::new();
-    for image in &images {
-        let key: String = image.get("image_key");
-        for name in parse_names(&image.get::<String, _>("achievement_names")) {
-            image_by_name.insert(name, public_url(&state, &key));
-        }
-    }
+    let image_by_name =
+        images_by_achievement(&state, &user_id, &shop, &object_id, is_owner).await?;
 
     let items: Vec<Value> = achievements
         .iter()
@@ -1028,6 +1057,27 @@ pub async fn delete(
 /// Shared with the portal, so ownership is re-checked here rather than at
 /// either call site. Returns the bytes freed.
 pub async fn delete_owned(state: &AppState, user_id: &str, souvenir_id: &str) -> ApiResult<i64> {
+    let freed = remove(state, user_id, souvenir_id).await?;
+
+    crate::events::record(
+        state,
+        Event::sync(
+            "souvenir.deleted",
+            user_id,
+            "Deleted an achievement souvenir",
+        )
+        .detail(json!({ "souvenirId": souvenir_id }))
+        .size(freed),
+    )
+    .await;
+
+    Ok(freed)
+}
+
+/// Deletes one of `user_id`'s souvenirs and its picture, recording nothing:
+/// the owner and an operator acting on a report log it differently. Returns
+/// the bytes freed.
+pub async fn remove(state: &AppState, user_id: &str, souvenir_id: &str) -> ApiResult<i64> {
     let row =
         sqlx::query("SELECT image_key, size_in_bytes FROM souvenirs WHERE id = ? AND user_id = ?")
             .bind(souvenir_id)
@@ -1045,21 +1095,7 @@ pub async fn delete_owned(state: &AppState, user_id: &str, souvenir_id: &str) ->
     let key: String = row.get("image_key");
     storage::delete_object(state, &key).await;
 
-    let freed: i64 = row.get("size_in_bytes");
-
-    crate::events::record(
-        state,
-        Event::sync(
-            "souvenir.deleted",
-            user_id,
-            "Deleted an achievement souvenir",
-        )
-        .detail(json!({ "souvenirId": souvenir_id }))
-        .size(freed),
-    )
-    .await;
-
-    Ok(freed)
+    Ok(row.get("size_in_bytes"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1123,6 +1159,41 @@ pub async fn sweep_abandoned(state: &AppState, cutoff: &str) -> ApiResult<usize>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A full account gets the code the launcher reads as "file the
+    /// achievements without the picture", not a refusal it keeps retrying.
+    #[tokio::test]
+    async fn a_full_account_is_told_to_drop_the_picture() {
+        let server = crate::testing::TestServer::start().await;
+        server
+            .limits(
+                "alice",
+                crate::limits::Overrides {
+                    max_bytes_per_user: Some(10),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let error = authorize(
+            &server.state,
+            "alice",
+            AuthorizeRequest {
+                image_ext: "jpg",
+                image_length: 1_000,
+                client_id: Some("capture-1"),
+                remote_game_id: Some("game-1"),
+            },
+        )
+        .await
+        .expect_err("over quota");
+
+        assert_eq!(error.status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            error.extra.expect("a code")["code"],
+            "achievements/souvenir-limit-reached"
+        );
+    }
 
     #[test]
     fn image_keys_are_scoped_to_their_owner() {

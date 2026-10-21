@@ -112,7 +112,7 @@ overridden for a single account on that user's page in the panel — see
 ### Admin panel
 
 Open `https://your-server/admin` and sign in with `HYDRA_ADMIN_PASSWORD`. The
-panel is a full operations console for the server, in ten screens.
+panel is a full operations console for the server, in eleven screens.
 
 **Overview** — headline totals (users, storage, cloud saves, backups), a
 30-day activity chart, a live feed of what the server has been doing, the
@@ -153,8 +153,20 @@ per-game limit) or deleted.
 
 **Games** — the same data pivoted by game: who plays it, what they store, how
 long they have played, which custom art they picked. Names and covers resolve
-from the Steam store and cache; a game whose lookup failed can be retried from
-its own page.
+from the Steam store for Steam games and from the official API's public
+catalogue for Epic games, and are cached; a game whose lookup failed can be
+retried from its own page.
+
+**Reports** — souvenirs players reported, one row per picture however many
+people flagged it: the owner, the game, the reasons, and every report with
+who sent it and what they wrote, next to the picture itself. Each picture
+gets one decision — **Dismiss** (nothing wrong), **Hide** (made private, off
+the owner's profile for everyone else) or **Delete** (picture and file gone,
+the owner's quota freed) — and **Reopen** undoes a decision made too fast.
+Open reports drive the Overview alert and the count beside the screen;
+handled ones move to *Resolved*. Every decision is recorded in *History*.
+Hiding is the gentle option: the owner can make the picture public again
+from the launcher, which is what *Delete* is for.
 
 **Storage** — usage measured from disk rather than the database, per area,
 next to what the database expects, so drift is visible. The integrity scan
@@ -400,6 +412,12 @@ Implements the endpoints the launcher routes to a self-hosted cloud server:
   `?steamLibrary=true` for the Steam library tab), so the number follows the
   tab; null when this server has no achievements for that user, so nothing
   renders a misleading zero
+- `GET /profile/achievements/combined?shop=&objectId=&language=` — launcher
+  4.2.0's linked Steam/Epic achievement list, rebuilt here for when official
+  Hydra won't answer it (see [Combined Steam/Epic achievements](#combined-steamepic-achievements))
+- `PUT /profile/game-links` — which of the caller's Steam and Epic games are
+  the same title, as the official catalogue links them; the launcher sends
+  its whole set after every library sync
 - `GET /profile/achievements/{userId}` — recently unlocked achievements for a
   profile, so members show recent activity the official API only compares for
   subscribers. Names and unlock times only; the launcher joins the public
@@ -434,7 +452,8 @@ Implements the endpoints the launcher routes to a self-hosted cloud server:
 ### Cloud Save V2
 
 Launcher 4.1.0 replaced the tarball-per-backup flow with per-file snapshots for
-Steam games, and 4.1.6 extended them to RetroArch and RPCS3 games. A save is a manifest of files, each content-addressed by SHA-256:
+Steam games, 4.1.6 extended them to RetroArch and RPCS3 games, and 4.2.0 to
+Epic Games. A save is a manifest of files, each content-addressed by SHA-256:
 
 - `POST /profile/cloud-saves/prepare-snapshot` — registers the manifest and
   returns a presigned PUT for each blob the server doesn't already hold
@@ -465,6 +484,16 @@ Notable behaviour:
   can never hold the wrong bytes.
 - **Garbage collection.** Blobs are deleted once no manifest references them;
   abandoned uploads are swept after 24 hours.
+- **Epic Games (4.2.0).** Epic games sync as `shop=epic` with a
+  `namespace:catalogItemId` object id, one opaque folder per Epic account.
+  The server advertises `cloud-saves-v2-epic`, and the launcher keeps Epic V2
+  off on servers that don't — they refuse the shop. Epic's own cloud saves
+  (through Legendary) and Epic achievements never come here; they go to Epic
+  and the official API.
+- **Re-preparing a commit.** A commit whose pending snapshot was swept, or
+  whose blobs never all arrived, answers with
+  `game/cloud-save-pending-snapshot-not-found` or `…-incomplete` in `code`,
+  which is what makes the launcher prepare the upload again.
 - **Emulator save states.** Launcher 4.1.6 also syncs RetroArch and RPCS3
   saves through V2, and tags each save state with what produced it
   (`stateMetadata`: emulator, core, version, host platform) so a restore puts
@@ -495,7 +524,11 @@ same key (`status: "claimed"` once the bytes are here), and re-syncing returns
 the same souvenir id. Failures answer with the codes the launcher's retry policy
 knows — `achievements/souvenir-conflict` plus a `reason`, or
 `achievements/souvenir-upload-incomplete` — so a souvenir that only needs
-another attempt gets one instead of being dropped.
+another attempt gets one instead of being dropped. A full account is refused
+with `achievements/souvenir-limit-reached`, which the launcher reads as "sync
+the achievements without the picture": since 4.2.0 it gives up on a souvenir
+after 20 refusals it doesn't recognise, and a quota refusal is no reason to
+spend them.
 
 Notable behaviour:
 
@@ -529,9 +562,10 @@ Notable behaviour:
   it shows up instead.
 - **Likes and reports.** Any member can like another's souvenir (one POST
   toggles) or report it. A report is recorded and raised as a warning in the
-  event log with who, why and which picture — the History screen and the
-  Overview alert are how an operator sees it, and the record outlives the
-  souvenir being deleted. Reports are capped at 30 per person per hour.
+  event log with who, why and which picture, and waits on the *Reports*
+  screen until an operator dismisses it, hides the picture or deletes it.
+  The record outlives the souvenir being deleted. Reports are capped at 30
+  per person per hour.
 - **Two things this server can't know.** Achievement display names, icons and
   points come from the public catalogue, so souvenirs are served with raw
   achievement names and the launcher joins the catalogue for the rest — the same
@@ -544,12 +578,37 @@ name, like banners and custom artwork: hiding a souvenir removes it from the
 profile and from the achievement list, but does not make its URL stop working
 for someone who already has it.
 
+### Combined Steam/Epic achievements
+
+Launcher 4.2.0 shows one achievement list for a game owned on both Steam and
+Epic, built by official Hydra from its catalogue. The launcher asks official
+Hydra first and comes here only when that gave it nothing — the official view
+may be for subscribers only — so where it is available, it wins.
+
+This server rebuilds it from three things:
+
+- **Which games go together.** The official profile tells the launcher which
+  Steam app and Epic item are one title (`canonicalId`), and the launcher
+  passes that on through `PUT /profile/game-links`. A game linked to nothing
+  answers `404`, and the launcher shows its own list as before.
+- **Which achievements are the same one.** Matched by display name, ignoring
+  case and punctuation, in order: the second "Chapter Complete" on Steam pairs
+  with the second one on Epic. Official Hydra has its own mapping; this is the
+  approximation. An achievement whose stores name it differently shows as two
+  rows rather than pairing with the wrong one.
+- **Names, icons and points** from the official catalogue, fetched with the
+  caller's own access token and cached for six hours. Unlock times and
+  souvenir pictures are this server's own — Steam unlocks from the regular
+  sync, Epic ones from the launcher's Epic mirror.
+
+Advertised as `achievements-combined`.
+
 ### Capabilities
 
 `GET /capabilities` (unauthenticated) reports what this build supports:
 
 ```json
-{ "name": "hydra-server", "version": "4.1.3", "features": ["cloud-saves-v2", "souvenirs", "..."] }
+{ "name": "hydra-server", "version": "4.2.0", "features": ["cloud-saves-v2", "cloud-saves-v2-epic", "souvenirs", "..."] }
 ```
 
 The launcher checks this before enabling a feature whose endpoints might not

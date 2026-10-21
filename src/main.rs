@@ -7,6 +7,7 @@ mod auth;
 mod backup;
 mod client_ip;
 mod cloud_saves;
+mod combined_achievements;
 mod config;
 mod emulation;
 mod error;
@@ -319,6 +320,14 @@ fn router(_state: AppState) -> Router<AppState> {
         )
         .route("/presigned-urls/{type}", post(images::presign))
         .route("/profile/stats/{user_id}", get(achievements::user_stats))
+        .route(
+            "/profile/achievements/combined",
+            get(combined_achievements::combined),
+        )
+        .route(
+            "/profile/game-links",
+            put(combined_achievements::replace_links),
+        )
         .route("/profile/achievements/{user_id}", get(achievements::recent))
         .route("/profile/banners/{user_id}", get(images::get_banner))
         .route("/profile/banner", delete(images::delete_banner))
@@ -369,6 +378,7 @@ async fn capabilities() -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "features": [
             "cloud-saves-v2",
+            "cloud-saves-v2-epic",
             "user-portal",
             "cloud-saves-legacy",
             "emulation-saves",
@@ -380,6 +390,7 @@ async fn capabilities() -> Json<serde_json::Value> {
             "artifact-shares",
             "souvenirs",
             "hidden-games",
+            "achievements-combined",
         ],
     }))
 }

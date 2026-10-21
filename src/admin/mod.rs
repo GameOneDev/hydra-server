@@ -21,6 +21,7 @@
 //! | [`users`] | the user directory, per-user detail, blocking and data purges |
 //! | [`saves`] | every stored save across users: V2 snapshots, legacy backups, emulation saves |
 //! | [`games`] | the same data pivoted by game rather than by user |
+//! | [`reports`] | souvenirs players reported, and what was done about them |
 //! | [`storage`] | what occupies disk, and whether disk and database agree |
 //! | [`maintenance`] | one-shot operations: sweeps, garbage collection, metadata refresh, export |
 //! | [`schedule`] | the timetable those same operations run on unattended, and each one's log |
@@ -41,6 +42,7 @@ mod events;
 mod games;
 mod maintenance;
 mod overview;
+mod reports;
 mod saves;
 mod schedule;
 mod session;
@@ -60,6 +62,7 @@ pub fn router() -> Router<AppState> {
         .merge(users::router())
         .merge(saves::router())
         .merge(games::router())
+        .merge(reports::router())
         .merge(storage::router())
         .merge(maintenance::router())
         .merge(schedule::router())
