@@ -589,8 +589,12 @@ This server rebuilds it from three things:
 
 - **Which games go together.** The official profile tells the launcher which
   Steam app and Epic item are one title (`canonicalId`), and the launcher
-  passes that on through `PUT /profile/game-links`. A game linked to nothing
-  answers `404`, and the launcher shows its own list as before.
+  passes that on through `PUT /profile/game-links`. A game linked to nothing,
+  or to no second store, answers `200` with an empty list (`canonicalId: null`,
+  `achievements: []`), and the launcher shows its own list as before. It is
+  deliberately not a `404`: launcher 4.3.0 treats any 4xx except `401` as the
+  server failing and stops asking about that game for 1, then 5, then 30
+  minutes — which is nearly every game, since most are on one store only.
 - **Which achievements are the same one.** Matched by display name, ignoring
   case and punctuation, in order: the second "Chapter Complete" on Steam pairs
   with the second one on Epic. Official Hydra has its own mapping; this is the
@@ -603,12 +607,30 @@ This server rebuilds it from three things:
 
 Advertised as `achievements-combined`.
 
+### Launcher 4.3.0
+
+4.3.0 adds nothing this server has to answer: the endpoint set the launcher
+sends here is the same as 4.2.0's, the achievement sync payload is unchanged,
+and so is the Cloud Save V2 wire format. What it does add runs on official
+Hydra, on paths this server doesn't serve, so the launcher never routes it
+here:
+
+- **Screenshots** — capture, upload (`/presigned-urls/screenshot`,
+  `/profile/screenshots/…`), the profile tab, likes, comments and moderation.
+  Not to be confused with achievement souvenirs, which are still stored here.
+- **Global leaderboards** (`/leaderboards/…`) and their notifications.
+- **Achievement sets** and the redesigned achievement list, which read the
+  official catalogue.
+
+The one behaviour that changed on this side is the combined Steam/Epic view
+above: it answers `200` with an empty list where it used to answer `404`.
+
 ### Capabilities
 
 `GET /capabilities` (unauthenticated) reports what this build supports:
 
 ```json
-{ "name": "hydra-server", "version": "4.2.0", "features": ["cloud-saves-v2", "cloud-saves-v2-epic", "souvenirs", "..."] }
+{ "name": "hydra-server", "version": "4.3.0", "features": ["cloud-saves-v2", "cloud-saves-v2-epic", "souvenirs", "..."] }
 ```
 
 The launcher checks this before enabling a feature whose endpoints might not
