@@ -133,6 +133,13 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
         "SELECT COALESCE(SUM(size_in_bytes), 0) FROM souvenirs",
     )
     .await?;
+
+    let hd_screenshots: i64 = scalar(&state, "SELECT COUNT(*) FROM hd_screenshots").await?;
+    let hd_screenshot_bytes: i64 = scalar(
+        &state,
+        "SELECT COALESCE(SUM(size_in_bytes), 0) FROM hd_screenshots",
+    )
+    .await?;
     /* Reservations whose upload never arrived. Sweepable from Maintenance,
     and worth surfacing next to the other stuck-upload counts. */
     let stuck_souvenirs: i64 = sqlx::query_scalar(
@@ -368,6 +375,7 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
             "openReports": open_reports,
             "bytes": souvenir_bytes,
         },
+        "hdScreenshots": { "total": hd_screenshots, "bytes": hd_screenshot_bytes },
         "library": { "games": games, "playtimeSeconds": playtime_seconds, "downloadSources": download_sources },
         "storage": storage_breakdown(
             cloud_bytes,
@@ -375,6 +383,7 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
             emulation_bytes,
             artwork_bytes,
             souvenir_bytes,
+            hd_screenshot_bytes,
         ),
         "alerts": alerts,
     })))
@@ -389,6 +398,7 @@ pub(crate) fn storage_breakdown(
     emulation: i64,
     artwork: i64,
     souvenirs: i64,
+    hd_screenshots: i64,
 ) -> Vec<Value> {
     vec![
         json!({ "key": "cloudSaves", "label": "Cloud saves (v2)", "bytes": cloud }),
@@ -396,6 +406,7 @@ pub(crate) fn storage_breakdown(
         json!({ "key": "emulationSaves", "label": "Emulation saves", "bytes": emulation }),
         json!({ "key": "artwork", "label": "Custom images", "bytes": artwork }),
         json!({ "key": "souvenirs", "label": "Souvenirs", "bytes": souvenirs }),
+        json!({ "key": "hdScreenshots", "label": "HD screenshots", "bytes": hd_screenshots }),
     ]
 }
 

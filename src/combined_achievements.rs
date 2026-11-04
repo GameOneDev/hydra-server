@@ -153,17 +153,34 @@ pub async fn combined(
         .filter(|language| !language.is_empty() && language.len() <= 16)
         .unwrap_or_else(|| "en".to_string());
 
-    /* A 404 sends the launcher to the game's own list, which for an unlinked
-    game is the same thing this would have said. */
-    let canonical_id: String = sqlx::query_scalar(
+    /* A game with nothing to combine answers 200 with an empty list, not a
+    404. Either sends the launcher to the game's own list — which for an
+    unlinked game is the same thing this would have said — but launcher 4.3.0
+    treats every 4xx except 401 as the server failing and stops asking for
+    that game for 1, then 5, then 30 minutes. Most games are on one store
+    only, so a 404 here would back the launcher off on nearly every game it
+    opens, and delay the view for a game whose second copy arrives later.
+    `canonicalId` stays null so the launcher's "empty copy in a group" check
+    can't claim the game; `achievements` must stay an array because the
+    launcher reads its length and calls `.some` on it. */
+    let nothing_to_combine = || {
+        Json(json!({
+            "canonicalId": Value::Null,
+            "achievements": [],
+        }))
+    };
+
+    let canonical_id: Option<String> = sqlx::query_scalar(
         "SELECT canonical_id FROM game_links WHERE user_id = ? AND shop = ? AND object_id = ?",
     )
     .bind(user_id)
     .bind(&query.shop)
     .bind(&query.object_id)
     .fetch_optional(&state.pool)
-    .await?
-    .ok_or_else(|| ApiError::not_found("this game isn't linked to another store"))?;
+    .await?;
+    let Some(canonical_id) = canonical_id else {
+        return Ok(nothing_to_combine());
+    };
 
     let linked = sqlx::query(
         "SELECT shop, object_id FROM game_links
@@ -176,9 +193,7 @@ pub async fn combined(
     .await?;
 
     if linked.len() < 2 {
-        return Err(ApiError::not_found(
-            "this game isn't linked to another store",
-        ));
+        return Ok(nothing_to_combine());
     }
 
     let token = headers
@@ -578,15 +593,21 @@ mod tests {
             )
         };
 
-        let Err(unlinked) = ask("steam", "9002").await else {
-            panic!("a game with no link");
-        };
-        assert_eq!(unlinked.status, StatusCode::NOT_FOUND);
+        /* Neither is an error: launcher 4.3.0 backs off from a game for up to
+        30 minutes after any 4xx, so "nothing to combine" is an empty 200 whose
+        shape the launcher can read without special-casing it — a null
+        canonicalId and an array it can take the length of. */
+        for (what, object_id) in [
+            ("a game with no link", "9002"),
+            ("a link to nothing else", "9001"),
+        ] {
+            let Json(view) = ask("steam", object_id)
+                .await
+                .unwrap_or_else(|error| panic!("{what} answered {}", error.status));
 
-        let Err(alone) = ask("steam", "9001").await else {
-            panic!("a link to nothing else");
-        };
-        assert_eq!(alone.status, StatusCode::NOT_FOUND);
+            assert_eq!(view["canonicalId"], Value::Null, "{what}");
+            assert_eq!(view["achievements"], json!([]), "{what}");
+        }
 
         server
             .execute(

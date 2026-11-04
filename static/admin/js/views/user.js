@@ -574,6 +574,7 @@ const PURGE_CATEGORIES = [
   ["emulationSaves", "Emulation saves"],
   ["artwork", "Custom images"],
   ["souvenirs", "Achievement souvenirs"],
+  ["hdScreenshots", "HD screenshots"],
   ["achievements", "Achievements"],
   ["playtime", "Playtime history"],
   ["downloadSources", "Download sources"],
