@@ -13,6 +13,7 @@ mod emulation;
 mod error;
 mod events;
 mod games;
+mod hd_screenshots;
 mod hidden_games;
 mod images;
 mod jobs;
@@ -256,6 +257,23 @@ fn router(_state: AppState) -> Router<AppState> {
             "/profile/cloud-saves/snapshot-download-urls",
             get(cloud_saves::snapshot_download_urls),
         )
+        /* 1080p copies of screenshots, attached to official Hydra's screenshot
+        ids. The launcher routes this whole prefix here; the static `lookup`
+        segment wins over the parameterised ones, same as artwork above. */
+        .route(
+            "/profile/hd-screenshots/lookup",
+            post(hd_screenshots::lookup),
+        )
+        .route(
+            "/profile/hd-screenshots/{screenshot_id}/upload-url",
+            post(hd_screenshots::upload_url),
+        )
+        .route(
+            "/profile/hd-screenshots/{screenshot_id}",
+            put(hd_screenshots::save)
+                .patch(hd_screenshots::set_visibility)
+                .delete(hd_screenshots::delete),
+        )
         .route("/profile/games/achievements", put(achievements::sync))
         .route(
             "/profile/games/achievements/{id}",
@@ -391,6 +409,7 @@ async fn capabilities() -> Json<serde_json::Value> {
             "souvenirs",
             "hidden-games",
             "achievements-combined",
+            "screenshots-hd",
         ],
     }))
 }

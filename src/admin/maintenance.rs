@@ -155,6 +155,15 @@ async fn still_referenced(state: &AppState, key: &str) -> ApiResult<bool> {
         return Ok(found.is_some());
     }
 
+    if key.starts_with("images/screenshots-hd/") {
+        let found: Option<String> =
+            sqlx::query_scalar("SELECT storage_key FROM hd_screenshots WHERE storage_key = ?")
+                .bind(key)
+                .fetch_optional(&state.pool)
+                .await?;
+        return Ok(found.is_some());
+    }
+
     if key.starts_with("images/artwork/") {
         let found: Option<String> =
             sqlx::query_scalar("SELECT storage_key FROM game_artwork WHERE storage_key = ?")

@@ -55,11 +55,12 @@ pub const METERED_TABLES: &[(&str, &str, &str)] = &[
     ),
     ("artwork", "game_artwork", "size_in_bytes"),
     ("souvenirs", "souvenirs", "size_in_bytes"),
+    ("hd_screenshots", "hd_screenshots", "size_in_bytes"),
 ];
 
 /// SQL summing every metered table for one owner: save backups, emulation
-/// saves, uploaded custom images, achievement souvenirs and Cloud Save V2
-/// blobs.
+/// saves, uploaded custom images, achievement souvenirs, HD screenshot copies
+/// and Cloud Save V2 blobs.
 ///
 /// `owner` is the SQL expression naming that owner — `?1` for a bound
 /// parameter, `u.id` to correlate with a joined `users` row. Callers pass a
@@ -225,6 +226,16 @@ async fn quota_target(state: &AppState, key: &str) -> ApiResult<Option<QuotaTarg
             .bind(key)
             .fetch_optional(&state.pool)
             .await?;
+
+        return Ok(Some(QuotaTarget::new(user_id, counted)));
+    }
+
+    if let Some((user_id, _)) = owner_prefixed(key, "images/screenshots-hd/") {
+        let counted =
+            sqlx::query_scalar("SELECT size_in_bytes FROM hd_screenshots WHERE storage_key = ?")
+                .bind(key)
+                .fetch_optional(&state.pool)
+                .await?;
 
         return Ok(Some(QuotaTarget::new(user_id, counted)));
     }

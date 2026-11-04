@@ -18,6 +18,8 @@ and download sources browsing all work exactly as before.
 | Emulation saves — PS1/PS2 memory cards, PSP savedata, GameCube/Wii | **this server** |
 | Achievement sync across devices | **this server** |
 | Achievement souvenirs — screenshots on the profile | **this server** |
+| Screenshots (launcher 4.3.0+) — the screenshot itself, likes, comments | Official Hydra |
+| Screenshots — a 1080p copy for accounts without a subscription (see [HD screenshots](#hd-screenshots)) | **this server** |
 | Download source list sync across devices | **this server** |
 | Profile banner image hosting | **this server** (URL saved to the official profile) |
 | Custom game images (covers, icons, logos, banners) | **this server** |
@@ -82,7 +84,7 @@ subscription needed.
 | `HYDRA_OFFICIAL_API_URL` | `https://hydra-api-us-east-1.losbroxas.org` | Official API used to validate launcher tokens. If token validation fails with your launcher build, set this to the same API URL the launcher was built with (`MAIN_VITE_API_URL`) |
 | `HYDRA_ADMIN_PASSWORD` | *(empty)* | Password for `/admin`. Panel is disabled while empty |
 | `HYDRA_SERVER_SECRET` | auto-generated | Secret signing storage URLs and admin sessions; persisted to `<data dir>/.secret` when auto-generated |
-| `HYDRA_MAX_BYTES_PER_USER` | `0` (unlimited) | Per-user storage quota in bytes — counts save backups, Cloud Save V2 blobs (once per distinct file), emulation saves, custom game artwork and achievement souvenirs. Profile banners and avatars are excluded: each is capped at 30 MB and replaces the file it supersedes, so they can't grow. Checked when an upload is authorized, against the size the launcher declares |
+| `HYDRA_MAX_BYTES_PER_USER` | `0` (unlimited) | Per-user storage quota in bytes — counts save backups, Cloud Save V2 blobs (once per distinct file), emulation saves, custom game artwork, achievement souvenirs and HD screenshot copies. Profile banners and avatars are excluded: each is capped at 30 MB and replaces the file it supersedes, so they can't grow. Checked when an upload is authorized, against the size the launcher declares |
 | `HYDRA_BACKUPS_PER_GAME_LIMIT` | `100` | Max save backups per game per user |
 | `HYDRA_AUTO_DELETE_SAVES` | `true` | Delete a save the launcher replaces — the previous Cloud Save V2 version of a game, the previous save in an emulator slot. `false` keeps the older version instead: out of the launcher's way, still on the owner's quota, and deleted only by hand. Uploads that never finished are swept either way |
 | `HYDRA_ALLOWED_USERS` | *(empty = everyone)* | Comma-separated official user ids or usernames allowed to use this server |
@@ -443,6 +445,10 @@ Implements the endpoints the launcher routes to a self-hosted cloud server:
   the account-level setting the launcher mirrors here
 - `GET /users/{userId}/games/achievements?shop=&objectId=` — the souvenir
   thumbnail for each unlock, for the achievement list
+- `POST /profile/hd-screenshots/{screenshotId}/upload-url`,
+  `PUT|PATCH|DELETE /profile/hd-screenshots/{screenshotId}`,
+  `POST /profile/hd-screenshots/lookup` — 1080p copies of official Hydra's
+  screenshots (see [HD screenshots](#hd-screenshots))
 - `PUT|GET /storage/{token}` — S3-style presigned upload/download URLs
   (signed, short-lived, streamed to/from disk)
 - `GET /health`
@@ -609,21 +615,59 @@ Advertised as `achievements-combined`.
 
 ### Launcher 4.3.0
 
-4.3.0 adds nothing this server has to answer: the endpoint set the launcher
-sends here is the same as 4.2.0's, the achievement sync payload is unchanged,
-and so is the Cloud Save V2 wire format. What it does add runs on official
-Hydra, on paths this server doesn't serve, so the launcher never routes it
-here:
+4.3.0 needs nothing from this server to keep working: the endpoint set the
+launcher sends here is the same as 4.2.0's, the achievement sync payload is
+unchanged, and so is the Cloud Save V2 wire format. Most of what it adds runs
+on official Hydra, on paths this server doesn't serve, so the launcher never
+routes it here:
 
 - **Screenshots** — capture, upload (`/presigned-urls/screenshot`,
   `/profile/screenshots/…`), the profile tab, likes, comments and moderation.
-  Not to be confused with achievement souvenirs, which are still stored here.
+  All of it stays on official Hydra, which keeps the 720p screenshot. This
+  server only adds a sharper copy for accounts without a subscription — see
+  [HD screenshots](#hd-screenshots). Not to be confused with achievement
+  souvenirs, which are stored here.
 - **Global leaderboards** (`/leaderboards/…`) and their notifications.
 - **Achievement sets** and the redesigned achievement list, which read the
   official catalogue.
 
 The one behaviour that changed on this side is the combined Steam/Epic view
 above: it answers `200` with an empty list where it used to answer `404`.
+
+### HD screenshots
+
+Launcher 4.3.0 uploads screenshots to official Hydra, at 1280×720 for an
+account without a subscription and 1920×1080 for a subscriber. The 1080p tier
+is part of Hydra Cloud, so an account that keeps its storage here instead can't
+get it there.
+
+This server keeps the sharper copy instead. It does not replace anything:
+
+- **Upload.** After the 720p screenshot is on official Hydra, the launcher
+  uploads a 1080p copy here, attached to the official screenshot's id. It is
+  best-effort and never delays or fails the official upload.
+- **Display.** When the launcher shows a screenshot it asks this server which
+  of the listed ones have a copy, and uses the 1080p image where there is one
+  and official's image where there is not. A subscriber's screenshot, a friend
+  on another server, or an upload that never got here all fall back quietly.
+- **Only the uploader writes.** A copy is keyed by its owner and the official
+  screenshot id, and a lookup names both, so one member cannot plant a picture
+  under another member's screenshot.
+- **Official's decisions still apply.** The launcher only swaps in a copy for a
+  screenshot official actually returned an image for, and never for one it
+  blocked, so a copy can't reveal what official withheld. Deleting the
+  screenshot on official Hydra deletes its copy here.
+- **Visibility follows the screenshot.** The copy records the screenshot's
+  visibility and the launcher mirrors changes to it. A `PRIVATE` copy is handed
+  only to its owner; `FRIENDS` reads as "members of this server", as for
+  souvenirs, because the official friend graph isn't visible from here.
+- **Reach.** Only launchers pointed at this server see the 1080p copy. Everyone
+  else sees official's 720p.
+
+Copies count against the owner's quota, are listed under their own area on the
+*Storage* screen, can be purged per user from the panel, and are served from
+`GET /images/screenshots-hd/…` under an unguessable name like the other images.
+Advertised as `screenshots-hd`.
 
 ### Capabilities
 
