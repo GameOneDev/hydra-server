@@ -63,3 +63,39 @@ validators reject any key they don't expect on the files they read back.
 - an upload whose bytes don't match the declared SHA-256 is refused
 - committing without uploading fails
 - deleting a save garbage collects its blobs
+
+## HD screenshot copies
+
+`hd-screenshots.test.ts` checks the 1080p screenshot copies the same way, against
+the same running server (steps 1 and 2 above). It runs the launcher's own
+`uploadHdCopy` for the upload and its own `collectHdScreenshotRefs` and
+`applyHdScreenshotCopies` for the display side, so it fails if either stops
+agreeing with this server about paths, field names or response shapes. Copy it
+next to those modules:
+
+```bash
+cp tests/e2e/hd-screenshots.test.ts \
+  ../hydra/src/main/services/screenshots/__e2e.test.ts
+cd ../hydra
+node --import ./scripts/register-ts-node.mjs \
+  --test src/main/services/screenshots/__e2e.test.ts
+rm src/main/services/screenshots/__e2e.test.ts
+```
+
+Only the network calls are written out in the test, and they must stay the ones
+`screenshot-hd-copies.ts` makes. It uses its own users and screenshot ids, so
+the data directory need not be empty.
+
+What it covers:
+
+- the `screenshots-hd` capability the launcher gates on is advertised
+- an upload by the launcher's uploader is accepted, and the exact bytes come
+  back from the public image URL
+- a listing has the copy swapped in for another member, and a screenshot with no
+  copy keeps official's image
+- one member cannot be handed another member's copy of the same screenshot id
+- a `PRIVATE` copy is only handed to its owner
+- a screenshot with no copy answers `404` to a visibility change and `200` to a
+  delete, which is what the launcher relies on to mirror every change
+- an unauthenticated caller is refused
+- deleting removes the copy and its file
