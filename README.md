@@ -496,6 +496,19 @@ Notable behaviour:
   off on servers that don't — they refuse the shop. Epic's own cloud saves
   (through Legendary) and Epic achievements never come here; they go to Epic
   and the official API.
+- **Recompilations (4.4.0).** A recompilation is a PC port of a LaunchBox game
+  (Ship of Harkinian for Ocarina of Time, say), and its saves are not the
+  emulator's. The launcher sends `shop=launchbox` with the LaunchBox id as
+  `objectId` and the port as a separate `recompilationSlug`, on prepare, on the
+  snapshot listing and on delete, and expects the manifest's `snapshot` to hand
+  the slug back beside the id. A server that ignored the slug would file the
+  port's saves under the plain game and, worse, delete the emulator's saves
+  when the port's are deleted, so this one keeps them apart. Stored, the pair
+  is the launcher's own key for a port, `<objectId>:<slug>`; no plain LaunchBox
+  id contains a colon, so existing saves are untouched. A slug on anything but
+  a LaunchBox game, or a malformed one, is refused with `400` rather than
+  ignored. The server advertises `cloud-saves-v2-recompilation`, and the
+  launcher leaves recompilation saves off on servers that don't.
 - **Re-preparing a commit.** A commit whose pending snapshot was swept, or
   whose blobs never all arrived, answers with
   `game/cloud-save-pending-snapshot-not-found` or `…-incomplete` in `code`,
@@ -633,6 +646,25 @@ routes it here:
 
 The one behaviour that changed on this side is the combined Steam/Epic view
 above: it answers `200` with an empty list where it used to answer `404`.
+
+### Launcher 4.4.0
+
+4.4.0 changes one thing this server has to answer: Cloud Save V2 for
+recompilations, described under [Cloud Save V2](#cloud-save-v2) above. The rest
+of what it adds runs on official Hydra, on paths this server doesn't serve:
+
+- **Recompilations** themselves — the catalogue (`/games/launchbox/…/recompilations/…`),
+  installing a port, and the ROM sources. Only their cloud saves come here.
+- **Missions, trails and progress** (`/profile/missions`, `/profile/trails`,
+  `/profile/progress`) and their claims.
+- **Chat** conversations and official Hydra messages (`/profile/chats`,
+  `/profile/official-messages`).
+- **Screenshots** — capture and sharing changes, failure notifications and the
+  option to hide community screenshots. The upload path and the screenshot shape
+  are unchanged, so [HD screenshots](#hd-screenshots) work as before.
+
+The achievement sync, souvenir, artwork, download-source, hidden-game, playtime
+and banner calls are all unchanged.
 
 ### HD screenshots
 

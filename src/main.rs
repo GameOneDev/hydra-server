@@ -397,6 +397,7 @@ async fn capabilities() -> Json<serde_json::Value> {
         "features": [
             "cloud-saves-v2",
             "cloud-saves-v2-epic",
+            "cloud-saves-v2-recompilation",
             "user-portal",
             "cloud-saves-legacy",
             "emulation-saves",
