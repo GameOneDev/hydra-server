@@ -99,3 +99,35 @@ What it covers:
   delete, which is what the launcher relies on to mirror every change
 - an unauthenticated caller is refused
 - deleting removes the copy and its file
+
+## Recompilation cloud saves
+
+`cloud-save-recompilation.test.ts` checks Cloud Save V2 for recompilations (launcher
+4.4.0), against the same running server. A recompilation is a PC port of a
+LaunchBox game, and its saves must stay apart from the emulator's: the launcher
+sends the port as `shop=launchbox` with the LaunchBox id as `objectId` and the
+port as a separate `recompilationSlug`. The test uses the launcher's own payload
+builder, list query, delete URL and strict manifest validator, so it fails if the
+launcher and the server stop agreeing on how a port is told apart. Copy it into
+the launcher's cloud-save directory, as for the Cloud Save V2 test:
+
+```bash
+cp tests/e2e/cloud-save-recompilation.test.ts \
+  ../hydra/src/main/services/cloud-save/__e2e.test.ts
+cd ../hydra
+node --import ./scripts/register-ts-node.mjs \
+  --test src/main/services/cloud-save/__e2e.test.ts
+rm src/main/services/cloud-save/__e2e.test.ts
+```
+
+It uses its own user, so the data directory need not be empty. What it covers:
+
+- the payload the launcher builds carries the LaunchBox id and the slug, not the
+  composite key
+- the server advertises every capability the launcher requires before it syncs a
+  port (`cloud-saves-v2-recompilation`)
+- a port and the game it ports each commit a first version, neither moving the
+  other, and each listing returns only its own save
+- the restore manifest hands the slug back, the launcher's strict validator
+  accepts it and rebuilds the port's id, and a plain game's manifest is unchanged
+- deleting a port's saves with the launcher's own URL leaves the emulator's

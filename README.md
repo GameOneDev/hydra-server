@@ -706,7 +706,7 @@ Advertised as `screenshots-hd`.
 `GET /capabilities` (unauthenticated) reports what this build supports:
 
 ```json
-{ "name": "hydra-server", "version": "4.3.0", "features": ["cloud-saves-v2", "cloud-saves-v2-epic", "souvenirs", "..."] }
+{ "name": "hydra-server", "version": "4.4.0", "features": ["cloud-saves-v2", "cloud-saves-v2-epic", "souvenirs", "..."] }
 ```
 
 The launcher checks this before enabling a feature whose endpoints might not
