@@ -554,6 +554,37 @@ fn is_safe_key(key: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
 }
 
+/// Every folder the server keeps files in, under the storage root.
+pub const STORAGE_DIRS: &[&str] = &[
+    "cloud-saves",
+    "artifacts",
+    "emulation-saves",
+    "images/artwork",
+    "images/avatars",
+    "images/banners",
+    "images/screenshots-hd",
+    "images/souvenirs",
+];
+
+/// Creates each of those folders, so the layout is there from the first start
+/// and not only after the first file of each kind lands.
+///
+/// It is also the one place a data directory the server cannot write to shows
+/// up at startup, with the path in the error, rather than as an upload that
+/// fails later without a trace on the server.
+pub fn ensure_layout(root: &std::path::Path) -> std::io::Result<()> {
+    for dir in STORAGE_DIRS {
+        std::fs::create_dir_all(root.join(dir)).map_err(|err| {
+            std::io::Error::new(
+                err.kind(),
+                format!("cannot create {}: {err}", root.join(dir).display()),
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
 pub fn storage_path(state: &AppState, key: &str) -> std::path::PathBuf {
     state.config.storage_dir().join(key)
 }
@@ -861,6 +892,40 @@ pub async fn download(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_layout_has_a_folder_for_every_kind_of_file_and_can_be_made_twice() {
+        let root = std::env::temp_dir().join(format!("hydra-layout-{}", uuid::Uuid::new_v4()));
+
+        ensure_layout(&root).expect("a layout");
+        ensure_layout(&root).expect("an existing layout is left alone");
+
+        for dir in [
+            "cloud-saves",
+            "images/artwork",
+            "images/banners",
+            "images/screenshots-hd",
+            "images/souvenirs",
+        ] {
+            assert!(root.join(dir).is_dir(), "{dir}");
+        }
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_root_that_cannot_be_written_says_where() {
+        let blocker = std::env::temp_dir().join(format!("hydra-blocker-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&blocker, b"a file, not a folder").expect("a file");
+
+        let err = ensure_layout(&blocker).expect_err("a file cannot hold folders");
+        assert!(
+            err.to_string().contains(&blocker.display().to_string()),
+            "{err}"
+        );
+
+        std::fs::remove_file(&blocker).ok();
+    }
+
     use super::*;
 
     const MIB: u64 = 1024 * 1024;

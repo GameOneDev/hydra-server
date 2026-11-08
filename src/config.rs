@@ -204,3 +204,137 @@ fn load_or_generate_secret(data_dir: &Path) -> String {
     std::fs::write(&secret_path, &secret).expect("failed to persist server secret");
     secret
 }
+
+/// The host part of an address as written in a URL authority or a `Host`
+/// header: no port, no brackets around an IPv6 literal.
+fn hostname(authority: &str) -> &str {
+    let authority = authority.trim();
+
+    if let Some(rest) = authority.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest);
+    }
+
+    authority.split(':').next().unwrap_or(authority)
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Why `public_url` cannot be the address a launcher uploads to, if it can't.
+///
+/// Every presigned upload and every image link is built from this URL, and the
+/// launcher connects to exactly what it is given. The default, taken from the
+/// bind address, is `http://0.0.0.0:8788`: right for the server's own socket,
+/// but an address nobody can connect to. A server left like that hands out a
+/// slot that no launcher can fill, and nothing on the server side ever sees a
+/// request to fail.
+///
+/// `request_host` is the `Host` the caller reached the server by, when there
+/// is a caller. A loopback `public_url` is fine for a server used from the
+/// machine it runs on, and only a problem once somebody else reaches it.
+pub fn public_url_problem(public_url: &str, request_host: Option<&str>) -> Option<String> {
+    let Ok(url) = reqwest::Url::parse(public_url) else {
+        return Some(format!(
+            "{public_url:?} is not a valid URL. Set HYDRA_SERVER_PUBLIC_URL to the address \
+             people use to reach this server, for example http://192.168.1.10:8788 or \
+             https://hydra.example.com"
+        ));
+    };
+
+    if !matches!(url.scheme(), "http" | "https") {
+        return Some(format!(
+            "{public_url:?} must start with http:// or https://. Set HYDRA_SERVER_PUBLIC_URL \
+             to the address people use to reach this server"
+        ));
+    }
+
+    let host = url.host_str().map(hostname).unwrap_or_default();
+    let ip = host.parse::<std::net::IpAddr>().ok();
+
+    if host.is_empty() || ip.is_some_and(|ip| ip.is_unspecified()) {
+        return Some(format!(
+            "{public_url} is not an address a launcher can connect to ({host} means \"every \
+             network interface\" to the server, not a place to send requests). This is what \
+             HYDRA_SERVER_PUBLIC_URL defaults to when it is not set: set it to the address \
+             people use to reach this server, for example http://192.168.1.10:8788 or \
+             https://hydra.example.com"
+        ));
+    }
+
+    let reached_as = request_host.map(hostname).filter(|host| !host.is_empty());
+    if is_loopback_host(host) && reached_as.is_some_and(|reached| !is_loopback_host(reached)) {
+        return Some(format!(
+            "{public_url} only works on the machine the server runs on, but this request \
+             arrived as {}. Set HYDRA_SERVER_PUBLIC_URL to the address other machines use \
+             to reach this server",
+            reached_as.unwrap_or_default()
+        ));
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod public_url_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_derived_from_the_bind_address_is_flagged() {
+        let problem = public_url_problem("http://0.0.0.0:8788", None).expect("a problem");
+
+        assert!(problem.contains("HYDRA_SERVER_PUBLIC_URL"));
+        assert!(problem.contains("0.0.0.0"));
+        assert!(public_url_problem("http://[::]:8788", None).is_some());
+    }
+
+    #[test]
+    fn a_url_without_a_scheme_or_host_is_flagged() {
+        assert!(public_url_problem("192.168.1.10:8788", None).is_some());
+        assert!(public_url_problem("hydra.example.com", None).is_some());
+        assert!(public_url_problem("ftp://hydra.example.com", None).is_some());
+        assert!(public_url_problem("", None).is_some());
+    }
+
+    #[test]
+    fn an_address_people_can_use_is_not() {
+        for url in [
+            "http://192.168.1.10:8788",
+            "https://hydra.example.com",
+            "http://hydra.lan",
+            "http://[2001:db8::1]:8788",
+        ] {
+            assert_eq!(public_url_problem(url, None), None, "{url}");
+            assert_eq!(public_url_problem(url, Some("192.168.1.10:8788")), None);
+        }
+    }
+
+    #[test]
+    fn loopback_is_fine_until_someone_else_connects() {
+        for url in [
+            "http://127.0.0.1:8788",
+            "http://localhost:8788",
+            "http://[::1]:8788",
+        ] {
+            assert_eq!(public_url_problem(url, None), None, "{url}");
+            assert_eq!(public_url_problem(url, Some("localhost:8788")), None);
+            assert_eq!(public_url_problem(url, Some("127.0.0.1")), None);
+            assert_eq!(public_url_problem(url, Some("[::1]:8788")), None);
+            assert_eq!(public_url_problem(url, Some("")), None);
+
+            let problem = public_url_problem(url, Some("192.168.1.10:8788")).expect("a problem");
+            assert!(problem.contains("192.168.1.10"), "{problem}");
+        }
+    }
+
+    #[test]
+    fn a_host_is_read_without_its_port_or_brackets() {
+        assert_eq!(hostname("example.com:443"), "example.com");
+        assert_eq!(hostname("example.com"), "example.com");
+        assert_eq!(hostname("[::1]:8788"), "::1");
+        assert_eq!(hostname(" 10.0.0.1:80 "), "10.0.0.1");
+    }
+}

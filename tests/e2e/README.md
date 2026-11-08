@@ -44,6 +44,11 @@ so run it by hand when touching `src/cloud_saves.rs` or `src/storage.rs`.
 Start from an empty `HYDRA_SERVER_DATA_DIR`: the first test uploads at
 `baseVersion: 0`, which only holds when the game has no snapshot yet.
 
+`hd-screenshots.test.ts` runs the same way, from `src/main/services/screenshots/`.
+Its second half reads the admin panel's history, so start the server with
+`HYDRA_ADMIN_PASSWORD=...` and pass the same value as
+`HYDRA_E2E_ADMIN_PASSWORD`; without it those checks are skipped.
+
 `cloud-save-state-metadata.test.ts` runs the same way, against the same server
 (it uses its own game and user). It checks that an emulator save state's
 `stateMetadata` survives the round trip — needed from launcher 4.1.6, whose

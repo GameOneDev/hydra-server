@@ -27,10 +27,11 @@
 
 use crate::auth::CurrentUser;
 use crate::error::{ApiError, ApiResult};
+use crate::events::{self, Event};
 use crate::state::AppState;
 use crate::storage;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{header::HOST, HeaderMap, StatusCode};
 use axum::Json;
 use chrono::Utc;
 use serde::Deserialize;
@@ -102,6 +103,55 @@ fn key_issued_to(state: &AppState, user_id: &str, image_url: &str) -> Option<Str
     safe.then(|| storage_key(user_id, file_name))
 }
 
+/// Text from a request, made safe to keep in the history: no control
+/// characters, no more than `max` characters.
+fn clip(text: &str, max: usize) -> String {
+    text.chars()
+        .filter(|c| !c.is_control())
+        .take(max)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// `scheme://host:port` of this server's public address: where the launcher is
+/// told to send the image, without the token in the rest of the URL.
+fn storage_origin(state: &AppState) -> String {
+    clip(&state.config.public_url, 200)
+}
+
+fn request_host(headers: &HeaderMap) -> Option<&str> {
+    headers.get(HOST).and_then(|value| value.to_str().ok())
+}
+
+/// Writes a refused upload to the history, then hands the error back so the
+/// call site stays a single `return Err(...)`.
+async fn refused(
+    state: &AppState,
+    user_id: &str,
+    screenshot_id: &str,
+    why: &str,
+    error: ApiError,
+) -> ApiError {
+    events::record(
+        state,
+        Event::sync(
+            "hd_screenshot.upload_refused",
+            user_id,
+            format!("Refused a 1080p screenshot copy: {why}"),
+        )
+        .detail(json!({
+            "screenshotId": clip(screenshot_id, 64),
+            "reason": why,
+            "status": error.status.as_u16(),
+        }))
+        .warning(),
+    )
+    .await;
+
+    error
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UploadUrlRequest {
@@ -118,37 +168,95 @@ pub struct UploadUrlRequest {
 pub async fn upload_url(
     State(state): State<AppState>,
     user: CurrentUser,
+    headers: HeaderMap,
     Path(screenshot_id): Path<String>,
     Json(payload): Json<UploadUrlRequest>,
 ) -> ApiResult<Json<Value>> {
+    let user_id = user.0.id.as_str();
+
     if !valid_screenshot_id(&screenshot_id) {
-        return Err(ApiError::bad_request("invalid screenshot id"));
+        let error = ApiError::bad_request("invalid screenshot id");
+        return Err(refused(
+            &state,
+            user_id,
+            &screenshot_id,
+            "the screenshot id is not valid",
+            error,
+        )
+        .await);
     }
 
     let ext = payload.image_ext.trim_start_matches('.').to_lowercase();
     if !ALLOWED_EXTENSIONS.contains(&ext.as_str()) {
-        return Err(ApiError::bad_request("unsupported image format"));
+        let error = ApiError::bad_request("unsupported image format");
+        let why = format!("{:?} is not a supported image format", clip(&ext, 16));
+        return Err(refused(&state, user_id, &screenshot_id, &why, error).await);
     }
 
     /* The declared size is what the quota is checked against and what the
     signed URL is bound to; `storage::upload` then holds it to the real bytes,
     so understating it buys nothing. */
     let length = payload.image_length.unwrap_or(0);
-    let limit = storage::upload_limit(length)
-        .ok_or_else(|| ApiError::bad_request("imageLength is required"))?;
+    let Some(limit) = storage::upload_limit(length) else {
+        let error = ApiError::bad_request("imageLength is required");
+        return Err(refused(
+            &state,
+            user_id,
+            &screenshot_id,
+            "the launcher did not say how large the image is",
+            error,
+        )
+        .await);
+    };
 
     if length > MAX_IMAGE_BYTES {
-        return Err(ApiError::new(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "image is too large",
-        ));
+        let error = ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "image is too large");
+        let why = format!("the image is {length} bytes, over the {MAX_IMAGE_BYTES} byte limit");
+        return Err(refused(&state, user_id, &screenshot_id, &why, error).await);
     }
 
-    storage::check_quota(&state, &user.0.id, length).await?;
+    if let Err(error) = storage::check_quota(&state, user_id, length).await {
+        let why = if error.status == StatusCode::PAYLOAD_TOO_LARGE {
+            "the account's storage quota is full"
+        } else {
+            "the account's storage quota could not be checked"
+        };
+        return Err(refused(&state, user_id, &screenshot_id, why, error).await);
+    }
 
     /* Flat, uuid-named keys: which screenshot a file belongs to lives in the
     database, so nothing from the request ends up in a filesystem path. */
-    let key = storage_key(&user.0.id, &format!("{}.{ext}", Uuid::new_v4()));
+    let key = storage_key(user_id, &format!("{}.{ext}", Uuid::new_v4()));
+
+    /* The launcher is about to connect to this address, and a server that is
+    not reachable at it never sees that attempt. So the slot is recorded as
+    it is handed out, with where the image is to be sent, and said plainly
+    when that address cannot work. */
+    let problem =
+        crate::config::public_url_problem(&state.config.public_url, request_host(&headers));
+    let origin = storage_origin(&state);
+
+    let mut started = Event::sync(
+        "hd_screenshot.upload_started",
+        user_id,
+        match &problem {
+            Some(problem) => format!(
+                "Gave out an upload slot for a 1080p screenshot copy, but the launcher cannot reach it: {problem}"
+            ),
+            None => format!("Gave out an upload slot for a 1080p screenshot copy (image goes to {origin})"),
+        },
+    )
+    .detail(json!({
+        "screenshotId": screenshot_id,
+        "declaredBytes": length,
+        "storageOrigin": origin,
+        "requestHost": request_host(&headers).map(|host| clip(host, 200)),
+    }))
+    .size(length);
+    if problem.is_some() {
+        started = started.warning();
+    }
+    events::record(&state, started).await;
 
     Ok(Json(json!({
         "presignedUrl": storage::sign_upload_url(&state, &key, limit),
@@ -197,7 +305,34 @@ pub async fn save(
     let size_in_bytes = match tokio::fs::metadata(storage::storage_path(&state, &key)).await {
         Ok(metadata) if metadata.is_file() && metadata.len() > 0 => metadata.len() as i64,
         _ => {
-            return Err(ApiError::new(StatusCode::CONFLICT, UPLOAD_INCOMPLETE_CODE));
+            let origin = storage_origin(&state);
+            let reason = format!(
+                "the image never reached storage. The launcher was told to send it to {origin} \
+                 (HYDRA_SERVER_PUBLIC_URL): check that the machine running the launcher can \
+                 connect to that address"
+            );
+
+            events::record(
+                &state,
+                Event::sync(
+                    "hd_screenshot.upload_failed",
+                    &user.0.id,
+                    format!("The 1080p screenshot copy was not saved: {reason}"),
+                )
+                .detail(json!({
+                    "screenshotId": screenshot_id,
+                    "stage": "upload",
+                    "storageOrigin": origin,
+                    "reportedBy": "server",
+                }))
+                .warning(),
+            )
+            .await;
+
+            /* `message` stays the code the launcher matches on; the sentence
+            for a person goes beside it. */
+            return Err(ApiError::new(StatusCode::CONFLICT, UPLOAD_INCOMPLETE_CODE)
+                .with_extra(json!({ "detail": reason })));
         }
     };
 
@@ -251,11 +386,33 @@ pub async fn save(
     .execute(&state.pool)
     .await?;
 
+    let replaced = previous.is_some();
     if let Some(previous) = previous {
         if previous != key {
             storage::delete_object(&state, &previous).await;
         }
     }
+
+    events::record(
+        &state,
+        Event::sync(
+            "hd_screenshot.uploaded",
+            &user.0.id,
+            format!(
+                "Saved a 1080p screenshot copy ({}\u{d7}{}, {visibility})",
+                payload.width, payload.height
+            ),
+        )
+        .detail(json!({
+            "screenshotId": screenshot_id,
+            "width": payload.width,
+            "height": payload.height,
+            "visibility": visibility,
+            "replacedPreviousCopy": replaced,
+        }))
+        .size(size_in_bytes),
+    )
+    .await;
 
     Ok(Json(json!({ "ok": true, "url": public_url(&state, &key) })))
 }
@@ -327,9 +484,152 @@ pub async fn delete(
 
     if let Some(key) = removed {
         storage::delete_object(&state, &key).await;
+
+        events::record(
+            &state,
+            Event::sync(
+                "hd_screenshot.deleted",
+                &user.0.id,
+                "Deleted a 1080p screenshot copy",
+            )
+            .detail(json!({ "screenshotId": screenshot_id })),
+        )
+        .await;
     }
 
     Ok(Json(json!({ "ok": true })))
+}
+
+/// The steps of a copy's upload, in the words the history uses for them. What
+/// the launcher reports names one of these.
+const FAILURE_STAGES: &[(&str, &str)] = &[
+    ("read", "reading the screenshot file"),
+    ("compress", "compressing the screenshot"),
+    ("upload-url", "asking this server for an upload slot"),
+    ("upload", "sending the image to the storage address"),
+    ("save", "attaching the image to the screenshot"),
+];
+
+/// The most failure reports one account's history takes in an hour. A launcher
+/// retries on a growing delay, so a healthy one never gets near this; it
+/// stops a client in a loop from filling the history.
+const FAILURE_REPORTS_PER_HOUR: i64 = 120;
+
+/// What the launcher knows about why a copy did not upload.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FailureReport {
+    pub stage: String,
+    #[serde(default)]
+    pub message: Option<String>,
+    /// A network error code such as `ECONNREFUSED`.
+    #[serde(default)]
+    pub code: Option<String>,
+    /// The HTTP status of an answer, when there was one.
+    #[serde(default)]
+    pub status: Option<i64>,
+    /// Where the launcher was sending to: the address, not the token.
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub attempts: Option<i64>,
+    #[serde(default)]
+    pub will_retry: Option<bool>,
+}
+
+/// POST /profile/hd-screenshots/{screenshotId}/failure
+///
+/// The server can only see an upload that reaches it. When the launcher cannot
+/// connect to the address it was given, or fails before it asks for one, there
+/// is nothing here to log, and the history would show nothing wrong. The
+/// launcher says so instead, and it is written down next to the rest.
+pub async fn report_failure(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    headers: HeaderMap,
+    Path(screenshot_id): Path<String>,
+    Json(report): Json<FailureReport>,
+) -> ApiResult<Json<Value>> {
+    if !valid_screenshot_id(&screenshot_id) {
+        return Err(ApiError::bad_request("invalid screenshot id"));
+    }
+
+    let Some((_, doing)) = FAILURE_STAGES
+        .iter()
+        .find(|(stage, _)| *stage == report.stage)
+    else {
+        return Err(ApiError::bad_request("unknown stage"));
+    };
+
+    let since = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    let recent: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM events
+         WHERE user_id = ? AND kind = 'hd_screenshot.upload_failed' AND at >= ?",
+    )
+    .bind(&user.0.id)
+    .bind(&since)
+    .fetch_one(&state.pool)
+    .await?;
+    if recent >= FAILURE_REPORTS_PER_HOUR {
+        return Ok(Json(json!({ "ok": true, "recorded": false })));
+    }
+
+    let message = report.message.as_deref().map(|text| clip(text, 300));
+    let code = report.code.as_deref().map(|text| clip(text, 64));
+    let target = report.target.as_deref().map(|text| clip(text, 200));
+
+    let what = [
+        message.clone().filter(|text| !text.is_empty()),
+        code.clone().filter(|text| !text.is_empty()),
+        report
+            .status
+            .map(|status| format!("the server answered {status}")),
+    ]
+    .into_iter()
+    .flatten()
+    .next()
+    .unwrap_or_else(|| "no reason was given".to_string());
+
+    let outlook = match report.will_retry {
+        Some(true) => " It will try again.",
+        Some(false) => " It has given up on this one.",
+        None => "",
+    };
+
+    /* An upload that could not connect is almost always this server's own
+    address not being one the launcher can use, and the server can tell. */
+    let hint = (report.stage == "upload" && report.status.is_none())
+        .then(|| {
+            crate::config::public_url_problem(&state.config.public_url, request_host(&headers))
+        })
+        .flatten()
+        .map(|problem| format!(" {problem}"))
+        .unwrap_or_default();
+
+    events::record(
+        &state,
+        Event::sync(
+            "hd_screenshot.upload_failed",
+            &user.0.id,
+            format!("The launcher could not upload a 1080p screenshot copy while {doing}: {what}.{outlook}{hint}"),
+        )
+        .detail(json!({
+            "screenshotId": screenshot_id,
+            "stage": report.stage,
+            "message": message,
+            "code": code,
+            "status": report.status,
+            "target": target,
+            "attempts": report.attempts,
+            "willRetry": report.will_retry,
+            "storageOrigin": storage_origin(&state),
+            "reportedBy": "launcher",
+        }))
+        .warning(),
+    )
+    .await;
+
+    Ok(Json(json!({ "ok": true, "recorded": true })))
 }
 
 #[derive(Deserialize)]
@@ -455,6 +755,7 @@ mod tests {
         let Json(response) = upload_url(
             State(server.state.clone()),
             server.user(user),
+            HeaderMap::new(),
             Path(screenshot_id.to_string()),
             Json(UploadUrlRequest {
                 image_ext: "jpg".to_string(),
@@ -516,6 +817,7 @@ mod tests {
             upload_url(
                 State(server.state.clone()),
                 server.user("alice"),
+                HeaderMap::new(),
                 Path(id.to_string()),
                 Json(UploadUrlRequest {
                     image_ext: ext.to_string(),
@@ -571,6 +873,7 @@ mod tests {
         let refusal = upload_url(
             State(server.state.clone()),
             server.user("alice"),
+            HeaderMap::new(),
             Path("shot-1".to_string()),
             Json(UploadUrlRequest {
                 image_ext: "jpg".to_string(),
@@ -871,5 +1174,376 @@ mod tests {
                 .await,
             0
         );
+    }
+
+    /* What the history says, oldest first: kind, severity and summary. */
+    async fn history(server: &TestServer) -> Vec<(String, String, String)> {
+        sqlx::query_as(
+            "SELECT kind, severity, summary FROM events
+             WHERE kind LIKE 'hd_screenshot.%' ORDER BY id ASC",
+        )
+        .fetch_all(&server.state.pool)
+        .await
+        .expect("the history")
+    }
+
+    async fn detail_of(server: &TestServer, kind: &str) -> Value {
+        let detail: String =
+            sqlx::query_scalar("SELECT detail FROM events WHERE kind = ? ORDER BY id DESC LIMIT 1")
+                .bind(kind)
+                .fetch_one(&server.state.pool)
+                .await
+                .expect("an event with detail");
+
+        serde_json::from_str(&detail).expect("json detail")
+    }
+
+    async fn report(
+        server: &TestServer,
+        host: Option<&str>,
+        id: &str,
+        report: FailureReport,
+    ) -> ApiResult<Value> {
+        let mut headers = HeaderMap::new();
+        if let Some(host) = host {
+            headers.insert(HOST, host.parse().expect("a host"));
+        }
+
+        report_failure(
+            State(server.state.clone()),
+            server.user("alice"),
+            headers,
+            Path(id.to_string()),
+            Json(report),
+        )
+        .await
+        .map(|Json(body)| body)
+    }
+
+    fn failure(stage: &str, message: &str) -> FailureReport {
+        FailureReport {
+            stage: stage.to_string(),
+            message: Some(message.to_string()),
+            code: None,
+            status: None,
+            target: None,
+            attempts: None,
+            will_retry: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_finished_upload_is_written_to_the_history_with_its_size() {
+        let server = TestServer::start().await;
+
+        let url = reserve(&server, "alice", "shot-1", 5).await;
+        land(&server, &url, b"12345").await;
+        attach(&server, "alice", "shot-1", &url, "PUBLIC")
+            .await
+            .expect("saved");
+
+        let kinds: Vec<_> = history(&server)
+            .await
+            .into_iter()
+            .map(|(kind, severity, _)| (kind, severity))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (
+                    "hd_screenshot.upload_started".to_string(),
+                    "info".to_string()
+                ),
+                ("hd_screenshot.uploaded".to_string(), "info".to_string()),
+            ]
+        );
+
+        let size: i64 = server
+            .scalar("SELECT size_bytes FROM events WHERE kind = 'hd_screenshot.uploaded'")
+            .await;
+        assert_eq!(size, 5, "the bytes that are on disk");
+
+        let user: String = server
+            .scalar("SELECT user_id FROM events WHERE kind = 'hd_screenshot.uploaded'")
+            .await;
+        assert_eq!(user, "alice");
+
+        let detail = detail_of(&server, "hd_screenshot.uploaded").await;
+        assert_eq!(detail["screenshotId"], "shot-1");
+        assert_eq!(detail["width"], 1920);
+        assert_eq!(detail["replacedPreviousCopy"], false);
+    }
+
+    #[tokio::test]
+    async fn a_copy_whose_bytes_never_arrived_is_written_up_and_says_where_they_were_to_go() {
+        let server = TestServer::start().await;
+        let url = reserve(&server, "alice", "shot-1", 5).await;
+
+        let refusal = attach(&server, "alice", "shot-1", &url, "PUBLIC")
+            .await
+            .expect_err("nothing was uploaded");
+
+        assert_eq!(refusal.status, StatusCode::CONFLICT);
+        assert_eq!(
+            refusal.message, UPLOAD_INCOMPLETE_CODE,
+            "the code the launcher matches on is unchanged"
+        );
+        let sentence = refusal.extra.as_ref().expect("a sentence")["detail"]
+            .as_str()
+            .expect("text");
+        assert!(sentence.contains("never reached storage"), "{sentence}");
+        assert!(sentence.contains("HYDRA_SERVER_PUBLIC_URL"), "{sentence}");
+
+        let failed: Vec<_> = history(&server)
+            .await
+            .into_iter()
+            .filter(|(kind, _, _)| kind == "hd_screenshot.upload_failed")
+            .collect();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].1, "warning");
+        assert!(
+            failed[0].2.contains(&server.state.config.public_url),
+            "names the address it was to be sent to: {}",
+            failed[0].2
+        );
+
+        assert!(
+            find(&server, "alice", "alice", "shot-1").await.is_none(),
+            "and nothing was recorded as a copy"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_upload_is_written_up_with_the_reason() {
+        let server = TestServer::start().await;
+        server
+            .limits(
+                "alice",
+                crate::limits::Overrides {
+                    max_bytes_per_user: Some(1_000_000),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        for (ext, length) in [("exe", Some(10)), ("jpg", None), ("jpg", Some(2_000_000))] {
+            let _ = upload_url(
+                State(server.state.clone()),
+                server.user("alice"),
+                HeaderMap::new(),
+                Path("shot-1".to_string()),
+                Json(UploadUrlRequest {
+                    image_ext: ext.to_string(),
+                    image_length: length,
+                }),
+            )
+            .await
+            .expect_err("a refusal");
+        }
+
+        let refused = history(&server).await;
+        assert_eq!(refused.len(), 3);
+        assert!(refused
+            .iter()
+            .all(|(kind, severity, _)| kind == "hd_screenshot.upload_refused"
+                && severity == "warning"));
+        assert!(
+            refused[0].2.contains("not a supported image format"),
+            "{}",
+            refused[0].2
+        );
+        assert!(
+            refused[1].2.contains("did not say how large"),
+            "{}",
+            refused[1].2
+        );
+        assert!(refused[2].2.contains("quota is full"), "{}", refused[2].2);
+    }
+
+    #[tokio::test]
+    async fn a_slot_handed_out_at_an_address_nobody_can_reach_is_called_out() {
+        let mut server = TestServer::start().await;
+
+        /* What a server started without HYDRA_SERVER_PUBLIC_URL hands out. */
+        let mut config = (*server.state.config).clone();
+        config.public_url = "http://0.0.0.0:8788".to_string();
+        server.state.config = std::sync::Arc::new(config);
+
+        let _ = reserve(&server, "alice", "shot-1", 5).await;
+
+        let started = history(&server).await;
+        assert_eq!(started.len(), 1);
+        assert_eq!(started[0].0, "hd_screenshot.upload_started");
+        assert_eq!(started[0].1, "warning");
+        assert!(started[0].2.contains("cannot reach it"), "{}", started[0].2);
+        assert!(
+            started[0].2.contains("HYDRA_SERVER_PUBLIC_URL"),
+            "{}",
+            started[0].2
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_copy_is_written_up_once() {
+        let server = TestServer::start().await;
+        let url = reserve(&server, "alice", "shot-1", 5).await;
+        land(&server, &url, b"12345").await;
+        attach(&server, "alice", "shot-1", &url, "PUBLIC")
+            .await
+            .expect("saved");
+
+        for _ in 0..2 {
+            let _ = delete(
+                State(server.state.clone()),
+                server.user("alice"),
+                Path("shot-1".to_string()),
+            )
+            .await
+            .expect("deleted");
+        }
+
+        let deleted = history(&server)
+            .await
+            .into_iter()
+            .filter(|(kind, _, _)| kind == "hd_screenshot.deleted")
+            .count();
+        assert_eq!(deleted, 1, "the repeat had nothing to delete");
+    }
+
+    #[tokio::test]
+    async fn the_launcher_can_say_why_an_upload_failed_and_it_lands_in_the_history() {
+        let server = TestServer::start().await;
+
+        let mut upload = failure("upload", "connect ECONNREFUSED 10.0.0.9:8788");
+        upload.code = Some("ECONNREFUSED".to_string());
+        upload.target = Some("http://10.0.0.9:8788".to_string());
+        upload.attempts = Some(2);
+        upload.will_retry = Some(true);
+
+        let answer = report(&server, None, "shot-1", upload)
+            .await
+            .expect("recorded");
+        assert_eq!(answer["recorded"], true);
+
+        let entry = history(&server).await;
+        assert_eq!(entry.len(), 1);
+        assert_eq!(entry[0].0, "hd_screenshot.upload_failed");
+        assert_eq!(entry[0].1, "warning");
+        assert!(
+            entry[0]
+                .2
+                .contains("sending the image to the storage address"),
+            "{}",
+            entry[0].2
+        );
+        assert!(
+            entry[0].2.contains("connect ECONNREFUSED 10.0.0.9:8788"),
+            "{}",
+            entry[0].2
+        );
+        assert!(entry[0].2.contains("It will try again."), "{}", entry[0].2);
+
+        let detail = detail_of(&server, "hd_screenshot.upload_failed").await;
+        assert_eq!(detail["stage"], "upload");
+        assert_eq!(detail["code"], "ECONNREFUSED");
+        assert_eq!(detail["target"], "http://10.0.0.9:8788");
+        assert_eq!(detail["attempts"], 2);
+        assert_eq!(detail["reportedBy"], "launcher");
+    }
+
+    #[tokio::test]
+    async fn a_failure_to_connect_names_this_servers_own_address_when_that_is_the_problem() {
+        let mut server = TestServer::start().await;
+        let mut config = (*server.state.config).clone();
+        config.public_url = "http://0.0.0.0:8788".to_string();
+        server.state.config = std::sync::Arc::new(config);
+
+        report(
+            &server,
+            Some("192.168.1.10:8788"),
+            "shot-1",
+            failure("upload", "connect EADDRNOTAVAIL"),
+        )
+        .await
+        .expect("recorded");
+
+        let entry = history(&server).await;
+        assert!(entry[0].2.contains("0.0.0.0"), "{}", entry[0].2);
+        assert!(
+            entry[0].2.contains("HYDRA_SERVER_PUBLIC_URL"),
+            "{}",
+            entry[0].2
+        );
+
+        /* An answer from the server means it was reachable, so its address is
+        not what to blame. */
+        let mut refused = failure("upload", "Request failed with status code 403");
+        refused.status = Some(403);
+        report(&server, Some("192.168.1.10:8788"), "shot-2", refused)
+            .await
+            .expect("recorded");
+        let entry = history(&server).await;
+        assert!(
+            !entry[1].2.contains("HYDRA_SERVER_PUBLIC_URL"),
+            "{}",
+            entry[1].2
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failure_report_is_checked_and_bounded() {
+        let server = TestServer::start().await;
+
+        let unknown = report(&server, None, "shot-1", failure("teleport", "x"))
+            .await
+            .expect_err("not a step of an upload");
+        assert_eq!(unknown.status, StatusCode::BAD_REQUEST);
+
+        let bad_id = report(&server, None, "../x", failure("upload", "x"))
+            .await
+            .expect_err("not an official id");
+        assert_eq!(bad_id.status, StatusCode::BAD_REQUEST);
+
+        /* Control characters and length are the sender's to choose, so neither
+        gets into the history. */
+        let long = format!("bad\n{}\u{0007}", "x".repeat(1_000));
+        report(&server, None, "shot-1", failure("compress", &long))
+            .await
+            .expect("recorded");
+        let message = detail_of(&server, "hd_screenshot.upload_failed").await["message"]
+            .as_str()
+            .expect("text")
+            .to_string();
+        assert_eq!(message.chars().count(), 300);
+        assert!(!message.chars().any(char::is_control));
+
+        /* A report with nothing in it still says something. */
+        let mut empty = failure("save", "");
+        empty.message = None;
+        report(&server, None, "shot-1", empty)
+            .await
+            .expect("recorded");
+        let entry = history(&server).await;
+        assert!(entry
+            .last()
+            .expect("an entry")
+            .2
+            .contains("no reason was given"));
+
+        /* A client in a loop fills the history only so far. */
+        for _ in 0..FAILURE_REPORTS_PER_HOUR {
+            report(&server, None, "shot-1", failure("read", "again"))
+                .await
+                .expect("answered");
+        }
+        let kept: i64 = server
+            .scalar("SELECT COUNT(*) FROM events WHERE kind = 'hd_screenshot.upload_failed'")
+            .await;
+        assert_eq!(kept, FAILURE_REPORTS_PER_HOUR);
+
+        let over = report(&server, None, "shot-1", failure("read", "once more"))
+            .await
+            .expect("still answered, so the launcher is not left retrying the report");
+        assert_eq!(over["recorded"], false);
     }
 }

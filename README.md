@@ -79,7 +79,7 @@ subscription needed.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `HYDRA_SERVER_BIND` | `0.0.0.0:8788` | Listen address |
-| `HYDRA_SERVER_PUBLIC_URL` | `http://<bind>` | URL clients reach the server on — **must** be set when behind a reverse proxy, since upload/download URLs are built from it |
+| `HYDRA_SERVER_PUBLIC_URL` | `http://<bind>` | URL clients reach the server on — **must** be set when behind a reverse proxy, or whenever the bind address is `0.0.0.0`, since upload/download URLs are built from it and the launcher connects to exactly what it is given. The server warns at startup when it can't work |
 | `HYDRA_SERVER_DATA_DIR` | `./data` | SQLite database + stored save files |
 | `HYDRA_OFFICIAL_API_URL` | `https://hydra-api-us-east-1.losbroxas.org` | Official API used to validate launcher tokens. If token validation fails with your launcher build, set this to the same API URL the launcher was built with (`MAIN_VITE_API_URL`) |
 | `HYDRA_ADMIN_PASSWORD` | *(empty)* | Password for `/admin`. Panel is disabled while empty |
@@ -446,6 +446,7 @@ Implements the endpoints the launcher routes to a self-hosted cloud server:
 - `GET /users/{userId}/games/achievements?shop=&objectId=` — the souvenir
   thumbnail for each unlock, for the achievement list
 - `POST /profile/hd-screenshots/{screenshotId}/upload-url`,
+  `POST /profile/hd-screenshots/{screenshotId}/failure`,
   `PUT|PATCH|DELETE /profile/hd-screenshots/{screenshotId}`,
   `POST /profile/hd-screenshots/lookup` — 1080p copies of official Hydra's
   screenshots (see [HD screenshots](#hd-screenshots))
@@ -700,6 +701,40 @@ Copies count against the owner's quota, are listed under their own area on the
 *Storage* screen, can be purged per user from the panel, and are served from
 `GET /images/screenshots-hd/…` under an unguessable name like the other images.
 Advertised as `screenshots-hd`.
+
+#### When a copy does not arrive
+
+The panel's **Events** screen records every step, under the `hd_screenshot.`
+family (filter by it, or by user):
+
+| Event | When |
+| --- | --- |
+| `hd_screenshot.upload_started` | A launcher was given a slot to upload to. A *warning* when the address it was told to use can't work (see below). |
+| `hd_screenshot.uploaded` | The copy was saved: size, dimensions, visibility. |
+| `hd_screenshot.upload_refused` | The slot was refused — unsupported format, no size, too large, quota full — with the reason in plain words. |
+| `hd_screenshot.upload_failed` | The copy did not arrive. Written by the server when the launcher asked to save an image that never reached storage, and by the launcher itself (below) for everything the server can't see. |
+| `hd_screenshot.deleted` | A copy was deleted. |
+
+A *started* with no *uploaded* after it means the launcher got its slot and
+never completed. The server can't see why — a launcher that can't connect never
+makes a request — so the launcher says so: `POST
+/profile/hd-screenshots/{screenshotId}/failure` takes the step it stopped at
+(`read`, `compress`, `upload-url`, `upload` or `save`), the error and the
+address it was sending to, and records it as an `upload_failed` event. It is
+best-effort, bounded to 120 reports per account per hour, and never carries the
+signed upload path. A server without it answers 404 and the launcher carries on.
+
+A common cause of an upload that never connects is
+`HYDRA_SERVER_PUBLIC_URL`: every upload address is built from it, so it has to
+be one the launcher's machine can reach. Left unset it defaults to the bind
+address (`http://0.0.0.0:8788`), which no client can connect to. The server says
+so at startup (`HYDRA_SERVER_PUBLIC_URL: …`) and again in the event above.
+
+On start the server creates every storage folder (`cloud-saves`, `artifacts`,
+`emulation-saves`, and `images/` with `artwork`, `avatars`, `banners`,
+`screenshots-hd`, `souvenirs`) so the layout is there before the first file of
+each kind lands, and a data directory it can't write to fails at start with the
+path in the error.
 
 ### Capabilities
 

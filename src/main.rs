@@ -66,7 +66,16 @@ async fn main() {
 
     let config = Config::from_env();
 
-    std::fs::create_dir_all(config.storage_dir()).expect("failed to create storage dir");
+    if let Err(err) = storage::ensure_layout(&config.storage_dir()) {
+        panic!("failed to prepare the storage folder: {err}. Check that the data directory is writable by the user the server runs as");
+    }
+
+    /* Every upload and image link is built from this address. Said once at
+    startup because nothing later can: a launcher that cannot connect to it
+    never produces a request for the server to log. */
+    if let Some(problem) = config::public_url_problem(&config.public_url, None) {
+        tracing::warn!("HYDRA_SERVER_PUBLIC_URL: {problem}");
+    }
 
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
@@ -267,6 +276,10 @@ fn router(_state: AppState) -> Router<AppState> {
         .route(
             "/profile/hd-screenshots/{screenshot_id}/upload-url",
             post(hd_screenshots::upload_url),
+        )
+        .route(
+            "/profile/hd-screenshots/{screenshot_id}/failure",
+            post(hd_screenshots::report_failure),
         )
         .route(
             "/profile/hd-screenshots/{screenshot_id}",

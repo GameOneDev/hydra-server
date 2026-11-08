@@ -24,6 +24,11 @@ import {
 
 const BASE = process.env.HYDRA_E2E_URL ?? "http://127.0.0.1:8799";
 
+/* Reading the history needs the admin panel: start the server with
+   HYDRA_ADMIN_PASSWORD and pass the same value here. Without it the history
+   checks are skipped and the rest still runs. */
+const ADMIN_PASSWORD = process.env.HYDRA_E2E_ADMIN_PASSWORD;
+
 /* The stub official API makes the bearer token the user id. */
 const call = (
   token: string,
@@ -231,3 +236,180 @@ describe("1080p screenshot copies against a running server", () => {
     assert.equal((await fetch(url)).status, 404, "the file is gone too");
   });
 });
+
+interface HistoryEntry {
+  kind: string;
+  severity: string;
+  summary: string;
+  user: { id: string } | null;
+  sizeBytes: number | null;
+  detail: Record<string, unknown> | null;
+}
+
+let adminCookie: string | undefined;
+
+/* The panel's Events screen reads this same endpoint. */
+const history = async (userId: string): Promise<HistoryEntry[]> => {
+  if (!adminCookie) {
+    const login = await fetch(`${BASE}/admin/api/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ password: ADMIN_PASSWORD }),
+    });
+    assert.equal(login.status, 200, "the admin password is the server's");
+    adminCookie = (login.headers.get("set-cookie") ?? "").split(";")[0];
+  }
+
+  const response = await fetch(
+    `${BASE}/admin/api/events?kind=hd_screenshot.&userId=${encodeURIComponent(userId)}&perPage=100`,
+    { headers: { cookie: adminCookie } }
+  );
+  assert.equal(response.status, 200);
+
+  const { rows } = (await response.json()) as { rows: HistoryEntry[] };
+  return rows
+    .filter((row) => row.user?.id === userId)
+    .reverse(); /* the panel lists newest first */
+};
+
+describe(
+  "what the admin panel's history shows about 1080p copies",
+  { skip: ADMIN_PASSWORD ? false : "set HYDRA_E2E_ADMIN_PASSWORD" },
+  () => {
+    const carol = `carol-${randomUUID().slice(0, 8)}`;
+    const worked = randomUUID();
+    const neverArrived = randomUUID();
+    const unreachable = randomUUID();
+
+    it("records an upload that worked, with its size", async () => {
+      const outcome = await uploadHdCopy(
+        { screenshotId: worked, path: "/captures/a.png", visibility: "PUBLIC" },
+        depsFor(carol)
+      );
+      assert.deepEqual(outcome, { kind: "uploaded" });
+
+      const entries = await history(carol);
+      assert.deepEqual(
+        entries.map((entry) => entry.kind),
+        ["hd_screenshot.upload_started", "hd_screenshot.uploaded"]
+      );
+
+      const uploaded = entries[1];
+      assert.equal(uploaded.severity, "info");
+      assert.equal(uploaded.sizeBytes, IMAGE.byteLength);
+      assert.equal(uploaded.detail?.screenshotId, worked);
+      assert.match(uploaded.summary, /1920.1080/);
+    });
+
+    it("says so when the image never reached storage, and where it was to go", async () => {
+      /* The launcher got its slot and then never sent a byte — what a launcher
+         that cannot connect to the address does. */
+      const deps: HdCopyUploadDeps = {
+        ...depsFor(carol),
+        putImage: async () => {},
+      };
+
+      const outcome = await uploadHdCopy(
+        { screenshotId: neverArrived, path: "/c.png", visibility: "PUBLIC" },
+        deps
+      );
+
+      assert.equal(outcome.kind, "retry", "a 409 is worth another attempt");
+      assert.equal(outcome.kind === "retry" && outcome.failure.stage, "save");
+      assert.equal(outcome.kind === "retry" && outcome.failure.status, 409);
+
+      const failed = (await history(carol)).filter(
+        (entry) =>
+          entry.kind === "hd_screenshot.upload_failed" &&
+          entry.detail?.screenshotId === neverArrived
+      );
+      assert.equal(failed.length, 1);
+      assert.equal(failed[0].severity, "warning");
+      assert.match(failed[0].summary, /never reached storage/);
+      assert.ok(
+        failed[0].summary.includes(BASE),
+        `names ${BASE}: ${failed[0].summary}`
+      );
+      assert.equal(failed[0].detail?.reportedBy, "server");
+    });
+
+    it("takes the launcher's own account of an upload it could not even attempt", async () => {
+      /* The server saw the slot given out and then nothing: no PUT, no save.
+         What the launcher knows is the only thing that explains it, so it says
+         so with the same request screenshot-hd-copies.ts makes. */
+      const connectError = Object.assign(
+        new Error("connect ECONNREFUSED 10.0.0.9:8788"),
+        { code: "ECONNREFUSED" }
+      );
+      const deps: HdCopyUploadDeps = {
+        ...depsFor(carol),
+        putImage: async () => {
+          throw connectError;
+        },
+      };
+
+      const outcome = await uploadHdCopy(
+        { screenshotId: unreachable, path: "/d.png", visibility: "PUBLIC" },
+        deps
+      );
+      assert.equal(outcome.kind, "retry");
+      if (outcome.kind !== "retry") return;
+
+      assert.equal(outcome.failure.stage, "upload");
+      assert.equal(outcome.failure.code, "ECONNREFUSED");
+      assert.equal(outcome.failure.target, BASE);
+
+      const report = await call(
+        carol,
+        "POST",
+        `${HD_SCREENSHOTS_PATH}/${unreachable}/failure`,
+        { ...outcome.failure, attempts: 1, willRetry: true }
+      );
+      assert.equal(report.status, 200);
+      assert.deepEqual(await report.json(), { ok: true, recorded: true });
+
+      const entries = (await history(carol)).filter(
+        (entry) => entry.detail?.screenshotId === unreachable
+      );
+      assert.deepEqual(
+        entries.map((entry) => entry.kind),
+        ["hd_screenshot.upload_started", "hd_screenshot.upload_failed"],
+        "a slot, and then the reason nothing came of it"
+      );
+
+      const [, failed] = entries;
+      assert.equal(failed.severity, "warning");
+      assert.match(failed.summary, /sending the image to the storage address/);
+      assert.match(failed.summary, /ECONNREFUSED 10\.0\.0\.9:8788/);
+      assert.match(failed.summary, /It will try again\./);
+      assert.equal(failed.detail?.reportedBy, "launcher");
+      assert.equal(failed.detail?.target, BASE);
+    });
+
+    it("refuses a report that is not about a step of an upload", async () => {
+      const response = await call(
+        carol,
+        "POST",
+        `${HD_SCREENSHOTS_PATH}/${unreachable}/failure`,
+        { stage: "nonsense", message: "x" }
+      );
+
+      assert.equal(response.status, 400);
+    });
+
+    it("records a delete", async () => {
+      const response = await call(
+        carol,
+        "DELETE",
+        `${HD_SCREENSHOTS_PATH}/${worked}`
+      );
+      assert.equal(response.status, 200);
+
+      const deleted = (await history(carol)).filter(
+        (entry) => entry.kind === "hd_screenshot.deleted"
+      );
+      assert.equal(deleted.length, 1);
+      assert.equal(deleted[0].detail?.screenshotId, worked);
+    });
+  }
+);
