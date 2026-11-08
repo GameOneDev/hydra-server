@@ -396,6 +396,14 @@ To record something new in the log, build an `events::Event` and hand it to
 `events::record`; the History screen, the audit trail and every webhook pick it
 up with no further wiring.
 
+An event has a **title** (`summary`) and, optionally, a **description**. The
+title is one line of the History list, so keep it short; anything that needs a
+sentence (what happened, why, what to check) goes in `.description(...)`, which
+is kept in the event's detail under `description` and shown in the detail view
+you get by opening the row. A title past 140 characters is cut, and its full
+text becomes the description, so a long one is never lost. In the list the title
+is clipped to a line and its full text is the row's tooltip.
+
 ## API surface
 
 Implements the endpoints the launcher routes to a self-hosted cloud server:
@@ -714,6 +722,9 @@ family (filter by it, or by user):
 | `hd_screenshot.upload_refused` | The slot was refused — unsupported format, no size, too large, quota full — with the reason in plain words. |
 | `hd_screenshot.upload_failed` | The copy did not arrive. Written by the server when the launcher asked to save an image that never reached storage, and by the launcher itself (below) for everything the server can't see. |
 | `hd_screenshot.deleted` | A copy was deleted. |
+
+Each is a short title; open the row for the description, which says what
+happened and what to check.
 
 A *started* with no *uploaded* after it means the launcher got its slot and
 never completed. The server can't see why — a launcher that can't connect never

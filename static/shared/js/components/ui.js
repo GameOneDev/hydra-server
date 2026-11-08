@@ -224,7 +224,14 @@ function brief(value) {
   return text.length > 28 ? `${text.slice(0, 27)}…` : text;
 }
 
-export function detailPanel(facts, detail) {
+/**
+ * A grid of facts and, under it, the raw detail.
+ *
+ * `description` is longer text about what is being shown — what happened, what
+ * to check — and is given room to wrap, with its line breaks, instead of being
+ * squeezed into one of the facts.
+ */
+export function detailPanel(facts, detail, description) {
   const pairs = (facts ?? []).filter(Boolean);
 
   return h(
@@ -238,6 +245,17 @@ export function detailPanel(facts, detail) {
             h("dt", { text: label }),
             h("dd", { class: mono ? "mono" : "", text: String(value) }),
           ]),
+        )
+      : null,
+    description
+      ? h(
+          "div",
+          { class: "stack", style: { gap: "4px" } },
+          h("span", { class: "muted small", text: "Description" }),
+          h("p", {
+            style: { margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", lineHeight: "1.5" },
+            text: description,
+          }),
         )
       : null,
     detail

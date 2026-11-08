@@ -114,6 +114,22 @@ fn clip(text: &str, max: usize) -> String {
         .to_string()
 }
 
+/// Why the address matters, for whoever is reading a failure: the launcher
+/// does not reuse the address it reached the server on.
+const PUBLIC_URL_WHY: &str = "When a launcher uploads an image, this server tells it where to \
+    send it: HYDRA_SERVER_PUBLIC_URL followed by /storage/\u{2026}. The launcher connects to exactly \
+    that address, not to the one it used to reach this server, so it has to work from the \
+    launcher's own computer. (There, localhost means the launcher itself, not this server.)";
+
+/// `text` cut to `max` characters, with an ellipsis when it was cut.
+fn shorten(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+
+    text.chars().take(max.saturating_sub(1)).collect::<String>() + "\u{2026}"
+}
+
 /// `scheme://host:port` of this server's public address: where the launcher is
 /// told to send the image, without the token in the rest of the URL.
 fn storage_origin(state: &AppState) -> String {
@@ -239,13 +255,19 @@ pub async fn upload_url(
     let mut started = Event::sync(
         "hd_screenshot.upload_started",
         user_id,
-        match &problem {
-            Some(problem) => format!(
-                "Gave out an upload slot for a 1080p screenshot copy, but the launcher cannot reach it: {problem}"
-            ),
-            None => format!("Gave out an upload slot for a 1080p screenshot copy (image goes to {origin})"),
+        if problem.is_some() {
+            "Upload slot given out, but its address can't be reached"
+        } else {
+            "Upload slot given out for a 1080p copy"
         },
     )
+    .description(match &problem {
+        Some(problem) => format!("{problem}\n\n{PUBLIC_URL_WHY}"),
+        None => format!(
+            "The launcher was told to send the image to {origin}/storage/\u{2026}. If no \
+             \"uploaded\" event follows, the image did not arrive."
+        ),
+    })
     .detail(json!({
         "screenshotId": screenshot_id,
         "declaredBytes": length,
@@ -317,8 +339,13 @@ pub async fn save(
                 Event::sync(
                     "hd_screenshot.upload_failed",
                     &user.0.id,
-                    format!("The 1080p screenshot copy was not saved: {reason}"),
+                    "1080p copy not saved: the image never reached storage",
                 )
+                .description(format!(
+                    "The launcher asked to save the copy, but the image is not in storage, so \
+                     the upload to the storage address did not complete. It was told to send it \
+                     to {origin}.\n\n{PUBLIC_URL_WHY}"
+                ))
                 .detail(json!({
                     "screenshotId": screenshot_id,
                     "stage": "upload",
@@ -502,12 +529,20 @@ pub async fn delete(
 
 /// The steps of a copy's upload, in the words the history uses for them. What
 /// the launcher reports names one of these.
-const FAILURE_STAGES: &[(&str, &str)] = &[
-    ("read", "reading the screenshot file"),
-    ("compress", "compressing the screenshot"),
-    ("upload-url", "asking this server for an upload slot"),
-    ("upload", "sending the image to the storage address"),
-    ("save", "attaching the image to the screenshot"),
+const FAILURE_STAGES: &[(&str, &str, &str)] = &[
+    ("read", "reading the file", "reading the screenshot file"),
+    ("compress", "compressing", "compressing the screenshot"),
+    (
+        "upload-url",
+        "asking for a slot",
+        "asking this server for an upload slot",
+    ),
+    (
+        "upload",
+        "sending the image",
+        "sending the image to the storage address",
+    ),
+    ("save", "saving", "attaching the image to the screenshot"),
 ];
 
 /// The most failure reports one account's history takes in an hour. A launcher
@@ -554,9 +589,9 @@ pub async fn report_failure(
         return Err(ApiError::bad_request("invalid screenshot id"));
     }
 
-    let Some((_, doing)) = FAILURE_STAGES
+    let Some((_, short, doing)) = FAILURE_STAGES
         .iter()
-        .find(|(stage, _)| *stage == report.stage)
+        .find(|(stage, _, _)| *stage == report.stage)
     else {
         return Err(ApiError::bad_request("unknown stage"));
     };
@@ -603,7 +638,7 @@ pub async fn report_failure(
             crate::config::public_url_problem(&state.config.public_url, request_host(&headers))
         })
         .flatten()
-        .map(|problem| format!(" {problem}"))
+        .map(|problem| format!("\n\n{problem}\n\n{PUBLIC_URL_WHY}"))
         .unwrap_or_default();
 
     events::record(
@@ -611,8 +646,12 @@ pub async fn report_failure(
         Event::sync(
             "hd_screenshot.upload_failed",
             &user.0.id,
-            format!("The launcher could not upload a 1080p screenshot copy while {doing}: {what}.{outlook}{hint}"),
+            format!("1080p copy failed ({short}): {}", shorten(&what, 60)),
         )
+        .description(format!(
+            "The launcher could not upload a 1080p screenshot copy while {doing}.\n\n\
+             What it reported: {what}.{outlook}{hint}"
+        ))
         .detail(json!({
             "screenshotId": screenshot_id,
             "stage": report.stage,
@@ -1187,6 +1226,14 @@ mod tests {
         .expect("the history")
     }
 
+    /* The longer text behind an event's title, newest event of the kind. */
+    async fn description_of(server: &TestServer, kind: &str) -> String {
+        detail_of(server, kind).await["description"]
+            .as_str()
+            .expect("a description")
+            .to_string()
+    }
+
     async fn detail_of(server: &TestServer, kind: &str) -> Value {
         let detail: String =
             sqlx::query_scalar("SELECT detail FROM events WHERE kind = ? ORDER BY id DESC LIMIT 1")
@@ -1302,9 +1349,20 @@ mod tests {
         assert_eq!(failed.len(), 1);
         assert_eq!(failed[0].1, "warning");
         assert!(
-            failed[0].2.contains(&server.state.config.public_url),
-            "names the address it was to be sent to: {}",
+            failed[0].2.contains("never reached storage"),
+            "{}",
             failed[0].2
+        );
+        assert!(failed[0].2.chars().count() < 80, "a title: {}", failed[0].2);
+
+        let description = description_of(&server, "hd_screenshot.upload_failed").await;
+        assert!(
+            description.contains(&server.state.config.public_url),
+            "names the address it was to be sent to: {description}"
+        );
+        assert!(
+            description.contains("localhost means the launcher itself"),
+            "says why the address matters: {description}"
         );
 
         assert!(
@@ -1375,11 +1433,26 @@ mod tests {
         assert_eq!(started.len(), 1);
         assert_eq!(started[0].0, "hd_screenshot.upload_started");
         assert_eq!(started[0].1, "warning");
-        assert!(started[0].2.contains("cannot reach it"), "{}", started[0].2);
         assert!(
-            started[0].2.contains("HYDRA_SERVER_PUBLIC_URL"),
+            started[0].2.contains("can't be reached"),
             "{}",
             started[0].2
+        );
+        assert!(
+            started[0].2.chars().count() < 80,
+            "a title: {}",
+            started[0].2
+        );
+
+        let description = description_of(&server, "hd_screenshot.upload_started").await;
+        assert!(description.contains("0.0.0.0"), "{description}");
+        assert!(
+            description.contains("HYDRA_SERVER_PUBLIC_URL"),
+            "{description}"
+        );
+        assert!(
+            description.contains("localhost means the launcher itself"),
+            "{description}"
         );
     }
 
@@ -1429,19 +1502,26 @@ mod tests {
         assert_eq!(entry.len(), 1);
         assert_eq!(entry[0].0, "hd_screenshot.upload_failed");
         assert_eq!(entry[0].1, "warning");
+        /* The title is what the list shows: which step, and the error. */
+        assert_eq!(
+            entry[0].2,
+            "1080p copy failed (sending the image): connect ECONNREFUSED 10.0.0.9:8788"
+        );
+
+        let description = description_of(&server, "hd_screenshot.upload_failed").await;
         assert!(
-            entry[0]
-                .2
-                .contains("sending the image to the storage address"),
-            "{}",
-            entry[0].2
+            description.contains("sending the image to the storage address"),
+            "{description}"
         );
         assert!(
-            entry[0].2.contains("connect ECONNREFUSED 10.0.0.9:8788"),
-            "{}",
-            entry[0].2
+            description.contains("What it reported: connect ECONNREFUSED 10.0.0.9:8788."),
+            "{description}"
         );
-        assert!(entry[0].2.contains("It will try again."), "{}", entry[0].2);
+        assert!(description.contains("It will try again."), "{description}");
+        assert!(
+            !description.contains("HYDRA_SERVER_PUBLIC_URL"),
+            "this server's address is not what is wrong here: {description}"
+        );
 
         let detail = detail_of(&server, "hd_screenshot.upload_failed").await;
         assert_eq!(detail["stage"], "upload");
@@ -1467,12 +1547,15 @@ mod tests {
         .await
         .expect("recorded");
 
-        let entry = history(&server).await;
-        assert!(entry[0].2.contains("0.0.0.0"), "{}", entry[0].2);
+        let description = description_of(&server, "hd_screenshot.upload_failed").await;
+        assert!(description.contains("0.0.0.0"), "{description}");
         assert!(
-            entry[0].2.contains("HYDRA_SERVER_PUBLIC_URL"),
-            "{}",
-            entry[0].2
+            description.contains("HYDRA_SERVER_PUBLIC_URL"),
+            "{description}"
+        );
+        assert!(
+            description.contains("localhost means the launcher itself"),
+            "{description}"
         );
 
         /* An answer from the server means it was reachable, so its address is
@@ -1482,11 +1565,10 @@ mod tests {
         report(&server, Some("192.168.1.10:8788"), "shot-2", refused)
             .await
             .expect("recorded");
-        let entry = history(&server).await;
+        let description = description_of(&server, "hd_screenshot.upload_failed").await;
         assert!(
-            !entry[1].2.contains("HYDRA_SERVER_PUBLIC_URL"),
-            "{}",
-            entry[1].2
+            !description.contains("HYDRA_SERVER_PUBLIC_URL"),
+            "{description}"
         );
     }
 
@@ -1517,17 +1599,28 @@ mod tests {
         assert_eq!(message.chars().count(), 300);
         assert!(!message.chars().any(char::is_control));
 
+        /* A long error is cut for the title and whole in the description. */
+        let title: String = sqlx::query_scalar(
+            "SELECT summary FROM events WHERE kind = 'hd_screenshot.upload_failed'
+             ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(&server.state.pool)
+        .await
+        .expect("a title");
+        assert!(title.chars().count() < 100, "{title}");
+        assert!(title.ends_with('\u{2026}'), "{title}");
+        assert!(description_of(&server, "hd_screenshot.upload_failed")
+            .await
+            .contains(&"x".repeat(290)));
+
         /* A report with nothing in it still says something. */
         let mut empty = failure("save", "");
         empty.message = None;
         report(&server, None, "shot-1", empty)
             .await
             .expect("recorded");
-        let entry = history(&server).await;
-        assert!(entry
-            .last()
-            .expect("an entry")
-            .2
+        assert!(description_of(&server, "hd_screenshot.upload_failed")
+            .await
             .contains("no reason was given"));
 
         /* A client in a loop fills the history only so far. */

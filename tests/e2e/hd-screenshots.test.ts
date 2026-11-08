@@ -240,6 +240,7 @@ describe("1080p screenshot copies against a running server", () => {
 interface HistoryEntry {
   kind: string;
   severity: string;
+  /* The title: one line in the panel's list. */
   summary: string;
   user: { id: string } | null;
   sizeBytes: number | null;
@@ -326,10 +327,12 @@ describe(
       assert.equal(failed.length, 1);
       assert.equal(failed[0].severity, "warning");
       assert.match(failed[0].summary, /never reached storage/);
-      assert.ok(
-        failed[0].summary.includes(BASE),
-        `names ${BASE}: ${failed[0].summary}`
-      );
+      assert.ok(failed[0].summary.length < 80, "a title, not a paragraph");
+
+      /* The longer text sits beside the detail, where the panel shows it. */
+      const description = String(failed[0].detail?.description);
+      assert.ok(description.includes(BASE), `names ${BASE}: ${description}`);
+      assert.match(description, /localhost means the launcher itself/);
       assert.equal(failed[0].detail?.reportedBy, "server");
     });
 
@@ -379,9 +382,15 @@ describe(
 
       const [, failed] = entries;
       assert.equal(failed.severity, "warning");
-      assert.match(failed.summary, /sending the image to the storage address/);
-      assert.match(failed.summary, /ECONNREFUSED 10\.0\.0\.9:8788/);
-      assert.match(failed.summary, /It will try again\./);
+      assert.equal(
+        failed.summary,
+        "1080p copy failed (sending the image): connect ECONNREFUSED 10.0.0.9:8788"
+      );
+
+      const description = String(failed.detail?.description);
+      assert.match(description, /sending the image to the storage address/);
+      assert.match(description, /ECONNREFUSED 10\.0\.0\.9:8788/);
+      assert.match(description, /It will try again\./);
       assert.equal(failed.detail?.reportedBy, "launcher");
       assert.equal(failed.detail?.target, BASE);
     });
