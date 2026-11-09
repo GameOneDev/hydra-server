@@ -2181,6 +2181,72 @@ mod tests {
         }
     }
 
+    /// The third request that carries a slug answers to the same rules as the
+    /// other two, so a listing cannot be asked for a key the others would refuse.
+    #[tokio::test]
+    async fn the_snapshot_listing_refuses_what_prepare_and_delete_refuse() {
+        let server = TestServer::start().await;
+
+        for (shop, object_id, slug) in [
+            ("steam", "440", "soh"),
+            ("launchbox", "not-a-number", "soh"),
+            ("launchbox", "1234", ""),
+            ("launchbox", "1234", "has space"),
+            ("launchbox", "1234", "../escape"),
+        ] {
+            let Err(refusal) = list_snapshots(
+                State(server.state.clone()),
+                server.user("alice"),
+                Query(GameQuery {
+                    shop: shop.to_string(),
+                    object_id: object_id.to_string(),
+                    recompilation_slug: Some(slug.to_string()),
+                }),
+            )
+            .await
+            else {
+                panic!("{shop} {object_id} {slug:?} should have been refused");
+            };
+            assert_eq!(refusal.status, StatusCode::BAD_REQUEST);
+        }
+    }
+
+    /// The launcher's saves manager has only the stored key to go on, and asks
+    /// for a port's saves by sending it whole with no slug. That has to keep
+    /// reaching the port's history, never the plain game's, and only the
+    /// sender's own.
+    #[tokio::test]
+    async fn a_port_is_reached_by_its_whole_key_with_no_slug_and_only_by_its_owner() {
+        let server = TestServer::start().await;
+        server.add_user("bob").await;
+        let hash = "a".repeat(64);
+
+        let port = commit_save(&server, a_port_save("1234", Some("soh"), &hash), &hash).await;
+
+        let by_whole_key = listed(&server, a_launchbox_game("1234:soh", None)).await;
+        let by_slug = listed(&server, a_launchbox_game("1234", Some("soh"))).await;
+        assert_eq!(by_whole_key.len(), 1);
+        assert_eq!(by_whole_key[0].id, port);
+        assert_eq!(by_slug.len(), 1, "the same history either way");
+        assert_eq!(by_slug[0].id, port);
+
+        assert!(
+            listed(&server, a_launchbox_game("1234", None))
+                .await
+                .is_empty(),
+            "and the plain game's is a different one"
+        );
+
+        let Json(bobs) = list_snapshots(
+            State(server.state.clone()),
+            server.user("bob"),
+            Query(a_launchbox_game("1234:soh", None)),
+        )
+        .await
+        .expect("a plain request");
+        assert!(bobs.is_empty(), "another account's history is its own");
+    }
+
     #[test]
     fn a_stored_key_round_trips_to_the_wire_form_and_back() {
         for (shop, object_id, slug) in [

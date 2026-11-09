@@ -705,7 +705,10 @@ This server keeps the sharper copy instead. It does not replace anything:
 - **Reach.** Only launchers pointed at this server see the 1080p copy. Everyone
   else sees official's 720p.
 
-Copies count against the owner's quota, are listed under their own area on the
+Copies count against the owner's quota: checked when the upload slot is given out, and
+again when the copy is saved, against the size that actually landed (what does not fit
+is deleted, and a copy that replaces another only pays the difference). They are listed
+under their own area on the
 *Storage* screen, can be purged per user from the panel, and are served from
 `GET /images/screenshots-hd/…` under an unguessable name like the other images.
 Advertised as `screenshots-hd`.
@@ -752,7 +755,7 @@ path in the error.
 `GET /capabilities` (unauthenticated) reports what this build supports:
 
 ```json
-{ "name": "hydra-server", "version": "4.4.0", "features": ["cloud-saves-v2", "cloud-saves-v2-epic", "souvenirs", "..."] }
+{ "name": "hydra-server", "version": "4.4.0", "features": ["cloud-saves-v2", "cloud-saves-v2-epic", "cloud-saves-v2-recompilation", "souvenirs", "screenshots-hd", "..."] }
 ```
 
 The launcher checks this before enabling a feature whose endpoints might not

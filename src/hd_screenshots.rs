@@ -94,8 +94,12 @@ fn key_issued_to(state: &AppState, user_id: &str, image_url: &str) -> Option<Str
     );
     let file_name = image_url.strip_prefix(&prefix)?;
 
+    /* `<name>.uploading` is where a chunked upload accumulates until it is whole,
+    and it is renamed away when it is: a row recorded on it would point at a
+    file that is about to stop existing. */
     let safe = !file_name.is_empty()
         && !file_name.contains("..")
+        && !file_name.ends_with(".uploading")
         && file_name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
@@ -130,14 +134,33 @@ fn shorten(text: &str, max: usize) -> String {
     text.chars().take(max.saturating_sub(1)).collect::<String>() + "\u{2026}"
 }
 
+/// What the copy already attached to this screenshot counts for, in bytes: zero
+/// when there is none. A copy that replaces it only adds the difference.
+async fn counted_for(state: &AppState, user_id: &str, screenshot_id: &str) -> ApiResult<i64> {
+    let counted: Option<i64> = sqlx::query_scalar(
+        "SELECT size_in_bytes FROM hd_screenshots WHERE user_id = ? AND screenshot_id = ?",
+    )
+    .bind(user_id)
+    .bind(screenshot_id)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    Ok(counted.unwrap_or(0))
+}
+
 /// `scheme://host:port` of this server's public address: where the launcher is
 /// told to send the image, without the token in the rest of the URL.
 fn storage_origin(state: &AppState) -> String {
     clip(&state.config.public_url, 200)
 }
 
-fn request_host(headers: &HeaderMap) -> Option<&str> {
-    headers.get(HOST).and_then(|value| value.to_str().ok())
+/// The `Host` the caller used, cut short: it is the caller's to write, and it
+/// ends up in the history.
+fn request_host(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(|host| clip(host, 100))
 }
 
 /// Writes a refused upload to the history, then hands the error back so the
@@ -231,13 +254,18 @@ pub async fn upload_url(
         return Err(refused(&state, user_id, &screenshot_id, &why, error).await);
     }
 
-    if let Err(error) = storage::check_quota(&state, user_id, length).await {
-        let why = if error.status == StatusCode::PAYLOAD_TOO_LARGE {
-            "the account's storage quota is full"
-        } else {
-            "the account's storage quota could not be checked"
-        };
-        return Err(refused(&state, user_id, &screenshot_id, why, error).await);
+    /* A copy that replaces one only adds the difference, so swapping a copy on
+    a nearly full account is not refused for room it is about to give back. */
+    let growth = length - counted_for(&state, user_id, &screenshot_id).await?;
+    if growth > 0 {
+        if let Err(error) = storage::check_quota(&state, user_id, growth).await {
+            let why = if error.status == StatusCode::PAYLOAD_TOO_LARGE {
+                "the account's storage quota is full"
+            } else {
+                "the account's storage quota could not be checked"
+            };
+            return Err(refused(&state, user_id, &screenshot_id, why, error).await);
+        }
     }
 
     /* Flat, uuid-named keys: which screenshot a file belongs to lives in the
@@ -248,8 +276,10 @@ pub async fn upload_url(
     not reachable at it never sees that attempt. So the slot is recorded as
     it is handed out, with where the image is to be sent, and said plainly
     when that address cannot work. */
-    let problem =
-        crate::config::public_url_problem(&state.config.public_url, request_host(&headers));
+    let problem = crate::config::public_url_problem(
+        &state.config.public_url,
+        request_host(&headers).as_deref(),
+    );
     let origin = storage_origin(&state);
 
     let mut started = Event::sync(
@@ -272,9 +302,8 @@ pub async fn upload_url(
         "screenshotId": screenshot_id,
         "declaredBytes": length,
         "storageOrigin": origin,
-        "requestHost": request_host(&headers).map(|host| clip(host, 200)),
-    }))
-    .size(length);
+        "requestHost": request_host(&headers),
+    }));
     if problem.is_some() {
         started = started.warning();
     }
@@ -362,6 +391,33 @@ pub async fn save(
                 .with_extra(json!({ "detail": reason })));
         }
     };
+
+    /* The presign checked the size the launcher *said*, and a PUT to a presigned
+    URL is held to that size but has no row to be counted by until now, so
+    several uploads made before any is saved each fit on their own. What is
+    being recorded is measured here, against what is already counted, and what
+    does not fit is not kept. A copy that replaces one only pays the difference. */
+    let growth = size_in_bytes - counted_for(&state, &user.0.id, &screenshot_id).await?;
+    if growth > 0 {
+        if let Err(error) = storage::check_quota(&state, &user.0.id, growth).await {
+            /* Never the file a live row is already pointing at. */
+            let in_use: Option<String> =
+                sqlx::query_scalar("SELECT storage_key FROM hd_screenshots WHERE storage_key = ?")
+                    .bind(&key)
+                    .fetch_optional(&state.pool)
+                    .await?;
+            if in_use.is_none() {
+                storage::delete_object(&state, &key).await;
+            }
+
+            let why = if error.status == StatusCode::PAYLOAD_TOO_LARGE {
+                "the account's storage quota is full"
+            } else {
+                "the account's storage quota could not be checked"
+            };
+            return Err(refused(&state, &user.0.id, &screenshot_id, why, error).await);
+        }
+    }
 
     /* One file, one screenshot: the unique index would refuse it as a 500. */
     let claimed_elsewhere: Option<String> = sqlx::query_scalar(
@@ -635,7 +691,10 @@ pub async fn report_failure(
     address not being one the launcher can use, and the server can tell. */
     let hint = (report.stage == "upload" && report.status.is_none())
         .then(|| {
-            crate::config::public_url_problem(&state.config.public_url, request_host(&headers))
+            crate::config::public_url_problem(
+                &state.config.public_url,
+                request_host(&headers).as_deref(),
+            )
         })
         .flatten()
         .map(|problem| format!("\n\n{problem}\n\n{PUBLIC_URL_WHY}"))
@@ -1638,5 +1697,156 @@ mod tests {
             .await
             .expect("still answered, so the launcher is not left retrying the report");
         assert_eq!(over["recorded"], false);
+    }
+
+    #[tokio::test]
+    async fn a_copy_that_does_not_fit_when_it_is_saved_is_refused_and_not_kept() {
+        let server = TestServer::start().await;
+        server
+            .limits(
+                "alice",
+                crate::limits::Overrides {
+                    max_bytes_per_user: Some(1_000_000),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        /* Each slot fits on its own, because nothing is counted until a copy is
+        saved: the presign sees an empty account five times. */
+        let mut urls = Vec::new();
+        for n in 0..5 {
+            let url = reserve(&server, "alice", &format!("shot-{n}"), 400_000).await;
+            land(&server, &url, &vec![7u8; 400_000]).await;
+            urls.push(url);
+        }
+
+        attach(&server, "alice", "shot-0", &urls[0], "PUBLIC")
+            .await
+            .expect("400 kB of 1 MB");
+        attach(&server, "alice", "shot-1", &urls[1], "PUBLIC")
+            .await
+            .expect("800 kB of 1 MB");
+
+        let refusal = attach(&server, "alice", "shot-2", &urls[2], "PUBLIC")
+            .await
+            .expect_err("1.2 MB would not fit");
+        assert_eq!(refusal.status, StatusCode::PAYLOAD_TOO_LARGE);
+
+        let key = key_issued_to(&server.state, "alice", &urls[2]).expect("a key");
+        assert!(
+            !storage::storage_path(&server.state, &key).exists(),
+            "what does not fit is not kept on disk"
+        );
+        assert!(find(&server, "alice", "alice", "shot-2").await.is_none());
+        assert!(history(&server)
+            .await
+            .iter()
+            .any(|(kind, _, summary)| kind == "hd_screenshot.upload_refused"
+                && summary.contains("quota is full")));
+
+        let used = storage::used_bytes(&server.state, "alice")
+            .await
+            .expect("used");
+        assert_eq!(
+            used, 800_000,
+            "the account holds what was recorded, no more"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_copy_that_replaces_another_only_pays_the_difference_at_save() {
+        let server = TestServer::start().await;
+        server
+            .limits(
+                "alice",
+                crate::limits::Overrides {
+                    max_bytes_per_user: Some(1_000_000),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let first = reserve(&server, "alice", "shot-0", 900_000).await;
+        land(&server, &first, &vec![1u8; 900_000]).await;
+        attach(&server, "alice", "shot-0", &first, "PUBLIC")
+            .await
+            .expect("900 kB of 1 MB");
+
+        /* The account is nearly full, and this swaps one copy for another of
+        the same size: growth of nothing, so it is not turned away. */
+        let second = reserve(&server, "alice", "shot-0", 900_000).await;
+        land(&server, &second, &vec![2u8; 900_000]).await;
+        attach(&server, "alice", "shot-0", &second, "PUBLIC")
+            .await
+            .expect("a swap is not growth");
+
+        let used = storage::used_bytes(&server.state, "alice")
+            .await
+            .expect("used");
+        assert_eq!(used, 900_000);
+    }
+
+    #[tokio::test]
+    async fn a_chunk_file_in_progress_is_not_an_image_to_attach() {
+        let server = TestServer::start().await;
+        let url = reserve(&server, "alice", "shot-1", 5).await;
+
+        assert!(key_issued_to(&server.state, "alice", &url).is_some());
+        assert!(
+            key_issued_to(&server.state, "alice", &format!("{url}.uploading")).is_none(),
+            "the file a chunked upload accumulates in"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_host_header_is_cut_before_it_reaches_the_history() {
+        let server = TestServer::start().await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "h".repeat(5_000).parse().expect("a host"));
+
+        let _ = upload_url(
+            State(server.state.clone()),
+            server.user("alice"),
+            headers,
+            Path("shot-1".to_string()),
+            Json(UploadUrlRequest {
+                image_ext: "jpg".to_string(),
+                image_length: Some(10),
+            }),
+        )
+        .await
+        .expect("a slot");
+
+        let detail = detail_of(&server, "hd_screenshot.upload_started").await;
+        assert!(
+            detail["requestHost"]
+                .as_str()
+                .expect("text")
+                .chars()
+                .count()
+                <= 100
+        );
+
+        let description = description_of(&server, "hd_screenshot.upload_started").await;
+        assert!(description.len() < 1_500, "{} bytes", description.len());
+    }
+
+    #[tokio::test]
+    async fn a_slot_is_not_counted_as_bytes_moved() {
+        let server = TestServer::start().await;
+        let _ = reserve(&server, "alice", "shot-1", 400_000).await;
+
+        let size: Option<i64> = server
+            .scalar("SELECT size_bytes FROM events WHERE kind = 'hd_screenshot.upload_started'")
+            .await;
+        assert_eq!(size, None, "the dashboard sums this column per day");
+
+        let detail = detail_of(&server, "hd_screenshot.upload_started").await;
+        assert_eq!(
+            detail["declaredBytes"], 400_000,
+            "still said, just not summed"
+        );
     }
 }
