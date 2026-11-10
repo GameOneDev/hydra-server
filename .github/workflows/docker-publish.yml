@@ -14,8 +14,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  docker:
-    runs-on: ubuntu-latest
+  # Each architecture builds on a runner of its own architecture: compiling the
+  # Rust binary for arm64 under QEMU was the slowest part of a release. A job
+  # pushes its image by digest only, with no tag. The merge job tags the
+  # architectures together once both have passed the smoke test, so a tag never
+  # points at an image that has not been started.
+  build:
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+
+    runs-on: ${{ matrix.runner }}
 
     permissions:
       contents: read
@@ -42,8 +55,114 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve image name
+        id: image
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          echo "name=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "pair=${PLATFORM//\//-}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+
+      # The cache is scoped per platform so the two builds do not overwrite each
+      # other's layers.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.image.outputs.name }}
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ steps.image.outputs.pair }}
+          cache-to: type=gha,mode=max,scope=${{ steps.image.outputs.pair }}
+
+      # Pulls back what was just pushed and starts it, on a runner of the
+      # image's own architecture.
+      - name: Smoke test the pushed image
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          expected=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          ref="${IMAGE}@${DIGEST}"
+          echo "${PLATFORM} -> ${DIGEST}"
+
+          cid=$(docker run -d --platform "$PLATFORM" -p 8788:8788 \
+            -e HYDRA_ADMIN_PASSWORD=smoke-test "$ref")
+
+          health=""
+          for _ in $(seq 1 60); do
+            health=$(curl -fsS http://127.0.0.1:8788/health 2>/dev/null) && break
+            health=""
+            sleep 2
+          done
+
+          if [ -z "$health" ]; then
+            echo "::error::${PLATFORM} image never answered on /health"
+            docker logs "$cid" || true
+            docker rm -f "$cid" >/dev/null 2>&1 || true
+            exit 1
+          fi
+
+          echo "/health -> ${health}"
+          reported=$(printf '%s' "$health" | jq -r .version)
+          docker rm -f "$cid" >/dev/null 2>&1 || true
+
+          if [ "$reported" != "$expected" ]; then
+            echo "::error::${PLATFORM} image reports version ${reported}, expected ${expected}"
+            exit 1
+          fi
+
+          echo "${PLATFORM} ok — hydra-server ${reported}"
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ steps.image.outputs.pair }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -64,73 +183,37 @@ jobs:
             type=raw,value=edge,enable={{is_default_branch}}
             type=sha
 
-      - name: Build and push
-        id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # Pulls back what was just pushed and starts it, per architecture.
-      - name: Smoke test the published image
+      - name: Create the multi-arch tags
+        working-directory: ${{ runner.temp }}/digests
         env:
           IMAGE: ${{ steps.image.outputs.name }}
-          DIGEST: ${{ steps.build.outputs.digest }}
+          META_JSON: ${{ steps.meta.outputs.json }}
         run: |
-          expected=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          index=$(docker buildx imagetools inspect --raw "${IMAGE}@${DIGEST}")
+          tags=()
+          while IFS= read -r tag; do
+            tags+=(-t "$tag")
+          done < <(jq -r '.tags[]' <<< "$META_JSON")
 
-          for platform in linux/amd64 linux/arm64; do
-            echo "::group::smoke test ${platform}"
-
-            # Run each platform by its own manifest digest, not the index
-            # digest every platform shares. The image store is keyed by
-            # repo@digest and holds one platform per key, so pulling a second
-            # architecture under the index digest fails with "cannot overwrite
-            # digest" once the first has claimed it.
-            digest=$(printf '%s' "$index" | jq -r --arg p "$platform" '
-              .manifests[]
-              | select(.platform.os + "/" + .platform.architecture == $p)
-              | .digest')
-            if [ -z "$digest" ]; then
-              echo "::error::published image has no ${platform} manifest"
-              exit 1
-            fi
-            ref="${IMAGE}@${digest}"
-            echo "${platform} -> ${digest}"
-
-            cid=$(docker run -d --platform "$platform" -p 8788:8788 \
-              -e HYDRA_ADMIN_PASSWORD=smoke-test "$ref")
-
-            health=""
-            for _ in $(seq 1 60); do
-              health=$(curl -fsS http://127.0.0.1:8788/health 2>/dev/null) && break
-              health=""
-              sleep 2
-            done
-
-            if [ -z "$health" ]; then
-              echo "::error::${platform} image never answered on /health"
-              docker logs "$cid" || true
-              docker rm -f "$cid" >/dev/null 2>&1 || true
-              exit 1
-            fi
-
-            echo "/health -> ${health}"
-            reported=$(printf '%s' "$health" | jq -r .version)
-            docker rm -f "$cid" >/dev/null 2>&1 || true
-            docker rmi "$ref" >/dev/null 2>&1 || true
-
-            if [ "$reported" != "$expected" ]; then
-              echo "::error::${platform} image reports version ${reported}, expected ${expected}"
-              exit 1
-            fi
-
-            echo "${platform} ok — hydra-server ${reported}"
-            echo "::endgroup::"
+          sources=()
+          for digest in *; do
+            sources+=("${IMAGE}@sha256:${digest}")
           done
+
+          docker buildx imagetools create "${tags[@]}" "${sources[@]}"
+
+      - name: Check every tag has both architectures
+        env:
+          META_JSON: ${{ steps.meta.outputs.json }}
+        run: |
+          while IFS= read -r tag; do
+            index=$(docker buildx imagetools inspect --raw "$tag")
+            for platform in linux/amd64 linux/arm64; do
+              if ! jq -e --arg p "$platform" \
+                'any(.manifests[]; .platform.os + "/" + .platform.architecture == $p)' \
+                <<< "$index" >/dev/null; then
+                echo "::error::${tag} has no ${platform} manifest"
+                exit 1
+              fi
+            done
+            echo "${tag}: linux/amd64 and linux/arm64"
+          done < <(jq -r '.tags[]' <<< "$META_JSON")
