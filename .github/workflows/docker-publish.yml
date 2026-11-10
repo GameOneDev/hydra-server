@@ -14,11 +14,6 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Each architecture builds on a runner of its own architecture: compiling the
-  # Rust binary for arm64 under QEMU was the slowest part of a release. A job
-  # pushes its image by digest only, with no tag. The merge job tags the
-  # architectures together once both have passed the smoke test, so a tag never
-  # points at an image that has not been started.
   build:
     strategy:
       matrix:
@@ -72,8 +67,6 @@ jobs:
         with:
           images: ${{ steps.image.outputs.name }}
 
-      # The cache is scoped per platform so the two builds do not overwrite each
-      # other's layers.
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v6
@@ -86,8 +79,6 @@ jobs:
           cache-from: type=gha,scope=${{ steps.image.outputs.pair }}
           cache-to: type=gha,mode=max,scope=${{ steps.image.outputs.pair }}
 
-      # Pulls back what was just pushed and starts it, on a runner of the
-      # image's own architecture.
       - name: Smoke test the pushed image
         env:
           IMAGE: ${{ steps.image.outputs.name }}
