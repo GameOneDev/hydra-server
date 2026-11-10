@@ -70,7 +70,8 @@ const COLUMNS = [
         h(
           "div",
           { class: "stack", style: { minWidth: 0 } },
-          h("span", { class: "truncate", text: row.summary }),
+          /* The whole title on hover: the cell clips it to one line. */
+          h("span", { class: "truncate", title: row.summary, text: row.summary }),
           h("span", { class: "mono muted small", text: row.kind }),
         ),
       ),
@@ -122,7 +123,7 @@ const COLUMNS = [
     /* Everything an event kept that no column is shaped for: file counts,
        failure reasons, how many rows a restore moved. Different keys per
        kind, which is exactly why they share one column. */
-    render: (row) => detailSummary(row.detail),
+    render: (row) => detailSummary(withoutDescription(row.detail).rest),
   },
   {
     key: "severity",
@@ -263,9 +264,25 @@ export default {
   },
 };
 
+/* The description is long and has its own place in the detail view, so the
+   compact "Other" column and the raw detail leave it out. */
+function withoutDescription(detail) {
+  if (!detail || typeof detail !== "object") return { rest: detail, description: null };
+
+  const { description, ...rest } = detail;
+  return {
+    rest: Object.keys(rest).length ? rest : null,
+    description: typeof description === "string" && description ? description : null,
+  };
+}
+
 function details(row) {
+  const { rest, description } = withoutDescription(row.detail);
+
   return detailPanel(
     [
+      /* The title in full: the list clips it. */
+      ["Event", row.summary],
       ["Recorded", fmt.dateTime(row.at)],
       ["Kind", row.kind, true],
       ["Category", row.category],
@@ -276,6 +293,7 @@ function details(row) {
       row.game?.objectId ? ["Game", fmt.gameName(row.game)] : null,
       row.sizeBytes ? ["Size", fmt.bytes(row.sizeBytes)] : null,
     ],
-    row.detail,
+    rest,
+    description,
   );
 }

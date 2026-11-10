@@ -57,7 +57,10 @@ const USER_COUNTS: &str = "
     (SELECT COUNT(*) FROM souvenirs v
       WHERE v.user_id = u.id AND v.status = 'ready' AND v.is_uploaded = 1) AS souvenir_count,
     (SELECT COALESCE(SUM(size_in_bytes), 0) FROM souvenirs v WHERE v.user_id = u.id)
-      AS souvenir_bytes";
+      AS souvenir_bytes,
+    (SELECT COUNT(*) FROM hd_screenshots h WHERE h.user_id = u.id) AS hd_screenshot_count,
+    (SELECT COALESCE(SUM(size_in_bytes), 0) FROM hd_screenshots h WHERE h.user_id = u.id)
+      AS hd_screenshot_bytes";
 
 /// One user, with the limits that actually apply to them.
 ///
@@ -97,6 +100,7 @@ fn user_json(state: &AppState, row: &sqlx::sqlite::SqliteRow, defaults: &Runtime
             "achievementGames": row.get::<i64, _>("achievement_game_count"),
             "artwork": row.get::<i64, _>("artwork_count"),
             "souvenirs": row.get::<i64, _>("souvenir_count"),
+            "hdScreenshots": row.get::<i64, _>("hd_screenshot_count"),
         },
         "playtimeSeconds": row.get::<i64, _>("playtime_seconds"),
         "storage": super::overview::storage_breakdown(
@@ -105,6 +109,7 @@ fn user_json(state: &AppState, row: &sqlx::sqlite::SqliteRow, defaults: &Runtime
             row.get::<i64, _>("emulation_bytes"),
             row.get::<i64, _>("artwork_bytes"),
             row.get::<i64, _>("souvenir_bytes"),
+            row.get::<i64, _>("hd_screenshot_bytes"),
         ),
     })
 }
@@ -565,6 +570,10 @@ async fn purge(
                 crate::souvenirs::purge_for_user(&state, &id).await?;
                 purged.push("souvenirs");
             }
+            "hdScreenshots" => {
+                crate::hd_screenshots::purge_for_user(&state, &id).await?;
+                purged.push("hdScreenshots");
+            }
             "achievements" => {
                 sqlx::query("DELETE FROM game_achievements WHERE user_id = ?")
                     .bind(&id)
@@ -782,6 +791,7 @@ async fn delete_user(
             .flatten();
     let artwork_keys = crate::artwork::storage_keys_for_user(&state, &id).await;
     let souvenir_keys = crate::souvenirs::storage_keys_for_user(&state, &id).await;
+    let hd_screenshot_keys = crate::hd_screenshots::storage_keys_for_user(&state, &id).await;
 
     /* Likes this user left on other people's souvenirs aren't reachable from
     their own rows, so the cascade below doesn't take them. */
@@ -799,6 +809,9 @@ async fn delete_user(
         storage::delete_object(&state, &key).await;
     }
     for key in souvenir_keys {
+        storage::delete_object(&state, &key).await;
+    }
+    for key in hd_screenshot_keys {
         storage::delete_object(&state, &key).await;
     }
     if let Some(key) = banner_key {

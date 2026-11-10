@@ -54,6 +54,61 @@ fn valid_shop(shop: &str) -> bool {
     matches!(shop, "steam" | "epic" | "launchbox")
 }
 
+/// A LaunchBox id: digits only, as long as the launcher's own pattern allows.
+fn is_launchbox_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// What the launcher allows a recompilation's slug to be.
+fn is_recompilation_slug(slug: &str) -> bool {
+    let mut chars = slug.chars();
+
+    slug.len() <= 100
+        && chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// The key a game's saves are stored under.
+///
+/// A recompilation is a PC port of a LaunchBox game, and the two are different
+/// games as far as saves go: the port's files are not the emulator's. Launcher
+/// 4.4.0 keeps them apart by sending the port as its own field — `objectId` is
+/// the LaunchBox id, `recompilationSlug` says which port — and expects them
+/// kept apart here. Ignoring the slug files a port's saves under the plain
+/// game, and a request to delete the port's saves deletes the plain game's.
+///
+/// Stored, the pair is the launcher's own key for a port, `<objectId>:<slug>`:
+/// one column, no migration, and no row from before can collide with it
+/// because no plain LaunchBox id contains a colon. A slug anywhere but on a
+/// LaunchBox game is refused rather than ignored, since ignoring it is the
+/// mistake this exists to avoid.
+fn stored_object_id(shop: &str, object_id: &str, slug: Option<&str>) -> ApiResult<String> {
+    let Some(slug) = slug else {
+        return Ok(object_id.to_string());
+    };
+
+    if shop != "launchbox" || !is_launchbox_id(object_id) || !is_recompilation_slug(slug) {
+        return Err(ApiError::bad_request("invalid recompilation"));
+    }
+
+    Ok(format!("{object_id}:{slug}"))
+}
+
+/// A stored key as the launcher expects to read it back: the LaunchBox id, and
+/// the slug beside it when the game is a recompilation. The inverse of
+/// [`stored_object_id`].
+fn wire_game(shop: &str, stored: &str) -> (String, Option<String>) {
+    if shop == "launchbox" {
+        if let Some((object_id, slug)) = stored.split_once(':') {
+            if is_launchbox_id(object_id) && is_recompilation_slug(slug) {
+                return (object_id.to_string(), Some(slug.to_string()));
+            }
+        }
+    }
+
+    (stored.to_string(), None)
+}
+
 /// A version a commit replaced and the server kept. No sync reads one, which
 /// is why the by-id routes act on these and only these.
 fn is_retained(status: &str) -> bool {
@@ -124,6 +179,9 @@ pub struct SnapshotFileInput {
 pub struct PrepareSnapshotRequest {
     pub shop: String,
     pub object_id: String,
+    /// Set by launcher 4.4.0 for a recompilation; see [`stored_object_id`].
+    #[serde(default)]
+    pub recompilation_slug: Option<String>,
     pub platform: Option<String>,
     pub hostname: Option<String>,
     pub snapshot_hash: String,
@@ -239,6 +297,10 @@ pub struct ManifestSnapshot {
     pub version: i64,
     pub shop: String,
     pub object_id: String,
+    /// Only on a recompilation's manifest. The launcher's validator accepts the
+    /// key there and nowhere else, so a plain game's stays exactly as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recompilation_slug: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -284,6 +346,9 @@ pub struct DownloadUrlFile {
 pub struct GameQuery {
     pub shop: String,
     pub object_id: String,
+    /// Set by launcher 4.4.0 for a recompilation; see [`stored_object_id`].
+    #[serde(default)]
+    pub recompilation_slug: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -314,6 +379,11 @@ pub async fn prepare_snapshot(
     if payload.object_id.is_empty() {
         return Err(ApiError::bad_request("missing objectId"));
     }
+    let object_id = stored_object_id(
+        &payload.shop,
+        &payload.object_id,
+        payload.recompilation_slug.as_deref(),
+    )?;
     if !is_sha256(&payload.snapshot_hash) {
         return Err(ApiError::bad_request("invalid snapshotHash"));
     }
@@ -359,7 +429,7 @@ pub async fn prepare_snapshot(
     )
     .bind(user_id)
     .bind(&payload.shop)
-    .bind(&payload.object_id)
+    .bind(&object_id)
     .fetch_optional(&state.pool)
     .await?;
 
@@ -374,7 +444,7 @@ pub async fn prepare_snapshot(
                 user_id,
                 "Upload refused — the cloud save had already moved on",
             )
-            .game(&payload.shop, &payload.object_id)
+            .game(&payload.shop, &object_id)
             .detail(serde_json::json!({
                 "baseVersion": payload.base_version,
                 "currentVersion": current_version,
@@ -446,7 +516,7 @@ pub async fn prepare_snapshot(
     .bind(&snapshot_id)
     .bind(user_id)
     .bind(&payload.shop)
-    .bind(&payload.object_id)
+    .bind(&object_id)
     .bind(current_version + 1)
     .bind(&payload.snapshot_hash)
     .bind(payload.files.len() as i64)
@@ -765,6 +835,11 @@ pub async fn list_snapshots(
     if !valid_shop(&query.shop) {
         return Err(ApiError::bad_request("unsupported shop"));
     }
+    let object_id = stored_object_id(
+        &query.shop,
+        &query.object_id,
+        query.recompilation_slug.as_deref(),
+    )?;
 
     let rows = sqlx::query(
         "SELECT * FROM cloud_save_snapshots
@@ -773,7 +848,7 @@ pub async fn list_snapshots(
     )
     .bind(&user.0.id)
     .bind(&query.shop)
-    .bind(&query.object_id)
+    .bind(&object_id)
     .fetch_all(&state.pool)
     .await?;
 
@@ -801,6 +876,13 @@ pub async fn delete_snapshots(
     if !valid_shop(&query.shop) {
         return Err(ApiError::bad_request("unsupported shop"));
     }
+    /* Before anything is selected: a delete that dropped the slug would take
+    the plain game's snapshots along with the port's. */
+    let object_id = stored_object_id(
+        &query.shop,
+        &query.object_id,
+        query.recompilation_slug.as_deref(),
+    )?;
 
     let user_id = &user.0.id;
 
@@ -810,7 +892,7 @@ pub async fn delete_snapshots(
     )
     .bind(user_id)
     .bind(&query.shop)
-    .bind(&query.object_id)
+    .bind(&object_id)
     .fetch_all(&state.pool)
     .await?;
 
@@ -830,7 +912,7 @@ pub async fn delete_snapshots(
     tracing::info!(
         "cloud save v2: deleted {}:{} for {user_id}",
         query.shop,
-        query.object_id
+        object_id
     );
 
     crate::events::record(
@@ -840,7 +922,7 @@ pub async fn delete_snapshots(
             user_id,
             "Deleted a cloud save from the launcher",
         )
-        .game(&query.shop, &query.object_id)
+        .game(&query.shop, &object_id)
         .detail(serde_json::json!({ "snapshots": ids.len() })),
     )
     .await;
@@ -1069,12 +1151,16 @@ pub async fn restore_manifest(
     let variants: Vec<Value> =
         serde_json::from_str(&snapshot.get::<String, _>("variants")).unwrap_or_default();
 
+    let shop: String = snapshot.get("shop");
+    let (object_id, recompilation_slug) = wire_game(&shop, &snapshot.get::<String, _>("object_id"));
+
     Ok(Json(RestoreManifestResponse {
         snapshot: ManifestSnapshot {
             id: snapshot.get("id"),
             version: snapshot.get("version"),
-            shop: snapshot.get("shop"),
-            object_id: snapshot.get("object_id"),
+            shop,
+            object_id,
+            recompilation_slug,
         },
         custom_path_raw_paths,
         variants,
@@ -1512,6 +1598,7 @@ mod tests {
                 version: 2,
                 shop: "steam".into(),
                 object_id: "440".into(),
+                recompilation_slug: None,
             },
             custom_path_raw_paths: vec![],
             variants: vec![json!({ "variantId": "a".repeat(64), "kind": "default" })],
@@ -1696,6 +1783,7 @@ mod tests {
             Query(GameQuery {
                 shop: "steam".to_string(),
                 object_id: "440".to_string(),
+                recompilation_slug: None,
             }),
         )
         .await
@@ -1763,6 +1851,7 @@ mod tests {
         PrepareSnapshotRequest {
             shop: "epic".to_string(),
             object_id: "fn:4fe75bbc5a674f4f9b356b5c90567da5".to_string(),
+            recompilation_slug: None,
             platform: Some("win32".to_string()),
             hostname: Some("desk".to_string()),
             snapshot_hash: "c".repeat(64),
@@ -1789,6 +1878,7 @@ mod tests {
         GameQuery {
             shop: "epic".to_string(),
             object_id: "fn:4fe75bbc5a674f4f9b356b5c90567da5".to_string(),
+            recompilation_slug: None,
         }
     }
 
@@ -1857,6 +1947,327 @@ mod tests {
         )
         .await
         .expect("an Epic save can be deleted");
+    }
+
+    // -----------------------------------------------------------------------
+    // Recompilations (launcher 4.4.0)
+    // -----------------------------------------------------------------------
+
+    /// What launcher 4.4.0 uploads for a PC port of a LaunchBox game: the
+    /// LaunchBox id as `objectId`, and which port as `recompilationSlug`.
+    fn a_port_save(object_id: &str, slug: Option<&str>, hash: &str) -> PrepareSnapshotRequest {
+        PrepareSnapshotRequest {
+            shop: "launchbox".to_string(),
+            object_id: object_id.to_string(),
+            recompilation_slug: slug.map(str::to_string),
+            ..an_epic_save(hash)
+        }
+    }
+
+    fn a_launchbox_game(object_id: &str, slug: Option<&str>) -> GameQuery {
+        GameQuery {
+            shop: "launchbox".to_string(),
+            object_id: object_id.to_string(),
+            recompilation_slug: slug.map(str::to_string),
+        }
+    }
+
+    /// Prepares, lands the one 3-byte blob, and commits.
+    async fn commit_save(
+        server: &TestServer,
+        request: PrepareSnapshotRequest,
+        hash: &str,
+    ) -> String {
+        let prepared = prepare_snapshot(
+            State(server.state.clone()),
+            server.user("alice"),
+            Json(request),
+        )
+        .await
+        .expect("the save is accepted")
+        .0;
+
+        let path =
+            storage::storage_path(&server.state, &storage::cloud_save_blob_key("alice", hash));
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("the blob dir");
+        std::fs::write(&path, b"abc").expect("the blob");
+
+        commit_snapshot(
+            State(server.state.clone()),
+            server.user("alice"),
+            Json(CommitSnapshotRequest {
+                pending_snapshot_id: prepared.pending_snapshot_id,
+            }),
+        )
+        .await
+        .expect("the commit")
+        .0
+        .snapshot_id
+    }
+
+    async fn listed(server: &TestServer, game: GameQuery) -> Vec<RemoteSnapshotSummary> {
+        list_snapshots(
+            State(server.state.clone()),
+            server.user("alice"),
+            Query(game),
+        )
+        .await
+        .expect("the listing")
+        .0
+    }
+
+    /// The reason this exists: the emulator's saves for a LaunchBox game and a
+    /// PC port of it are different files, and neither may overwrite or answer
+    /// for the other.
+    #[tokio::test]
+    async fn a_recompilation_is_kept_apart_from_the_game_it_ports() {
+        let server = TestServer::start().await;
+        let plain_hash = "e".repeat(64);
+        let port_hash = "f".repeat(64);
+
+        let plain = commit_save(&server, a_port_save("1234", None, &plain_hash), &plain_hash).await;
+        let port = commit_save(
+            &server,
+            a_port_save("1234", Some("soh"), &port_hash),
+            &port_hash,
+        )
+        .await;
+
+        assert_ne!(plain, port, "two saves, not one overwritten by the other");
+
+        let plain_list = listed(&server, a_launchbox_game("1234", None)).await;
+        assert_eq!(plain_list.len(), 1);
+        assert_eq!(plain_list[0].id, plain);
+        assert_eq!(
+            plain_list[0].version, 1,
+            "the port did not bump its version"
+        );
+
+        let port_list = listed(&server, a_launchbox_game("1234", Some("soh"))).await;
+        assert_eq!(port_list.len(), 1);
+        assert_eq!(port_list[0].id, port);
+        assert_eq!(port_list[0].version, 1);
+
+        /* Another port of the same game is a third, separate save. */
+        assert!(listed(&server, a_launchbox_game("1234", Some("other")))
+            .await
+            .is_empty());
+    }
+
+    /// Deleting a port's cloud saves must leave the emulator's alone. This is
+    /// the harm of a server that ignores the slug.
+    #[tokio::test]
+    async fn deleting_a_recompilations_saves_leaves_the_plain_games() {
+        let server = TestServer::start().await;
+        let plain_hash = "e".repeat(64);
+        let port_hash = "f".repeat(64);
+        commit_save(&server, a_port_save("1234", None, &plain_hash), &plain_hash).await;
+        commit_save(
+            &server,
+            a_port_save("1234", Some("soh"), &port_hash),
+            &port_hash,
+        )
+        .await;
+
+        delete_snapshots(
+            State(server.state.clone()),
+            server.user("alice"),
+            Query(a_launchbox_game("1234", Some("soh"))),
+        )
+        .await
+        .expect("the port's saves are deleted");
+
+        assert!(listed(&server, a_launchbox_game("1234", Some("soh")))
+            .await
+            .is_empty());
+        assert_eq!(
+            listed(&server, a_launchbox_game("1234", None)).await.len(),
+            1,
+            "the emulator's save is still there"
+        );
+    }
+
+    /// The launcher reassembles the port's id from these two fields, and its
+    /// validator accepts the slug on the manifest's snapshot and nowhere else.
+    #[tokio::test]
+    async fn the_manifest_hands_the_slug_back_beside_the_launchbox_id() {
+        let server = TestServer::start().await;
+        let plain_hash = "e".repeat(64);
+        let port_hash = "f".repeat(64);
+        let plain = commit_save(&server, a_port_save("1234", None, &plain_hash), &plain_hash).await;
+        let port = commit_save(
+            &server,
+            a_port_save("1234", Some("soh"), &port_hash),
+            &port_hash,
+        )
+        .await;
+
+        let manifest_of = |id: String| {
+            let state = server.state.clone();
+            let user = server.user("alice");
+            async move {
+                serde_json::to_value(
+                    restore_manifest(State(state), user, Query(SnapshotQuery { snapshot_id: id }))
+                        .await
+                        .expect("the manifest")
+                        .0,
+                )
+                .expect("serialisable")
+            }
+        };
+
+        let port_snapshot = manifest_of(port).await["snapshot"].clone();
+        assert_eq!(port_snapshot["shop"], "launchbox");
+        assert_eq!(port_snapshot["objectId"], "1234", "the LaunchBox id alone");
+        assert_eq!(port_snapshot["recompilationSlug"], "soh");
+        assert_eq!(
+            keys(&port_snapshot),
+            vec!["id", "objectId", "recompilationSlug", "shop", "version"]
+        );
+
+        /* A plain game's manifest is byte-for-byte what it always was. */
+        let plain_snapshot = manifest_of(plain).await["snapshot"].clone();
+        assert_eq!(
+            keys(&plain_snapshot),
+            vec!["id", "objectId", "shop", "version"]
+        );
+        assert_eq!(plain_snapshot["objectId"], "1234");
+    }
+
+    /// A slug on anything but a LaunchBox game is a malformed request, and is
+    /// refused: ignoring it is the mistake this whole change exists to avoid.
+    #[tokio::test]
+    async fn a_slug_that_cannot_belong_to_the_game_is_refused() {
+        let server = TestServer::start().await;
+        let hash = "e".repeat(64);
+
+        for (shop, object_id, slug) in [
+            ("steam", "440", "soh"),
+            ("epic", "fn:4fe75bbc5a674f4f9b356b5c90567da5", "soh"),
+            ("launchbox", "not-a-number", "soh"),
+            ("launchbox", "1234:soh", "soh"),
+            ("launchbox", "1234", ""),
+            ("launchbox", "1234", "has space"),
+            ("launchbox", "1234", "../escape"),
+            ("launchbox", "1234", "-leading-dash"),
+            ("launchbox", "123456789012345678901", "soh"),
+        ] {
+            let mut request = a_port_save(object_id, Some(slug), &hash);
+            request.shop = shop.to_string();
+
+            let Err(refusal) = prepare_snapshot(
+                State(server.state.clone()),
+                server.user("alice"),
+                Json(request),
+            )
+            .await
+            else {
+                panic!("{shop} {object_id} {slug:?} should have been refused");
+            };
+            assert_eq!(refusal.status, StatusCode::BAD_REQUEST);
+
+            let refusal = delete_snapshots(
+                State(server.state.clone()),
+                server.user("alice"),
+                Query(GameQuery {
+                    shop: shop.to_string(),
+                    object_id: object_id.to_string(),
+                    recompilation_slug: Some(slug.to_string()),
+                }),
+            )
+            .await
+            .expect_err("a delete must not run on a key it could not read");
+            assert_eq!(refusal.status, StatusCode::BAD_REQUEST);
+        }
+    }
+
+    /// The third request that carries a slug answers to the same rules as the
+    /// other two, so a listing cannot be asked for a key the others would refuse.
+    #[tokio::test]
+    async fn the_snapshot_listing_refuses_what_prepare_and_delete_refuse() {
+        let server = TestServer::start().await;
+
+        for (shop, object_id, slug) in [
+            ("steam", "440", "soh"),
+            ("launchbox", "not-a-number", "soh"),
+            ("launchbox", "1234", ""),
+            ("launchbox", "1234", "has space"),
+            ("launchbox", "1234", "../escape"),
+        ] {
+            let Err(refusal) = list_snapshots(
+                State(server.state.clone()),
+                server.user("alice"),
+                Query(GameQuery {
+                    shop: shop.to_string(),
+                    object_id: object_id.to_string(),
+                    recompilation_slug: Some(slug.to_string()),
+                }),
+            )
+            .await
+            else {
+                panic!("{shop} {object_id} {slug:?} should have been refused");
+            };
+            assert_eq!(refusal.status, StatusCode::BAD_REQUEST);
+        }
+    }
+
+    /// The launcher's saves manager has only the stored key to go on, and asks
+    /// for a port's saves by sending it whole with no slug. That has to keep
+    /// reaching the port's history, never the plain game's, and only the
+    /// sender's own.
+    #[tokio::test]
+    async fn a_port_is_reached_by_its_whole_key_with_no_slug_and_only_by_its_owner() {
+        let server = TestServer::start().await;
+        server.add_user("bob").await;
+        let hash = "a".repeat(64);
+
+        let port = commit_save(&server, a_port_save("1234", Some("soh"), &hash), &hash).await;
+
+        let by_whole_key = listed(&server, a_launchbox_game("1234:soh", None)).await;
+        let by_slug = listed(&server, a_launchbox_game("1234", Some("soh"))).await;
+        assert_eq!(by_whole_key.len(), 1);
+        assert_eq!(by_whole_key[0].id, port);
+        assert_eq!(by_slug.len(), 1, "the same history either way");
+        assert_eq!(by_slug[0].id, port);
+
+        assert!(
+            listed(&server, a_launchbox_game("1234", None))
+                .await
+                .is_empty(),
+            "and the plain game's is a different one"
+        );
+
+        let Json(bobs) = list_snapshots(
+            State(server.state.clone()),
+            server.user("bob"),
+            Query(a_launchbox_game("1234:soh", None)),
+        )
+        .await
+        .expect("a plain request");
+        assert!(bobs.is_empty(), "another account's history is its own");
+    }
+
+    #[test]
+    fn a_stored_key_round_trips_to_the_wire_form_and_back() {
+        for (shop, object_id, slug) in [
+            ("launchbox", "1234", Some("soh")),
+            ("launchbox", "1", Some("2ship.v2_beta-1")),
+            ("launchbox", "1234", None),
+            ("steam", "440", None),
+            ("epic", "fn:4fe75bbc5a674f4f9b356b5c90567da5", None),
+        ] {
+            let stored = stored_object_id(shop, object_id, slug).expect("a valid key");
+            let (back, back_slug) = wire_game(shop, &stored);
+
+            assert_eq!((back.as_str(), back_slug.as_deref()), (object_id, slug));
+        }
+
+        /* An Epic id has a colon too, and is nobody's recompilation. */
+        assert_eq!(
+            wire_game("epic", "123:soh"),
+            ("123:soh".to_string(), None),
+            "only LaunchBox games have ports"
+        );
     }
 
     /// The launcher prepares again only when a failed commit carries one of

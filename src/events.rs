@@ -68,6 +68,10 @@ impl Severity {
     }
 }
 
+/// The longest title an event keeps. The history lists one event per line, so a
+/// title is a label: anything that needs a sentence goes in the description.
+const MAX_SUMMARY_CHARS: usize = 140;
+
 /// One thing that happened. Built fluently at the call site so recording an
 /// event stays a single readable statement.
 pub struct Event {
@@ -78,7 +82,11 @@ pub struct Event {
     pub user_id: Option<String>,
     pub shop: Option<String>,
     pub object_id: Option<String>,
+    /// The title: short enough for one line of the history.
     pub summary: String,
+    /// Longer text for whoever opens the event to find out more. Kept with the
+    /// detail, under `description`.
+    pub description: Option<String>,
     pub detail: Option<Value>,
     pub ip: Option<String>,
     pub size_bytes: Option<i64>,
@@ -95,6 +103,7 @@ impl Event {
             shop: None,
             object_id: None,
             summary: summary.into(),
+            description: None,
             detail: None,
             ip: None,
             size_bytes: None,
@@ -142,6 +151,13 @@ impl Event {
         self
     }
 
+    /// The sentence or two behind the title: what happened, why it matters,
+    /// what to check. Shown in the event's detail view, not in the list.
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
     pub fn size(mut self, bytes: i64) -> Self {
         self.size_bytes = Some(bytes);
         self
@@ -163,11 +179,50 @@ impl Event {
     }
 }
 
+impl Event {
+    /// Puts the event in the shape it is stored and sent in: a title of one
+    /// line, and the description beside the rest of the detail.
+    ///
+    /// A title that runs past the limit is cut and its full text becomes the
+    /// description, unless the caller wrote one, so no event can fill the list
+    /// with a sentence however it was written.
+    fn normalize(&mut self) {
+        if self.summary.chars().count() > MAX_SUMMARY_CHARS {
+            let full = std::mem::take(&mut self.summary);
+            self.summary =
+                full.chars().take(MAX_SUMMARY_CHARS - 1).collect::<String>() + "\u{2026}";
+            self.description.get_or_insert(full);
+        }
+
+        let Some(description) = self.description.take() else {
+            return;
+        };
+
+        match self.detail.take() {
+            Some(Value::Object(mut detail)) => {
+                detail.insert("description".to_string(), Value::String(description));
+                self.detail = Some(Value::Object(detail));
+            }
+            /* Not what events carry, but not a reason to lose either. */
+            Some(other) => {
+                self.detail = Some(serde_json::json!({
+                    "description": description,
+                    "detail": other,
+                }));
+            }
+            None => {
+                self.detail = Some(serde_json::json!({ "description": description }));
+            }
+        }
+    }
+}
+
 /// Writes the event and hands it to the webhook dispatcher.
 ///
 /// Never fails the caller: a request that did its job must not report an
 /// error because the log did not.
-pub async fn record(state: &AppState, event: Event) {
+pub async fn record(state: &AppState, mut event: Event) {
+    event.normalize();
     let at = Utc::now().to_rfc3339();
 
     let detail = event.detail.as_ref().map(|detail| detail.to_string());
@@ -253,3 +308,124 @@ pub const EVENT_JOINS: &str = "
 pub const EVENT_COLUMNS: &str = "
     e.*, u.display_name, u.username, u.profile_image_url,
     g.name AS game_name, g.cover_url AS game_cover_url";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::TestServer;
+    use serde_json::json;
+
+    async fn stored(server: &TestServer) -> (String, Value) {
+        let (summary, detail): (String, Option<String>) =
+            sqlx::query_as("SELECT summary, detail FROM events ORDER BY id DESC LIMIT 1")
+                .fetch_one(&server.state.pool)
+                .await
+                .expect("an event");
+
+        (
+            summary,
+            serde_json::from_str(&detail.expect("detail")).expect("json"),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_description_is_kept_with_the_detail_and_the_title_is_left_alone() {
+        let server = TestServer::start().await;
+
+        record(
+            &server.state,
+            Event::sync("test.described", "alice", "Short title")
+                .description("The longer story, for whoever opens the event.")
+                .detail(json!({ "stage": "upload" })),
+        )
+        .await;
+
+        let (summary, detail) = stored(&server).await;
+        assert_eq!(summary, "Short title");
+        assert_eq!(
+            detail["description"],
+            "The longer story, for whoever opens the event."
+        );
+        assert_eq!(detail["stage"], "upload", "what was there stays");
+    }
+
+    #[tokio::test]
+    async fn a_description_alone_still_has_somewhere_to_live() {
+        let server = TestServer::start().await;
+
+        record(
+            &server.state,
+            Event::sync("test.described", "alice", "Short title").description("More."),
+        )
+        .await;
+
+        assert_eq!(stored(&server).await.1, json!({ "description": "More." }));
+    }
+
+    #[tokio::test]
+    async fn a_title_that_runs_on_is_cut_and_its_text_kept_as_the_description() {
+        let server = TestServer::start().await;
+        let long = format!("{} end", "word ".repeat(80));
+
+        record(
+            &server.state,
+            Event::sync("test.long", "alice", long.clone()).detail(json!({ "kept": true })),
+        )
+        .await;
+
+        let (summary, detail) = stored(&server).await;
+        assert_eq!(summary.chars().count(), MAX_SUMMARY_CHARS);
+        assert!(summary.ends_with('\u{2026}'), "{summary}");
+        assert_eq!(detail["description"], long.as_str(), "nothing is lost");
+        assert_eq!(detail["kept"], true);
+    }
+
+    #[tokio::test]
+    async fn a_description_the_caller_wrote_is_not_replaced_by_a_cut_title() {
+        let server = TestServer::start().await;
+
+        record(
+            &server.state,
+            Event::sync("test.long", "alice", "x".repeat(500)).description("Written by hand."),
+        )
+        .await;
+
+        let (summary, detail) = stored(&server).await;
+        assert_eq!(summary.chars().count(), MAX_SUMMARY_CHARS);
+        assert_eq!(detail["description"], "Written by hand.");
+    }
+
+    #[tokio::test]
+    async fn a_title_that_fits_is_stored_as_it_was_written() {
+        let server = TestServer::start().await;
+        let exactly = "y".repeat(MAX_SUMMARY_CHARS);
+
+        record(
+            &server.state,
+            Event::sync("test.fits", "alice", exactly.clone()),
+        )
+        .await;
+
+        let (summary, detail): (String, Option<String>) =
+            sqlx::query_as("SELECT summary, detail FROM events ORDER BY id DESC LIMIT 1")
+                .fetch_one(&server.state.pool)
+                .await
+                .expect("an event");
+        assert_eq!(summary, exactly);
+        assert_eq!(detail, None);
+    }
+
+    #[test]
+    fn a_detail_that_is_not_an_object_is_wrapped_rather_than_lost() {
+        let mut event = Event::sync("test.odd", "alice", "Title")
+            .description("Words.")
+            .detail(json!([1, 2]));
+
+        event.normalize();
+
+        assert_eq!(
+            event.detail,
+            Some(json!({ "description": "Words.", "detail": [1, 2] }))
+        );
+    }
+}

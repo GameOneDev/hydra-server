@@ -44,6 +44,11 @@ so run it by hand when touching `src/cloud_saves.rs` or `src/storage.rs`.
 Start from an empty `HYDRA_SERVER_DATA_DIR`: the first test uploads at
 `baseVersion: 0`, which only holds when the game has no snapshot yet.
 
+`hd-screenshots.test.ts` runs the same way, from `src/main/services/screenshots/`.
+Its second half reads the admin panel's history, so start the server with
+`HYDRA_ADMIN_PASSWORD=...` and pass the same value as
+`HYDRA_E2E_ADMIN_PASSWORD`; without it those checks are skipped.
+
 `cloud-save-state-metadata.test.ts` runs the same way, against the same server
 (it uses its own game and user). It checks that an emulator save state's
 `stateMetadata` survives the round trip — needed from launcher 4.1.6, whose
@@ -63,3 +68,71 @@ validators reject any key they don't expect on the files they read back.
 - an upload whose bytes don't match the declared SHA-256 is refused
 - committing without uploading fails
 - deleting a save garbage collects its blobs
+
+## HD screenshot copies
+
+`hd-screenshots.test.ts` checks the 1080p screenshot copies the same way, against
+the same running server (steps 1 and 2 above). It runs the launcher's own
+`uploadHdCopy` for the upload and its own `collectHdScreenshotRefs` and
+`applyHdScreenshotCopies` for the display side, so it fails if either stops
+agreeing with this server about paths, field names or response shapes. Copy it
+next to those modules:
+
+```bash
+cp tests/e2e/hd-screenshots.test.ts \
+  ../hydra/src/main/services/screenshots/__e2e.test.ts
+cd ../hydra
+node --import ./scripts/register-ts-node.mjs \
+  --test src/main/services/screenshots/__e2e.test.ts
+rm src/main/services/screenshots/__e2e.test.ts
+```
+
+Only the network calls are written out in the test, and they must stay the ones
+`screenshot-hd-copies.ts` makes. It uses its own users and screenshot ids, so
+the data directory need not be empty.
+
+What it covers:
+
+- the `screenshots-hd` capability the launcher gates on is advertised
+- an upload by the launcher's uploader is accepted, and the exact bytes come
+  back from the public image URL
+- a listing has the copy swapped in for another member, and a screenshot with no
+  copy keeps official's image
+- one member cannot be handed another member's copy of the same screenshot id
+- a `PRIVATE` copy is only handed to its owner
+- a screenshot with no copy answers `404` to a visibility change and `200` to a
+  delete, which is what the launcher relies on to mirror every change
+- an unauthenticated caller is refused
+- deleting removes the copy and its file
+
+## Recompilation cloud saves
+
+`cloud-save-recompilation.test.ts` checks Cloud Save V2 for recompilations (launcher
+4.4.0), against the same running server. A recompilation is a PC port of a
+LaunchBox game, and its saves must stay apart from the emulator's: the launcher
+sends the port as `shop=launchbox` with the LaunchBox id as `objectId` and the
+port as a separate `recompilationSlug`. The test uses the launcher's own payload
+builder, list query, delete URL and strict manifest validator, so it fails if the
+launcher and the server stop agreeing on how a port is told apart. Copy it into
+the launcher's cloud-save directory, as for the Cloud Save V2 test:
+
+```bash
+cp tests/e2e/cloud-save-recompilation.test.ts \
+  ../hydra/src/main/services/cloud-save/__e2e.test.ts
+cd ../hydra
+node --import ./scripts/register-ts-node.mjs \
+  --test src/main/services/cloud-save/__e2e.test.ts
+rm src/main/services/cloud-save/__e2e.test.ts
+```
+
+It uses its own user, so the data directory need not be empty. What it covers:
+
+- the payload the launcher builds carries the LaunchBox id and the slug, not the
+  composite key
+- the server advertises every capability the launcher requires before it syncs a
+  port (`cloud-saves-v2-recompilation`)
+- a port and the game it ports each commit a first version, neither moving the
+  other, and each listing returns only its own save
+- the restore manifest hands the slug back, the launcher's strict validator
+  accepts it and rebuilds the port's id, and a plain game's manifest is unchanged
+- deleting a port's saves with the launcher's own URL leaves the emulator's

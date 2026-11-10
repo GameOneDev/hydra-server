@@ -13,6 +13,7 @@ mod emulation;
 mod error;
 mod events;
 mod games;
+mod hd_screenshots;
 mod hidden_games;
 mod images;
 mod jobs;
@@ -65,7 +66,16 @@ async fn main() {
 
     let config = Config::from_env();
 
-    std::fs::create_dir_all(config.storage_dir()).expect("failed to create storage dir");
+    if let Err(err) = storage::ensure_layout(&config.storage_dir()) {
+        panic!("failed to prepare the storage folder: {err}. Check that the data directory is writable by the user the server runs as");
+    }
+
+    /* Every upload and image link is built from this address. Said once at
+    startup because nothing later can: a launcher that cannot connect to it
+    never produces a request for the server to log. */
+    if let Some(problem) = config::public_url_problem(&config.public_url, None) {
+        tracing::warn!("HYDRA_SERVER_PUBLIC_URL: {problem}");
+    }
 
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
@@ -256,6 +266,27 @@ fn router(_state: AppState) -> Router<AppState> {
             "/profile/cloud-saves/snapshot-download-urls",
             get(cloud_saves::snapshot_download_urls),
         )
+        /* 1080p copies of screenshots, attached to official Hydra's screenshot
+        ids. The launcher routes this whole prefix here; the static `lookup`
+        segment wins over the parameterised ones, same as artwork above. */
+        .route(
+            "/profile/hd-screenshots/lookup",
+            post(hd_screenshots::lookup),
+        )
+        .route(
+            "/profile/hd-screenshots/{screenshot_id}/upload-url",
+            post(hd_screenshots::upload_url),
+        )
+        .route(
+            "/profile/hd-screenshots/{screenshot_id}/failure",
+            post(hd_screenshots::report_failure),
+        )
+        .route(
+            "/profile/hd-screenshots/{screenshot_id}",
+            put(hd_screenshots::save)
+                .patch(hd_screenshots::set_visibility)
+                .delete(hd_screenshots::delete),
+        )
         .route("/profile/games/achievements", put(achievements::sync))
         .route(
             "/profile/games/achievements/{id}",
@@ -379,6 +410,7 @@ async fn capabilities() -> Json<serde_json::Value> {
         "features": [
             "cloud-saves-v2",
             "cloud-saves-v2-epic",
+            "cloud-saves-v2-recompilation",
             "user-portal",
             "cloud-saves-legacy",
             "emulation-saves",
@@ -391,6 +423,7 @@ async fn capabilities() -> Json<serde_json::Value> {
             "souvenirs",
             "hidden-games",
             "achievements-combined",
+            "screenshots-hd",
         ],
     }))
 }

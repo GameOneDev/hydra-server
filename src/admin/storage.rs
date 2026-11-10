@@ -68,6 +68,7 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
         ("emulationSaves", "Emulation saves", "emulation-saves"),
         ("artwork", "Custom images", "images/artwork"),
         ("souvenirs", "Achievement souvenirs", "images/souvenirs"),
+        ("screenshotsHd", "HD screenshots", "images/screenshots-hd"),
         ("banners", "Profile banners", "images/banners"),
         ("avatars", "Profile avatars", "images/avatars"),
     ] {
@@ -95,7 +96,10 @@ async fn overview(State(state): State<AppState>, _admin: AdminSession) -> ApiRes
            FROM game_artwork WHERE storage_key IS NOT NULL
          UNION ALL
          SELECT 'souvenirs', COUNT(*), COALESCE(SUM(size_in_bytes), 0)
-           FROM souvenirs WHERE is_uploaded = 1",
+           FROM souvenirs WHERE is_uploaded = 1
+         UNION ALL
+         SELECT 'screenshotsHd', COUNT(*), COALESCE(SUM(size_in_bytes), 0)
+           FROM hd_screenshots",
     )
     .fetch_all(&state.pool)
     .await?;
@@ -263,6 +267,17 @@ async fn integrity(State(state): State<AppState>, _admin: AdminSession) -> ApiRe
         known.insert(key.clone());
         if tokio::fs::metadata(root.join(&key)).await.is_err() {
             missing.push(finding("souvenir", key, json!({})));
+        }
+    }
+
+    let hd_screenshot_keys: Vec<String> =
+        sqlx::query_scalar("SELECT storage_key FROM hd_screenshots")
+            .fetch_all(&state.pool)
+            .await?;
+    for key in hd_screenshot_keys {
+        known.insert(key.clone());
+        if tokio::fs::metadata(root.join(&key)).await.is_err() {
+            missing.push(finding("hdScreenshot", key, json!({})));
         }
     }
 

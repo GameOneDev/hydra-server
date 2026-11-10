@@ -91,7 +91,9 @@ fn body_for(format: &str, state: &AppState, event: &Event, at: &str) -> Value {
     let text = format!("{icon} **{}** — {}", event.kind, event.summary);
 
     match format {
-        "discord" => json!({ "content": text }),
+        /* The text carries whatever a launcher put in an event's title, so it
+        must not be able to ping anyone: no mention in it is allowed to notify. */
+        "discord" => json!({ "content": text, "allowed_mentions": { "parse": [] } }),
         "slack" => json!({ "text": text }),
         _ => payload(state, event, at),
     }
@@ -327,5 +329,23 @@ mod tests {
             sign("secret", "{}"),
             "sha256=77325902caca812dc259733aacd046b73817372c777b8d95b402647474516e13"
         );
+    }
+
+    #[tokio::test]
+    async fn a_discord_message_cannot_ping_anyone_whatever_the_title_says() {
+        let server = crate::testing::TestServer::start().await;
+        let event = Event::sync(
+            "hd_screenshot.upload_refused",
+            "alice",
+            "Refused: \"@everyone\"",
+        );
+
+        let body = body_for("discord", &server.state, &event, "now");
+
+        assert_eq!(body["allowed_mentions"]["parse"], json!([]));
+        assert!(body["content"]
+            .as_str()
+            .expect("text")
+            .contains("@everyone"));
     }
 }

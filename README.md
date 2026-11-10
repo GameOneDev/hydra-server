@@ -18,6 +18,8 @@ and download sources browsing all work exactly as before.
 | Emulation saves — PS1/PS2 memory cards, PSP savedata, GameCube/Wii | **this server** |
 | Achievement sync across devices | **this server** |
 | Achievement souvenirs — screenshots on the profile | **this server** |
+| Screenshots (launcher 4.3.0+) — the screenshot itself, likes, comments | Official Hydra |
+| Screenshots — a 1080p copy for accounts without a subscription (see [HD screenshots](#hd-screenshots)) | **this server** |
 | Download source list sync across devices | **this server** |
 | Profile banner image hosting | **this server** (URL saved to the official profile) |
 | Custom game images (covers, icons, logos, banners) | **this server** |
@@ -77,12 +79,12 @@ subscription needed.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `HYDRA_SERVER_BIND` | `0.0.0.0:8788` | Listen address |
-| `HYDRA_SERVER_PUBLIC_URL` | `http://<bind>` | URL clients reach the server on — **must** be set when behind a reverse proxy, since upload/download URLs are built from it |
+| `HYDRA_SERVER_PUBLIC_URL` | `http://<bind>` | URL clients reach the server on — **must** be set when behind a reverse proxy, or whenever the bind address is `0.0.0.0`, since upload/download URLs are built from it and the launcher connects to exactly what it is given. The server warns at startup when it can't work |
 | `HYDRA_SERVER_DATA_DIR` | `./data` | SQLite database + stored save files |
 | `HYDRA_OFFICIAL_API_URL` | `https://hydra-api-us-east-1.losbroxas.org` | Official API used to validate launcher tokens. If token validation fails with your launcher build, set this to the same API URL the launcher was built with (`MAIN_VITE_API_URL`) |
 | `HYDRA_ADMIN_PASSWORD` | *(empty)* | Password for `/admin`. Panel is disabled while empty |
 | `HYDRA_SERVER_SECRET` | auto-generated | Secret signing storage URLs and admin sessions; persisted to `<data dir>/.secret` when auto-generated |
-| `HYDRA_MAX_BYTES_PER_USER` | `0` (unlimited) | Per-user storage quota in bytes — counts save backups, Cloud Save V2 blobs (once per distinct file), emulation saves, custom game artwork and achievement souvenirs. Profile banners and avatars are excluded: each is capped at 30 MB and replaces the file it supersedes, so they can't grow. Checked when an upload is authorized, against the size the launcher declares |
+| `HYDRA_MAX_BYTES_PER_USER` | `0` (unlimited) | Per-user storage quota in bytes — counts save backups, Cloud Save V2 blobs (once per distinct file), emulation saves, custom game artwork, achievement souvenirs and HD screenshot copies. Profile banners and avatars are excluded: each is capped at 30 MB and replaces the file it supersedes, so they can't grow. Checked when an upload is authorized, against the size the launcher declares |
 | `HYDRA_BACKUPS_PER_GAME_LIMIT` | `100` | Max save backups per game per user |
 | `HYDRA_AUTO_DELETE_SAVES` | `true` | Delete a save the launcher replaces — the previous Cloud Save V2 version of a game, the previous save in an emulator slot. `false` keeps the older version instead: out of the launcher's way, still on the owner's quota, and deleted only by hand. Uploads that never finished are swept either way |
 | `HYDRA_ALLOWED_USERS` | *(empty = everyone)* | Comma-separated official user ids or usernames allowed to use this server |
@@ -394,6 +396,14 @@ To record something new in the log, build an `events::Event` and hand it to
 `events::record`; the History screen, the audit trail and every webhook pick it
 up with no further wiring.
 
+An event has a **title** (`summary`) and, optionally, a **description**. The
+title is one line of the History list, so keep it short; anything that needs a
+sentence (what happened, why, what to check) goes in `.description(...)`, which
+is kept in the event's detail under `description` and shown in the detail view
+you get by opening the row. A title past 140 characters is cut, and its full
+text becomes the description, so a long one is never lost. In the list the title
+is clipped to a line and its full text is the row's tooltip.
+
 ## API surface
 
 Implements the endpoints the launcher routes to a self-hosted cloud server:
@@ -443,6 +453,11 @@ Implements the endpoints the launcher routes to a self-hosted cloud server:
   the account-level setting the launcher mirrors here
 - `GET /users/{userId}/games/achievements?shop=&objectId=` — the souvenir
   thumbnail for each unlock, for the achievement list
+- `POST /profile/hd-screenshots/{screenshotId}/upload-url`,
+  `POST /profile/hd-screenshots/{screenshotId}/failure`,
+  `PUT|PATCH|DELETE /profile/hd-screenshots/{screenshotId}`,
+  `POST /profile/hd-screenshots/lookup` — 1080p copies of official Hydra's
+  screenshots (see [HD screenshots](#hd-screenshots))
 - `PUT|GET /storage/{token}` — S3-style presigned upload/download URLs
   (signed, short-lived, streamed to/from disk)
 - `GET /health`
@@ -490,6 +505,19 @@ Notable behaviour:
   off on servers that don't — they refuse the shop. Epic's own cloud saves
   (through Legendary) and Epic achievements never come here; they go to Epic
   and the official API.
+- **Recompilations (4.4.0).** A recompilation is a PC port of a LaunchBox game
+  (Ship of Harkinian for Ocarina of Time, say), and its saves are not the
+  emulator's. The launcher sends `shop=launchbox` with the LaunchBox id as
+  `objectId` and the port as a separate `recompilationSlug`, on prepare, on the
+  snapshot listing and on delete, and expects the manifest's `snapshot` to hand
+  the slug back beside the id. A server that ignored the slug would file the
+  port's saves under the plain game and, worse, delete the emulator's saves
+  when the port's are deleted, so this one keeps them apart. Stored, the pair
+  is the launcher's own key for a port, `<objectId>:<slug>`; no plain LaunchBox
+  id contains a colon, so existing saves are untouched. A slug on anything but
+  a LaunchBox game, or a malformed one, is refused with `400` rather than
+  ignored. The server advertises `cloud-saves-v2-recompilation`, and the
+  launcher leaves recompilation saves off on servers that don't.
 - **Re-preparing a commit.** A commit whose pending snapshot was swept, or
   whose blobs never all arrived, answers with
   `game/cloud-save-pending-snapshot-not-found` or `…-incomplete` in `code`,
@@ -589,8 +617,12 @@ This server rebuilds it from three things:
 
 - **Which games go together.** The official profile tells the launcher which
   Steam app and Epic item are one title (`canonicalId`), and the launcher
-  passes that on through `PUT /profile/game-links`. A game linked to nothing
-  answers `404`, and the launcher shows its own list as before.
+  passes that on through `PUT /profile/game-links`. A game linked to nothing,
+  or to no second store, answers `200` with an empty list (`canonicalId: null`,
+  `achievements: []`), and the launcher shows its own list as before. It is
+  deliberately not a `404`: launcher 4.3.0 treats any 4xx except `401` as the
+  server failing and stops asking about that game for 1, then 5, then 30
+  minutes — which is nearly every game, since most are on one store only.
 - **Which achievements are the same one.** Matched by display name, ignoring
   case and punctuation, in order: the second "Chapter Complete" on Steam pairs
   with the second one on Epic. Official Hydra has its own mapping; this is the
@@ -603,12 +635,127 @@ This server rebuilds it from three things:
 
 Advertised as `achievements-combined`.
 
+### Launcher 4.3.0
+
+4.3.0 needs nothing from this server to keep working: the endpoint set the
+launcher sends here is the same as 4.2.0's, the achievement sync payload is
+unchanged, and so is the Cloud Save V2 wire format. Most of what it adds runs
+on official Hydra, on paths this server doesn't serve, so the launcher never
+routes it here:
+
+- **Screenshots** — capture, upload (`/presigned-urls/screenshot`,
+  `/profile/screenshots/…`), the profile tab, likes, comments and moderation.
+  All of it stays on official Hydra, which keeps the 720p screenshot. This
+  server only adds a sharper copy for accounts without a subscription — see
+  [HD screenshots](#hd-screenshots). Not to be confused with achievement
+  souvenirs, which are stored here.
+- **Global leaderboards** (`/leaderboards/…`) and their notifications.
+- **Achievement sets** and the redesigned achievement list, which read the
+  official catalogue.
+
+The one behaviour that changed on this side is the combined Steam/Epic view
+above: it answers `200` with an empty list where it used to answer `404`.
+
+### Launcher 4.4.0
+
+4.4.0 changes one thing this server has to answer: Cloud Save V2 for
+recompilations, described under [Cloud Save V2](#cloud-save-v2) above. The rest
+of what it adds runs on official Hydra, on paths this server doesn't serve:
+
+- **Recompilations** themselves — the catalogue (`/games/launchbox/…/recompilations/…`),
+  installing a port, and the ROM sources. Only their cloud saves come here.
+- **Missions, trails and progress** (`/profile/missions`, `/profile/trails`,
+  `/profile/progress`) and their claims.
+- **Chat** conversations and official Hydra messages (`/profile/chats`,
+  `/profile/official-messages`).
+- **Screenshots** — capture and sharing changes, failure notifications and the
+  option to hide community screenshots. The upload path and the screenshot shape
+  are unchanged, so [HD screenshots](#hd-screenshots) work as before.
+
+The achievement sync, souvenir, artwork, download-source, hidden-game, playtime
+and banner calls are all unchanged.
+
+### HD screenshots
+
+Launcher 4.3.0 uploads screenshots to official Hydra, at 1280×720 for an
+account without a subscription and 1920×1080 for a subscriber. The 1080p tier
+is part of Hydra Cloud, so an account that keeps its storage here instead can't
+get it there.
+
+This server keeps the sharper copy instead. It does not replace anything:
+
+- **Upload.** After the 720p screenshot is on official Hydra, the launcher
+  uploads a 1080p copy here, attached to the official screenshot's id. It is
+  best-effort and never delays or fails the official upload.
+- **Display.** When the launcher shows a screenshot it asks this server which
+  of the listed ones have a copy, and uses the 1080p image where there is one
+  and official's image where there is not. A subscriber's screenshot, a friend
+  on another server, or an upload that never got here all fall back quietly.
+- **Only the uploader writes.** A copy is keyed by its owner and the official
+  screenshot id, and a lookup names both, so one member cannot plant a picture
+  under another member's screenshot.
+- **Official's decisions still apply.** The launcher only swaps in a copy for a
+  screenshot official actually returned an image for, and never for one it
+  blocked, so a copy can't reveal what official withheld. Deleting the
+  screenshot on official Hydra deletes its copy here.
+- **Visibility follows the screenshot.** The copy records the screenshot's
+  visibility and the launcher mirrors changes to it. A `PRIVATE` copy is handed
+  only to its owner; `FRIENDS` reads as "members of this server", as for
+  souvenirs, because the official friend graph isn't visible from here.
+- **Reach.** Only launchers pointed at this server see the 1080p copy. Everyone
+  else sees official's 720p.
+
+Copies count against the owner's quota: checked when the upload slot is given out, and
+again when the copy is saved, against the size that actually landed (what does not fit
+is deleted, and a copy that replaces another only pays the difference). They are listed
+under their own area on the
+*Storage* screen, can be purged per user from the panel, and are served from
+`GET /images/screenshots-hd/…` under an unguessable name like the other images.
+Advertised as `screenshots-hd`.
+
+#### When a copy does not arrive
+
+The panel's **Events** screen records every step, under the `hd_screenshot.`
+family (filter by it, or by user):
+
+| Event | When |
+| --- | --- |
+| `hd_screenshot.upload_started` | A launcher was given a slot to upload to. A *warning* when the address it was told to use can't work (see below). |
+| `hd_screenshot.uploaded` | The copy was saved: size, dimensions, visibility. |
+| `hd_screenshot.upload_refused` | The slot was refused — unsupported format, no size, too large, quota full — with the reason in plain words. |
+| `hd_screenshot.upload_failed` | The copy did not arrive. Written by the server when the launcher asked to save an image that never reached storage, and by the launcher itself (below) for everything the server can't see. |
+| `hd_screenshot.deleted` | A copy was deleted. |
+
+Each is a short title; open the row for the description, which says what
+happened and what to check.
+
+A *started* with no *uploaded* after it means the launcher got its slot and
+never completed. The server can't see why — a launcher that can't connect never
+makes a request — so the launcher says so: `POST
+/profile/hd-screenshots/{screenshotId}/failure` takes the step it stopped at
+(`read`, `compress`, `upload-url`, `upload` or `save`), the error and the
+address it was sending to, and records it as an `upload_failed` event. It is
+best-effort, bounded to 120 reports per account per hour, and never carries the
+signed upload path. A server without it answers 404 and the launcher carries on.
+
+A common cause of an upload that never connects is
+`HYDRA_SERVER_PUBLIC_URL`: every upload address is built from it, so it has to
+be one the launcher's machine can reach. Left unset it defaults to the bind
+address (`http://0.0.0.0:8788`), which no client can connect to. The server says
+so at startup (`HYDRA_SERVER_PUBLIC_URL: …`) and again in the event above.
+
+On start the server creates every storage folder (`cloud-saves`, `artifacts`,
+`emulation-saves`, and `images/` with `artwork`, `avatars`, `banners`,
+`screenshots-hd`, `souvenirs`) so the layout is there before the first file of
+each kind lands, and a data directory it can't write to fails at start with the
+path in the error.
+
 ### Capabilities
 
 `GET /capabilities` (unauthenticated) reports what this build supports:
 
 ```json
-{ "name": "hydra-server", "version": "4.2.0", "features": ["cloud-saves-v2", "cloud-saves-v2-epic", "souvenirs", "..."] }
+{ "name": "hydra-server", "version": "4.4.0", "features": ["cloud-saves-v2", "cloud-saves-v2-epic", "cloud-saves-v2-recompilation", "souvenirs", "screenshots-hd", "..."] }
 ```
 
 The launcher checks this before enabling a feature whose endpoints might not

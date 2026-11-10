@@ -72,6 +72,9 @@ async fn overview(State(state): State<AppState>, portal: PortalSession) -> ApiRe
               WHERE v.user_id = ?1 AND v.status = 'ready' AND v.is_uploaded = 1) AS souvenirs,
             (SELECT COALESCE(SUM(size_in_bytes), 0) FROM souvenirs v WHERE v.user_id = ?1)
               AS souvenir_bytes,
+            (SELECT COUNT(*) FROM hd_screenshots h WHERE h.user_id = ?1) AS hd_screenshots,
+            (SELECT COALESCE(SUM(size_in_bytes), 0) FROM hd_screenshots h WHERE h.user_id = ?1)
+              AS hd_screenshot_bytes,
             (SELECT launcher_version FROM users u WHERE u.id = ?1) AS launcher_version",
     )
     .bind(&portal.user_id)
@@ -116,6 +119,7 @@ async fn overview(State(state): State<AppState>, portal: PortalSession) -> ApiRe
             "achievementGames": row.get::<i64, _>("achievement_games"),
             "artwork": row.get::<i64, _>("artwork"),
             "souvenirs": row.get::<i64, _>("souvenirs"),
+            "hdScreenshots": row.get::<i64, _>("hd_screenshots"),
         },
         "playtimeSeconds": row.get::<i64, _>("playtime_seconds"),
         "launcherVersion": row.get::<Option<String>, _>("launcher_version"),
@@ -125,6 +129,7 @@ async fn overview(State(state): State<AppState>, portal: PortalSession) -> ApiRe
             { "key": "emulationSaves", "label": "Emulation saves", "bytes": row.get::<i64, _>("emulation_bytes") },
             { "key": "artwork", "label": "Custom images", "bytes": row.get::<i64, _>("artwork_bytes") },
             { "key": "souvenirs", "label": "Souvenirs", "bytes": row.get::<i64, _>("souvenir_bytes") },
+            { "key": "hdScreenshots", "label": "HD screenshots", "bytes": row.get::<i64, _>("hd_screenshot_bytes") },
         ],
         "devices": devices.iter().map(|row| json!({
             "hostname": row.get::<Option<String>, _>("hostname"),
